@@ -1,0 +1,3 @@
+ALTER TABLE grades DROP CONSTRAINT IF EXISTS chk_grade_status;
+ALTER TABLE grades DROP COLUMN IF EXISTS status;
+ALTER TABLE grades DROP COLUMN IF EXISTS approved_by_parent;

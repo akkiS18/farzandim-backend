@@ -1,0 +1,1 @@
+ALTER TABLE student_parents ADD COLUMN IF NOT EXISTS relation_type VARCHAR(50) NOT NULL DEFAULT 'ota';

@@ -1,0 +1,177 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Role {
+  id    Int    @id @default(autoincrement())
+  name  String @unique // ADMIN, MAIN_TEACHER, SUBJECT_TEACHER, PARENT, STUDENT
+  users User[]
+
+  @@map("roles")
+}
+
+model User {
+  id            Int     @id @default(autoincrement())
+  email         String? @unique
+  phone         String  @unique
+  password_hash String
+  first_name    String
+  last_name     String
+  middle_name   String?
+  role_id       Int
+  role          Role    @relation(fields: [role_id], references: [id])
+
+  // Soft Delete fields
+  is_deleted Boolean   @default(false)
+  deleted_at DateTime?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // 1:1 relation to Student profile if the user is a student
+  student UserStudent?
+
+  // Parent profile references (many-to-many relationship helper)
+  parent_students StudentParent[]
+
+  // Teacher relationships
+  class_teachers ClassTeacher[]
+  graded_grades  Grade[]
+
+  // Audit Logs
+  audit_logs AuditLog[]
+
+  @@map("users")
+}
+
+model UserStudent {
+  id         Int             @id @default(autoincrement())
+  user_id    Int             @unique
+  user       User            @relation(fields: [user_id], references: [id])
+  class_id   Int
+  class      Class           @relation(fields: [class_id], references: [id])
+  is_deleted Boolean         @default(false)
+  deleted_at DateTime?
+  parents    StudentParent[]
+  grades     Grade[]
+  codes      ParentAccessCode[]
+
+  @@map("students")
+}
+
+// Explicit many-to-many mapping for Student and Parent
+model StudentParent {
+  student_id    Int
+  parent_id     Int
+  relation_type String @default("ota")
+
+  student UserStudent @relation(fields: [student_id], references: [id])
+  parent  User        @relation(fields: [parent_id], references: [id])
+
+  @@id([student_id, parent_id])
+  @@map("student_parents")
+}
+
+model Class {
+  id         Int           @id @default(autoincrement())
+  name       String        @unique // e.g. "5-A", "11-B"
+  is_deleted Boolean       @default(false)
+  deleted_at DateTime?
+  students   UserStudent[]
+  teachers   ClassTeacher[]
+
+  @@map("classes")
+}
+
+model Subject {
+  id         Int            @id @default(autoincrement())
+  name       String         @unique // e.g. "Matematika", "Fizika"
+  is_deleted Boolean        @default(false)
+  deleted_at DateTime?
+  teachers   ClassTeacher[]
+  grades     Grade[]
+
+  @@map("subjects")
+}
+
+model ClassTeacher {
+  id              Int     @id @default(autoincrement())
+  class_id        Int
+  subject_id      Int
+  teacher_id      Int
+  is_main_teacher Boolean @default(false)
+  is_deleted      Boolean @default(false)
+  deleted_at      DateTime?
+  class           Class   @relation(fields: [class_id], references: [id])
+  subject         Subject @relation(fields: [subject_id], references: [id])
+  teacher         User    @relation(fields: [teacher_id], references: [id])
+
+  @@unique([class_id, subject_id, teacher_id])
+  @@map("class_teachers")
+}
+
+model Grade {
+  id            Int         @id @default(autoincrement())
+  student_id    Int
+  subject_id    Int
+  teacher_id    Int
+  value         String
+  numeric_value Decimal?    @db.Decimal(5, 2)
+  grade_date    DateTime
+  is_deleted    Boolean     @default(false)
+  deleted_at    DateTime?
+  created_at    DateTime    @default(now())
+  updated_at    DateTime    @updatedAt
+  student       UserStudent @relation(fields: [student_id], references: [id])
+  subject       Subject     @relation(fields: [subject_id], references: [id])
+  teacher       User        @relation(fields: [teacher_id], references: [id])
+
+  @@map("grades")
+}
+
+model GradingSystem {
+  id         Int      @id @default(autoincrement())
+  name       String   @unique
+  type       String
+  min_value  Decimal? @db.Decimal(5, 2)
+  max_value  Decimal? @db.Decimal(5, 2)
+  options    Json?
+  is_active  Boolean  @default(false)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@map("grading_systems")
+}
+
+model ParentAccessCode {
+  id           Int         @id @default(autoincrement())
+  student_id   Int
+  parent_phone String
+  code         String      @unique
+  is_used      Boolean     @default(false)
+  created_at   DateTime    @default(now())
+  expires_at   DateTime
+  student      UserStudent @relation(fields: [student_id], references: [id])
+
+  @@map("parent_access_codes")
+}
+
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  user_id    Int?
+  action     String
+  table_name String
+  record_id  String
+  old_values Json?
+  new_values Json?
+  ip_address String?
+  user_agent String?
+  created_at DateTime @default(now())
+  user       User?    @relation(fields: [user_id], references: [id])
+
+  @@map("audit_logs")
+}

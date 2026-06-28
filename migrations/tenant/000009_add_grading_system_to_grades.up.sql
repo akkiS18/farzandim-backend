@@ -1,0 +1,1 @@
+ALTER TABLE grades ADD COLUMN grading_system_id INT REFERENCES grading_systems(id); UPDATE grades SET grading_system_id = (SELECT id FROM grading_systems WHERE is_active = true LIMIT 1) WHERE grading_system_id IS NULL;

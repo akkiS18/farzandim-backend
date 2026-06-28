@@ -1,0 +1,34 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model School {
+  id                   String    @id @default(uuid()) @db.Uuid
+  name                 String    @unique
+  db_connection_string String
+  is_deleted           Boolean   @default(false)
+  deleted_at           DateTime? @db.Timestamp
+  created_at           DateTime  @default(now()) @db.Timestamp
+  updated_at           DateTime  @updatedAt @db.Timestamp
+
+  @@map("schools")
+}
+
+model SuperAdmin {
+  id            String    @id @default(uuid()) @db.Uuid
+  email         String?   @unique
+  phone         String    @unique
+  password_hash String
+  first_name    String
+  last_name     String
+  is_deleted    Boolean   @default(false)
+  deleted_at    DateTime? @db.Timestamp
+  created_at    DateTime  @default(now()) @db.Timestamp
+  updated_at    DateTime  @updatedAt @db.Timestamp
+
+  @@map("super_admins")
+}

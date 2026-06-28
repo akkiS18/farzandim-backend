@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS class_schedule_exceptions_class_id_date_lesson_number_key;
+DROP TABLE IF EXISTS class_schedule_exceptions;

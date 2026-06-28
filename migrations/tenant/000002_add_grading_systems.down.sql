@@ -1,0 +1,4 @@
+ALTER TABLE grades DROP COLUMN IF EXISTS numeric_value;
+ALTER TABLE grades ALTER COLUMN value TYPE INTEGER USING value::INTEGER;
+
+DROP TABLE IF EXISTS grading_systems;
