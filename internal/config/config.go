@@ -8,20 +8,22 @@ import (
 )
 
 type Config struct {
-	Port         string
-	CentralDBURL string
-	PGRootURL    string // Administrative connection to run CREATE DATABASE
-	JWTSecret    string
+	Port                string
+	CentralDBURL        string
+	PGRootURL           string // Administrative connection to run CREATE DATABASE
+	JWTSecret           string
+	AllowedOriginDomain string // Production domain e.g. farzandim.uz
 }
 
 func LoadConfig() *Config {
 	// Load .env if present
 	_ = godotenv.Load()
 
-	port := getEnv("PORT", "8080")
+	port := getEnv("PORT", "6560")
 	centralDBURL := getEnv("CENTRAL_DB_URL", "")
 	pgRootURL := getEnv("PG_ROOT_URL", "")
 	jwtSecret := getEnv("JWT_SECRET", "super-secret-key")
+	allowedOriginDomain := getEnv("ALLOWED_ORIGIN_DOMAIN", "")
 
 	if centralDBURL == "" {
 		log.Println("WARNING: CENTRAL_DB_URL is not set")
@@ -31,10 +33,11 @@ func LoadConfig() *Config {
 	}
 
 	return &Config{
-		Port:         port,
-		CentralDBURL: centralDBURL,
-		PGRootURL:    pgRootURL,
-		JWTSecret:    jwtSecret,
+		Port:                port,
+		CentralDBURL:        centralDBURL,
+		PGRootURL:           pgRootURL,
+		JWTSecret:           jwtSecret,
+		AllowedOriginDomain: allowedOriginDomain,
 	}
 }
 

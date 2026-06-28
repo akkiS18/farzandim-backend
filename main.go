@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"strings"
 
 	"github.com/farzandim/backend/internal/config"
 	"github.com/farzandim/backend/internal/db"
@@ -41,10 +42,26 @@ func main() {
 	// Register CORS middleware
 	r.Use(func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
-		if origin == "http://localhost:6500" || origin == "http://localhost:6501" {
+		allowed := false
+
+		// Allow localhost for development
+		if origin == "http://localhost:6500" || origin == "http://localhost:6501" ||
+			origin == "http://localhost:3000" || origin == "http://localhost:3001" {
+			allowed = true
+		}
+
+		// Allow production domain and all subdomains (*.farzandim.uz)
+		productionDomain := cfg.AllowedOriginDomain
+		if productionDomain != "" {
+			if origin == "https://"+productionDomain ||
+				origin == "http://"+productionDomain ||
+				strings.HasSuffix(origin, "."+productionDomain) {
+				allowed = true
+			}
+		}
+
+		if allowed {
 			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
-		} else {
-			c.Writer.Header().Set("Access-Control-Allow-Origin", "http://localhost:6500")
 		}
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-School-ID")
