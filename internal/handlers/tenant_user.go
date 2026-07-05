@@ -24,8 +24,6 @@ type CreateStudentRequest struct {
 	FirstName  string  `json:"first_name" binding:"required"`
 	LastName   string  `json:"last_name" binding:"required"`
 	MiddleName *string `json:"middle_name"`
-	Phone      *string `json:"phone"`
-	Password   string  `json:"password" binding:"required"`
 	Email      *string `json:"email"`
 }
 
@@ -115,7 +113,8 @@ func (h *TenantUserHandler) CreateClassStudent(c *gin.Context) {
 	}
 
 	// Hash password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	passText := "STUDENT_NO_LOGIN_ACCESS_RANDOM_PASS_" + time.Now().Format("20060102150405.000")
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(passText), bcrypt.DefaultCost)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encrypt password"})
 		return
@@ -132,19 +131,11 @@ func (h *TenantUserHandler) CreateClassStudent(c *gin.Context) {
 	var userID int
 	insertUserQuery := `
 		INSERT INTO users (first_name, last_name, middle_name, phone, email, password_hash, role_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		VALUES ($1, $2, $3, NULL, $4, $5, $6)
 		RETURNING id`
-	err = tx.QueryRow(insertUserQuery, req.FirstName, req.LastName, req.MiddleName, req.Phone, req.Email, string(hashedPassword), studentRoleID).Scan(&userID)
+	err = tx.QueryRow(insertUserQuery, req.FirstName, req.LastName, req.MiddleName, req.Email, string(hashedPassword), studentRoleID).Scan(&userID)
 	if err != nil {
-		if strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "users_phone_key") {
-			phone := ""
-			if req.Phone != nil {
-				phone = *req.Phone
-			}
-			c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("Telefon raqam '%s' allaqachon ro'yxatdan o'tgan", phone)})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write user profile", "details": err.Error()})
-		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write user profile", "details": err.Error()})
 		return
 	}
 
@@ -165,7 +156,7 @@ func (h *TenantUserHandler) CreateClassStudent(c *gin.Context) {
 		FirstName:  req.FirstName,
 		LastName:   req.LastName,
 		MiddleName: req.MiddleName,
-		Phone:      req.Phone,
+		Phone:      nil,
 		Email:      req.Email,
 		RoleID:     studentRoleID,
 		IsDeleted:  false,

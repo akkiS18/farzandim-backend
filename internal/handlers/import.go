@@ -297,9 +297,7 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 		"ism":      -1,
 		"familiya": -1,
 		"sharif":   -1,
-		"telefon":  -1,
 		"sinf":     -1,
-		"parol":    -1,
 	}
 
 	for i, hCell := range headers {
@@ -341,9 +339,7 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 		ism := getCell(row, "ism")
 		familiya := getCell(row, "familiya")
 		sharif := getCell(row, "sharif")
-		telefon := getCell(row, "telefon")
 		sinfName := getCell(row, "sinf")
-		parol := getCell(row, "parol")
 
 		rowNum := rIdx + 1
 
@@ -354,9 +350,8 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 			continue
 		}
 
-		if parol == "" {
-			parol = "password123" // default password
-		}
+		// Generate random password
+		parol := "STUDENT_NO_LOGIN_ACCESS_RANDOM_PASS_" + time.Now().Format("20060102150405.000")
 
 		// Begin transaction for current row
 		tx, err := tenantDB.Begin()
@@ -409,24 +404,15 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 		if sharif != "" {
 			middleNamePtr = &sharif
 		}
-		var phonePtr *string
-		if telefon != "" {
-			phonePtr = &telefon
-		}
 
 		insertUserQuery := `
 			INSERT INTO users (first_name, last_name, middle_name, phone, password_hash, role_id)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			VALUES ($1, $2, $3, NULL, $4, $5)
 			RETURNING id`
-		err = tx.QueryRow(insertUserQuery, ism, familiya, middleNamePtr, phonePtr, string(hashedPassword), studentRoleID).Scan(&userID)
+		err = tx.QueryRow(insertUserQuery, ism, familiya, middleNamePtr, string(hashedPassword), studentRoleID).Scan(&userID)
 		if err != nil {
 			tx.Rollback()
-			// Handle duplicate phone number specifically
-			if strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "users_phone_key") {
-				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Telefon raqam '%s' allaqachon ro'yxatdan o'tgan", telefon)})
-			} else {
-				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Foydalanuvchini yaratib bo'lmadi: %v", err)})
-			}
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Foydalanuvchini yaratib bo'lmadi: %v", err)})
 			failedCount++
 			continue
 		}
@@ -451,7 +437,7 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 			FirstName:  ism,
 			LastName:   familiya,
 			MiddleName: middleNamePtr,
-			Phone:      phonePtr,
+			Phone:      nil,
 			RoleID:     studentRoleID,
 			IsDeleted:  false,
 		}
@@ -702,14 +688,14 @@ func (h *ImportHandler) ExportStudentTemplate(c *gin.Context) {
 	defer f.Close()
 
 	// Write headers
-	headers := []string{"ism", "familiya", "sharif", "telefon", "sinf", "parol"}
+	headers := []string{"ism", "familiya", "sharif", "sinf"}
 	for i, name := range headers {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
 		f.SetCellValue("Sheet1", cell, name)
 	}
 
 	// Add sample data row
-	sampleRow := []string{"Ali", "Valiyev", "Karimovich", "+998901234567", "9-A", "parol123"}
+	sampleRow := []string{"Ali", "Valiyev", "Karimovich", "9-A"}
 	for i, val := range sampleRow {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 2)
 		f.SetCellValue("Sheet1", cell, val)
