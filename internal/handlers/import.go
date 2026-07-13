@@ -245,6 +245,25 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 	tenantDBVal, _ := c.Get("tenantDB")
 	tenantDB := tenantDBVal.(*sql.DB)
 
+	classIDQuery := c.Query("class_id")
+	var targetClassID int
+	var hasTargetClass bool
+	if classIDQuery != "" {
+		cid, err := strconv.Atoi(classIDQuery)
+		if err == nil {
+			// Verify class exists
+			var dummy int
+			dbErr := tenantDB.QueryRow("SELECT id FROM classes WHERE id = $1 AND is_deleted = false", cid).Scan(&dummy)
+			if dbErr == nil {
+				targetClassID = cid
+				hasTargetClass = true
+			} else {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Specified class_id does not exist or has been deleted"})
+				return
+			}
+		}
+	}
+
 	file, err := c.FormFile("file")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No file uploaded"})
@@ -308,7 +327,10 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 	}
 
 	// Check required headers
-	requiredHeaders := []string{"ism", "familiya", "sinf"}
+	requiredHeaders := []string{"ism", "familiya"}
+	if !hasTargetClass {
+		requiredHeaders = append(requiredHeaders, "sinf")
+	}
 	for _, reqH := range requiredHeaders {
 		if colIndices[reqH] == -1 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Required header '%s' is missing in spreadsheet", reqH)})
@@ -339,13 +361,21 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 		ism := getCell(row, "ism")
 		familiya := getCell(row, "familiya")
 		sharif := getCell(row, "sharif")
-		sinfName := getCell(row, "sinf")
+		sinfName := ""
+		if !hasTargetClass {
+			sinfName = getCell(row, "sinf")
+		}
 
 		rowNum := rIdx + 1
 
-		// Validation — phone is optional
-		if ism == "" || familiya == "" || sinfName == "" {
-			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Ism, Familiya va Sinf maydonlari to'ldirilishi shart"})
+		// Validation
+		if ism == "" || familiya == "" {
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Ism va Familiya maydonlari to'ldirilishi shart"})
+			failedCount++
+			continue
+		}
+		if !hasTargetClass && sinfName == "" {
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Sinf maydoni to'ldirilishi shart"})
 			failedCount++
 			continue
 		}
@@ -363,29 +393,33 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 
 		// 1. Resolve or create Class
 		var classID int
-		err = tx.QueryRow("SELECT id FROM classes WHERE name = $1 AND is_deleted = false", sinfName).Scan(&classID)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				// Create class dynamically
-				err = tx.QueryRow("INSERT INTO classes (name) VALUES ($1) RETURNING id", sinfName).Scan(&classID)
-				if err != nil {
+		if hasTargetClass {
+			classID = targetClassID
+		} else {
+			err = tx.QueryRow("SELECT id FROM classes WHERE name = $1 AND is_deleted = false", sinfName).Scan(&classID)
+			if err != nil {
+				if err == sql.ErrNoRows {
+					// Create class dynamically
+					err = tx.QueryRow("INSERT INTO classes (name) VALUES ($1) RETURNING id", sinfName).Scan(&classID)
+					if err != nil {
+						tx.Rollback()
+						rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Sinfni yaratib bo'lmadi: %v", err)})
+						failedCount++
+						continue
+					}
+					// Log audit event for class creation
+					audit.LogChange(c, tx, audit.LogData{
+						Action:    "CREATE",
+						TableName: "classes",
+						RecordID:  strconv.Itoa(classID),
+						NewValues: models.Class{ID: classID, Name: sinfName, IsDeleted: false},
+					})
+				} else {
 					tx.Rollback()
-					rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Sinfni yaratib bo'lmadi: %v", err)})
+					rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Sinfni bazadan qidirishda xatolik: %v", err)})
 					failedCount++
 					continue
 				}
-				// Log audit event for class creation
-				audit.LogChange(c, tx, audit.LogData{
-					Action:    "CREATE",
-					TableName: "classes",
-					RecordID:  strconv.Itoa(classID),
-					NewValues: models.Class{ID: classID, Name: sinfName, IsDeleted: false},
-				})
-			} else {
-				tx.Rollback()
-				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Sinfni bazadan qidirishda xatolik: %v", err)})
-				failedCount++
-				continue
 			}
 		}
 
@@ -687,15 +721,25 @@ func (h *ImportHandler) ExportStudentTemplate(c *gin.Context) {
 	f := excelize.NewFile()
 	defer f.Close()
 
+	classIDStr := c.Query("class_id")
+	var headers []string
+	var sampleRow []string
+
+	if classIDStr != "" {
+		headers = []string{"ism", "familiya", "sharif"}
+		sampleRow = []string{"Ali", "Valiyev", "Karimovich"}
+	} else {
+		headers = []string{"ism", "familiya", "sharif", "sinf"}
+		sampleRow = []string{"Ali", "Valiyev", "Karimovich", "9-A"}
+	}
+
 	// Write headers
-	headers := []string{"ism", "familiya", "sharif", "sinf"}
 	for i, name := range headers {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
 		f.SetCellValue("Sheet1", cell, name)
 	}
 
 	// Add sample data row
-	sampleRow := []string{"Ali", "Valiyev", "Karimovich", "9-A"}
 	for i, val := range sampleRow {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 2)
 		f.SetCellValue("Sheet1", cell, val)
