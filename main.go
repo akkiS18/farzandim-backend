@@ -124,10 +124,10 @@ func main() {
 		authTenantGroup.DELETE("/classes/:id/schedule-exceptions/:exception_id", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), scheduleHandler.DeleteScheduleException)
 
 		authTenantGroup.GET("/users", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER", "PARENT", "STUDENT"), importHandler.ListUsers)
-		authTenantGroup.POST("/import/students", middleware.RequireRole("ADMIN"), importHandler.ImportStudents)
+		authTenantGroup.POST("/import/students", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), importHandler.ImportStudents)
 		authTenantGroup.POST("/import/teachers", middleware.RequireRole("ADMIN"), importHandler.ImportTeachers)
 		authTenantGroup.POST("/import/parents", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), importHandler.ImportParents)
-		authTenantGroup.GET("/import/template/students", middleware.RequireRole("ADMIN"), importHandler.ExportStudentTemplate)
+		authTenantGroup.GET("/import/template/students", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), importHandler.ExportStudentTemplate)
 		authTenantGroup.GET("/import/template/teachers", middleware.RequireRole("ADMIN"), importHandler.ExportTeacherTemplate)
 		authTenantGroup.GET("/import/template/parents", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), importHandler.ExportParentTemplate)
 		authTenantGroup.GET("/import/template/grades", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), importHandler.ExportGradeTemplate)
