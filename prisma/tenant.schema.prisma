@@ -22,6 +22,7 @@ model User {
   first_name    String
   last_name     String
   middle_name   String?
+  passport      String?
   role_id       Int
   role          Role    @relation(fields: [role_id], references: [id])
 
@@ -56,9 +57,17 @@ model UserStudent {
   class      Class           @relation(fields: [class_id], references: [id])
   is_deleted Boolean         @default(false)
   deleted_at DateTime?
+
+  // Extended profile and balance fields
+  address    String?
+  birthdate  DateTime?       @db.Date
+  ina        String?
+  balance    Decimal         @default(0.00) @db.Decimal(12, 2)
+
   parents    StudentParent[]
   grades     Grade[]
   codes      ParentAccessCode[]
+  payment_transactions PaymentTransaction[]
 
   @@map("students")
 }
@@ -122,13 +131,18 @@ model Grade {
   value         String
   numeric_value Decimal?    @db.Decimal(5, 2)
   grade_date    DateTime
-  is_deleted    Boolean     @default(false)
-  deleted_at    DateTime?
-  created_at    DateTime    @default(now())
-  updated_at    DateTime    @updatedAt
-  student       UserStudent @relation(fields: [student_id], references: [id])
-  subject       Subject     @relation(fields: [subject_id], references: [id])
-  teacher       User        @relation(fields: [teacher_id], references: [id])
+  is_deleted     Boolean     @default(false)
+  deleted_at     DateTime?
+  created_at     DateTime    @default(now())
+  updated_at     DateTime    @updatedAt
+  
+  grade_type     String      @default("MASTERY")
+  grade_category String      @default("DAILY")
+  lesson_number  Int?
+
+  student        UserStudent @relation(fields: [student_id], references: [id])
+  subject        Subject     @relation(fields: [subject_id], references: [id])
+  teacher        User        @relation(fields: [teacher_id], references: [id])
 
   @@map("grades")
 }
@@ -175,3 +189,50 @@ model AuditLog {
 
   @@map("audit_logs")
 }
+
+model PaymentTransaction {
+  id          Int         @id @default(autoincrement())
+  student_id  Int
+  student     UserStudent @relation(fields: [student_id], references: [id])
+  amount      Decimal     @db.Decimal(12, 2)
+  type        String      // 'PAYMENT' or 'CHARGE'
+  description String?
+  created_at  DateTime    @default(now())
+
+  @@map("payment_transactions")
+}
+
+model SchoolHoliday {
+  id           Int       @id @default(autoincrement())
+  holiday_date DateTime  @unique @db.Date
+  name         String
+  is_deleted   Boolean   @default(false)
+  deleted_at   DateTime?
+  created_at   DateTime  @default(now())
+  updated_at   DateTime  @updatedAt
+
+  @@map("school_holidays")
+}
+
+model MenuCycle {
+  id           Int      @id @default(autoincrement())
+  week_number  Int
+  day_of_week  Int
+  meals        Json
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+
+  @@unique([week_number, day_of_week])
+  @@map("menu_cycles")
+}
+
+model MenuException {
+  id          Int      @id @default(autoincrement())
+  menu_date   DateTime @unique @db.Date
+  meals       Json?
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  @@map("menu_exceptions")
+}
+
