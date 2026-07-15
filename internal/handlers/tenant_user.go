@@ -710,6 +710,9 @@ type UpdateStudentRequest struct {
 	MiddleName *string `json:"middle_name"`
 	Phone      *string `json:"phone"`
 	Password   *string `json:"password"`
+	Address    *string `json:"address"`
+	BirthDate  *string `json:"birthdate"` // Format: YYYY-MM-DD
+	INA        *string `json:"ina"`
 }
 
 // UpdateStudent updates a student user's profile (name, phone, password)
@@ -748,13 +751,26 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 		return
 	}
 
-	if userRole != "ADMIN" {
+	authorized := false
+	if userRole == "ADMIN" {
+		authorized = true
+	} else if userRole == "MAIN_TEACHER" {
 		var isMain bool
 		dbConn.QueryRow(`SELECT EXISTS(SELECT 1 FROM class_teachers WHERE class_id = $1 AND teacher_id = $2 AND is_main_teacher = true AND is_deleted = false)`, classID, currentUserID).Scan(&isMain)
-		if !isMain {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: siz ushbu sinf rahbari emassiz"})
-			return
+		if isMain {
+			authorized = true
 		}
+	} else if userRole == "PARENT" {
+		var isLinked bool
+		dbConn.QueryRow(`SELECT EXISTS(SELECT 1 FROM student_parents WHERE student_id = $1 AND parent_id = $2)`, studentID, currentUserID).Scan(&isLinked)
+		if isLinked {
+			authorized = true
+		}
+	}
+
+	if !authorized {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: ushbu o'quvchi ma'lumotlarini o'zgartirishga huquqingiz yo'q"})
+		return
 	}
 
 	tx, err := dbConn.Begin()
@@ -807,6 +823,24 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 		return
 	}
 
+	var birthdate *time.Time
+	if req.BirthDate != nil && *req.BirthDate != "" {
+		parsedDate, err := time.Parse("2006-01-02", *req.BirthDate)
+		if err == nil {
+			birthdate = &parsedDate
+		}
+	}
+
+	_, err = tx.Exec(`
+		UPDATE students 
+		SET address = $1, birthdate = $2, ina = $3 
+		WHERE id = $4`, 
+		req.Address, birthdate, req.INA, studentID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "O'quvchi qo'shimcha ma'lumotlarini yangilashda xatolik", "details": err.Error()})
+		return
+	}
+
 	newUser := models.User{
 		ID:         targetUserID,
 		FirstName:  req.FirstName,
@@ -825,12 +859,34 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 		NewValues: newUser,
 	})
 
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "UPDATE",
+		TableName: "students",
+		RecordID:  strconv.Itoa(studentID),
+		OldValues: map[string]interface{}{"student_id": studentID},
+		NewValues: map[string]interface{}{
+			"address":   req.Address,
+			"birthdate": birthdate,
+			"ina":       req.INA,
+		},
+	})
+
 	if err := tx.Commit(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit update", "details": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, newUser)
+	c.JSON(http.StatusOK, gin.H{
+		"id":          targetUserID,
+		"first_name":  req.FirstName,
+		"last_name":   req.LastName,
+		"middle_name": req.MiddleName,
+		"phone":       req.Phone,
+		"role_id":     oldUser.RoleID,
+		"address":     req.Address,
+		"birthdate":   birthdate,
+		"ina":         req.INA,
+	})
 }
 
 // DeleteStudent soft-deletes a student and their user record

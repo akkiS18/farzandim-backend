@@ -41,12 +41,17 @@ type TenantUserResponse struct {
 	FirstName   string     `json:"first_name"`
 	LastName    string     `json:"last_name"`
 	MiddleName  *string    `json:"middle_name,omitempty"`
+	Passport    *string    `json:"passport,omitempty"`
 	RoleID      int        `json:"role_id"`
 	RoleName    string     `json:"role_name"`
 	ClassID     *int       `json:"class_id,omitempty"`
 	ClassName   *string    `json:"class_name,omitempty"`
 	StudentID   *int       `json:"student_id,omitempty"`
 	StudentName *string    `json:"student_name,omitempty"`
+	Address     *string    `json:"address,omitempty"`
+	BirthDate   *time.Time `json:"birthdate,omitempty"`
+	INA         *string    `json:"ina,omitempty"`
+	Balance     *float64   `json:"balance,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 }
 
@@ -97,7 +102,8 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		query = fmt.Sprintf(`
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
-			       NULL::int as student_id, NULL::text as student_name
+			       NULL::int as student_id, NULL::text as student_name,
+			       u.passport, s.address, s.birthdate, s.ina, s.balance
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
 			JOIN students s ON u.id = s.user_id AND %s
@@ -115,7 +121,8 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		query = fmt.Sprintf(`
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
-			       NULL::int as student_id, NULL::text as student_name
+			       NULL::int as student_id, NULL::text as student_name,
+			       u.passport, s.address, s.birthdate, s.ina, s.balance
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
 			JOIN students s ON u.id = s.user_id AND %s
@@ -129,7 +136,8 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 			query = fmt.Sprintf(`
 				SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 				       $1::int as class_id, cl.name as class_name,
-				       s.id as student_id, (su.first_name || ' ' || su.last_name || COALESCE(' ' || su.middle_name, '')) as student_name
+				       s.id as student_id, (su.first_name || ' ' || su.last_name || COALESCE(' ' || su.middle_name, '')) as student_name,
+				       u.passport, NULL::text as address, NULL::date as birthdate, NULL::text as ina, NULL::numeric as balance
 				FROM users u
 				JOIN roles r ON u.role_id = r.id
 				JOIN student_parents sp ON sp.parent_id = u.id
@@ -143,7 +151,8 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 			query = fmt.Sprintf(`
 				SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 				       s.class_id, cl.name as class_name,
-				       NULL::int as student_id, NULL::text as student_name
+				       NULL::int as student_id, NULL::text as student_name,
+				       u.passport, s.address, s.birthdate, s.ina, s.balance
 				FROM users u
 				JOIN roles r ON u.role_id = r.id
 				LEFT JOIN students s ON u.id = s.user_id AND %s
@@ -154,7 +163,8 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		query = fmt.Sprintf(`
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
-			       s.id as student_id, NULL::text as student_name
+			       s.id as student_id, NULL::text as student_name,
+			       u.passport, s.address, s.birthdate, s.ina, s.balance
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
 			LEFT JOIN students s ON u.id = s.user_id AND %s
@@ -200,10 +210,16 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		var classNameNull sql.NullString
 		var studentIDNull sql.NullInt64
 		var studentNameNull sql.NullString
+		var passportNull sql.NullString
+		var addressNull sql.NullString
+		var birthdateNull sql.NullTime
+		var inaNull sql.NullString
+		var balanceNull sql.NullFloat64
 
 		err := rows.Scan(
 			&u.ID, &emailNull, &phoneNull, &u.FirstName, &u.LastName, &middleNameNull, &u.RoleID, &u.RoleName, &u.CreatedAt,
 			&classIDNull, &classNameNull, &studentIDNull, &studentNameNull,
+			&passportNull, &addressNull, &birthdateNull, &inaNull, &balanceNull,
 		)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse user records", "details": err.Error()})
@@ -219,6 +235,9 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		if middleNameNull.Valid {
 			u.MiddleName = &middleNameNull.String
 		}
+		if passportNull.Valid {
+			u.Passport = &passportNull.String
+		}
 		if classIDNull.Valid {
 			cid := int(classIDNull.Int64)
 			u.ClassID = &cid
@@ -232,6 +251,18 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		}
 		if studentNameNull.Valid {
 			u.StudentName = &studentNameNull.String
+		}
+		if addressNull.Valid {
+			u.Address = &addressNull.String
+		}
+		if birthdateNull.Valid {
+			u.BirthDate = &birthdateNull.Time
+		}
+		if inaNull.Valid {
+			u.INA = &inaNull.String
+		}
+		if balanceNull.Valid {
+			u.Balance = &balanceNull.Float64
 		}
 
 		usersList = append(usersList, u)
@@ -313,16 +344,34 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 	// 2. Parse headers
 	headers := rows[0]
 	colIndices := map[string]int{
-		"ism":      -1,
-		"familiya": -1,
-		"sharif":   -1,
-		"sinf":     -1,
+		"ism":              -1,
+		"familiya":         -1,
+		"sharif":           -1,
+		"sinf":             -1,
+		"manzil":           -1,
+		"tug'ilgan sana":   -1,
+		"guvohnoma raqami": -1,
+		"balans":           -1,
 	}
 
 	for i, hCell := range headers {
 		cleanHeader := strings.ToLower(strings.TrimSpace(hCell))
-		if _, exists := colIndices[cleanHeader]; exists {
-			colIndices[cleanHeader] = i
+		if cleanHeader == "ism" {
+			colIndices["ism"] = i
+		} else if cleanHeader == "familiya" {
+			colIndices["familiya"] = i
+		} else if cleanHeader == "sharif" {
+			colIndices["sharif"] = i
+		} else if cleanHeader == "sinf" {
+			colIndices["sinf"] = i
+		} else if cleanHeader == "manzil" || cleanHeader == "address" || cleanHeader == "uy manzili" {
+			colIndices["manzil"] = i
+		} else if cleanHeader == "tug'ilgan sana" || cleanHeader == "tugilgan sana" || cleanHeader == "birthdate" {
+			colIndices["tug'ilgan sana"] = i
+		} else if cleanHeader == "guvohnoma raqami" || cleanHeader == "guvohnoma" || cleanHeader == "ina" || cleanHeader == "birth certificate" {
+			colIndices["guvohnoma raqami"] = i
+		} else if cleanHeader == "balans" || cleanHeader == "balance" {
+			colIndices["balans"] = i
 		}
 	}
 
@@ -452,12 +501,42 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 		}
 
 		// 4. Create Student record
+		manzil := getCell(row, "manzil")
+		tugilganSanaStr := getCell(row, "tug'ilgan sana")
+		ina := getCell(row, "guvohnoma raqami")
+		balansStr := getCell(row, "balans")
+
+		var addressPtr *string
+		if manzil != "" {
+			addressPtr = &manzil
+		}
+		var birthdate *time.Time
+		if tugilganSanaStr != "" {
+			parsedDate, err := time.Parse("2006-01-02", tugilganSanaStr)
+			if err != nil {
+				parsedDate, err = time.Parse("02.01.2006", tugilganSanaStr)
+			}
+			if err == nil {
+				birthdate = &parsedDate
+			}
+		}
+		var inaPtr *string
+		if ina != "" {
+			inaPtr = &ina
+		}
+		balansVal := 0.00
+		if balansStr != "" {
+			if val, err := strconv.ParseFloat(balansStr, 64); err == nil {
+				balansVal = val
+			}
+		}
+
 		var studentID int
 		insertStudentQuery := `
-			INSERT INTO students (user_id, class_id)
-			VALUES ($1, $2)
+			INSERT INTO students (user_id, class_id, address, birthdate, ina, balance)
+			VALUES ($1, $2, $3, $4, $5, $6)
 			RETURNING id`
-		err = tx.QueryRow(insertStudentQuery, userID, classID).Scan(&studentID)
+		err = tx.QueryRow(insertStudentQuery, userID, classID, addressPtr, birthdate, inaPtr, balansVal).Scan(&studentID)
 		if err != nil {
 			tx.Rollback()
 			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("O'quvchi profilini yaratib bo'lmadi: %v", err)})
@@ -726,11 +805,11 @@ func (h *ImportHandler) ExportStudentTemplate(c *gin.Context) {
 	var sampleRow []string
 
 	if classIDStr != "" {
-		headers = []string{"ism", "familiya", "sharif"}
-		sampleRow = []string{"Ali", "Valiyev", "Karimovich"}
+		headers = []string{"ism", "familiya", "sharif", "manzil", "tug'ilgan sana", "guvohnoma raqami", "balans"}
+		sampleRow = []string{"Ali", "Valiyev", "Karimovich", "Toshkent sh., Chilonzor d.", "2015-05-12", "I-TN № 123456", "0.00"}
 	} else {
-		headers = []string{"ism", "familiya", "sharif", "sinf"}
-		sampleRow = []string{"Ali", "Valiyev", "Karimovich", "9-A"}
+		headers = []string{"ism", "familiya", "sharif", "sinf", "manzil", "tug'ilgan sana", "guvohnoma raqami", "balans"}
+		sampleRow = []string{"Ali", "Valiyev", "Karimovich", "9-A", "Toshkent sh., Chilonzor d.", "2015-05-12", "I-TN № 123456", "0.00"}
 	}
 
 	// Write headers
@@ -791,7 +870,7 @@ func (h *ImportHandler) ExportParentTemplate(c *gin.Context) {
 	defer f.Close()
 
 	// Write headers
-	headers := []string{"o'quvchi uid", "ism", "familiya", "sharif", "parent ism", "parent familiya", "parent sharif", "parent turi", "nomer", "parol"}
+	headers := []string{"o'quvchi uid", "ism", "familiya", "sharif", "parent ism", "parent familiya", "parent sharif", "parent turi", "nomer", "parol", "passport"}
 	for i, name := range headers {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
 		f.SetCellValue("Sheet1", cell, name)
@@ -845,7 +924,7 @@ func (h *ImportHandler) ExportParentTemplate(c *gin.Context) {
 
 	if !hasStudents {
 		// Add sample data row
-		sampleRow := []string{"1", "Olim", "Sodiqov", "Valiyevich", "Karim", "Sodiqov", "Eshmatovich", "ota", "+998909998877", "parol123"}
+		sampleRow := []string{"1", "Olim", "Sodiqov", "Valiyevich", "Karim", "Sodiqov", "Eshmatovich", "ota", "+998909998877", "parol123", "AA1234567"}
 		for i, val := range sampleRow {
 			cell, _ := excelize.CoordinatesToCellName(i+1, 2)
 			f.SetCellValue("Sheet1", cell, val)
@@ -930,12 +1009,27 @@ func (h *ImportHandler) ImportParents(c *gin.Context) {
 		"parent turi":     -1,
 		"nomer":           -1,
 		"parol":           -1,
+		"passport":        -1,
 	}
 
 	for i, hCell := range headers {
 		cleanHeader := strings.ToLower(strings.TrimSpace(hCell))
-		if _, exists := colIndices[cleanHeader]; exists {
-			colIndices[cleanHeader] = i
+		if cleanHeader == "o'quvchi uid" || cleanHeader == "student id" || cleanHeader == "oquvchi uid" {
+			colIndices["o'quvchi uid"] = i
+		} else if cleanHeader == "parent ism" || cleanHeader == "parent_first_name" {
+			colIndices["parent ism"] = i
+		} else if cleanHeader == "parent familiya" || cleanHeader == "parent_last_name" {
+			colIndices["parent familiya"] = i
+		} else if cleanHeader == "parent sharif" || cleanHeader == "parent_middle_name" {
+			colIndices["parent sharif"] = i
+		} else if cleanHeader == "parent turi" || cleanHeader == "relation_type" || cleanHeader == "turi" {
+			colIndices["parent turi"] = i
+		} else if cleanHeader == "nomer" || cleanHeader == "telefon" || cleanHeader == "phone" {
+			colIndices["nomer"] = i
+		} else if cleanHeader == "parol" || cleanHeader == "password" {
+			colIndices["parol"] = i
+		} else if cleanHeader == "passport" || cleanHeader == "pasport" || cleanHeader == "passport info" {
+			colIndices["passport"] = i
 		}
 	}
 
@@ -1079,11 +1173,17 @@ func (h *ImportHandler) ImportParents(c *gin.Context) {
 				middleNamePtr = &parentSharif
 			}
 
+			passport := getCell(row, "passport")
+			var passportPtr *string
+			if passport != "" {
+				passportPtr = &passport
+			}
+
 			insertUserQuery := `
-				INSERT INTO users (first_name, last_name, middle_name, phone, password_hash, role_id)
-				VALUES ($1, $2, $3, $4, $5, $6)
+				INSERT INTO users (first_name, last_name, middle_name, passport, phone, password_hash, role_id)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)
 				RETURNING id`
-			err = tx.QueryRow(insertUserQuery, parentIsm, parentFamiliya, middleNamePtr, nomer, string(hashedPassword), parentRoleID).Scan(&parentID)
+			err = tx.QueryRow(insertUserQuery, parentIsm, parentFamiliya, middleNamePtr, passportPtr, nomer, string(hashedPassword), parentRoleID).Scan(&parentID)
 			if err != nil {
 				tx.Rollback()
 				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Ota-ona profilini yaratib bo'lmadi: %v", err)})
@@ -1101,6 +1201,7 @@ func (h *ImportHandler) ImportParents(c *gin.Context) {
 					FirstName:  parentIsm,
 					LastName:   parentFamiliya,
 					MiddleName: middleNamePtr,
+					Passport:   passportPtr,
 					Phone:      &nomer,
 					RoleID:     parentRoleID,
 					IsDeleted:  false,

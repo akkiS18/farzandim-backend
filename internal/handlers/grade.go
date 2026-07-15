@@ -26,6 +26,9 @@ type CreateGradeRequest struct {
 	Value           string  `json:"value" binding:"required"`
 	GradeDate       *string `json:"grade_date"` // Optional, format YYYY-MM-DD
 	GradingSystemID *int    `json:"grading_system_id"`
+	GradeType       *string `json:"grade_type"`
+	GradeCategory   *string `json:"grade_category"`
+	LessonNumber    *int    `json:"lesson_number"`
 }
 
 type BatchCreateGradesRequest struct {
@@ -47,7 +50,11 @@ type GradeResponse struct {
 	Status           string    `json:"status"`
 	ApprovedByParent bool      `json:"approved_by_parent"`
 	GradingSystemID  *int      `json:"grading_system_id,omitempty"`
+	GradeType        string    `json:"grade_type"`
+	GradeCategory    string    `json:"grade_category"`
+	LessonNumber     *int      `json:"lesson_number,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 func (h *GradeHandler) CreateGrade(c *gin.Context) {
@@ -220,30 +227,50 @@ func (h *GradeHandler) CreateGrade(c *gin.Context) {
 		gradeDate = parsedDate
 	}
 
+	// Check if this date falls on a holiday
+	var isHoliday bool
+	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM school_holidays WHERE holiday_date = $1::date AND is_deleted = false)", gradeDate.Format("2006-01-02")).Scan(&isHoliday)
+	if err == nil && isHoliday {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Dam olish kunlarida baho qo'yish taqiqlanadi"})
+		return
+	}
+
 	// 7. Insert Grade record
 	var gradeID int
+	gType := "MASTERY"
+	if req.GradeType != nil && *req.GradeType != "" {
+		gType = *req.GradeType
+	}
+	gCat := "DAILY"
+	if req.GradeCategory != nil && *req.GradeCategory != "" {
+		gCat = *req.GradeCategory
+	}
+
 	insertQuery := `
-		INSERT INTO grades (student_id, subject_id, teacher_id, value, numeric_value, grade_date, grading_system_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO grades (student_id, subject_id, teacher_id, value, numeric_value, grade_date, grading_system_id, grade_type, grade_category, lesson_number)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id`
 
-	err = tx.QueryRow(insertQuery, req.StudentID, req.SubjectID, teacherID, req.Value, numericValue, gradeDate, gsID).Scan(&gradeID)
+	err = tx.QueryRow(insertQuery, req.StudentID, req.SubjectID, teacherID, req.Value, numericValue, gradeDate, gsID, gType, gCat, req.LessonNumber).Scan(&gradeID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to insert grade record", "details": err.Error()})
 		return
 	}
 
 	newGrade := models.Grade{
-		ID:           gradeID,
-		StudentID:    req.StudentID,
-		SubjectID:    req.SubjectID,
-		TeacherID:    teacherID,
-		Value:        req.Value,
-		NumericValue: numericValue,
-		GradeDate:    gradeDate,
-		IsDeleted:    false,
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
+		ID:               gradeID,
+		StudentID:        req.StudentID,
+		SubjectID:        req.SubjectID,
+		TeacherID:        teacherID,
+		Value:            req.Value,
+		NumericValue:     numericValue,
+		GradeDate:        gradeDate,
+		IsDeleted:        false,
+		GradeType:        gType,
+		GradeCategory:    gCat,
+		LessonNumber:     req.LessonNumber,
+		CreatedAt:        time.Now(),
+		UpdatedAt:        time.Now(),
 	}
 
 	// 8. Log audit change
@@ -281,7 +308,8 @@ func (h *GradeHandler) ListGrades(c *gin.Context) {
 	query := `
 		SELECT g.id, g.student_id, u_student.first_name || ' ' || u_student.last_name as student_name, cl.name as class_name,
 		       g.subject_id, s.name as subject_name, g.teacher_id, u_teacher.first_name || ' ' || u_teacher.last_name as teacher_name,
-		       g.value, g.numeric_value, g.grade_date, g.status, g.approved_by_parent, g.grading_system_id, g.created_at
+		       g.value, g.numeric_value, g.grade_date, g.status, g.approved_by_parent, g.grading_system_id,
+		       g.grade_type, g.grade_category, g.lesson_number, g.created_at, g.updated_at
 		FROM grades g
 		JOIN students st ON g.student_id = st.id AND st.is_deleted = false
 		JOIN users u_student ON st.user_id = u_student.id AND u_student.is_deleted = false
@@ -387,10 +415,14 @@ func (h *GradeHandler) ListGrades(c *gin.Context) {
 		var numVal sql.NullFloat64
 		var gsIDNull sql.NullInt64
 
+		var lessonNumNull sql.NullInt64
+		var updatedAtTime time.Time
+
 		err := rows.Scan(
 			&r.ID, &r.StudentID, &r.StudentName, &r.ClassName,
 			&r.SubjectID, &r.SubjectName, &r.TeacherID, &r.TeacherName,
-			&r.Value, &numVal, &r.GradeDate, &r.Status, &r.ApprovedByParent, &gsIDNull, &r.CreatedAt,
+			&r.Value, &numVal, &r.GradeDate, &r.Status, &r.ApprovedByParent, &gsIDNull,
+			&r.GradeType, &r.GradeCategory, &lessonNumNull, &r.CreatedAt, &updatedAtTime,
 		)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse grade records", "details": err.Error()})
@@ -404,6 +436,11 @@ func (h *GradeHandler) ListGrades(c *gin.Context) {
 			val := int(gsIDNull.Int64)
 			r.GradingSystemID = &val
 		}
+		if lessonNumNull.Valid {
+			val := int(lessonNumNull.Int64)
+			r.LessonNumber = &val
+		}
+		r.UpdatedAt = updatedAtTime
 
 		grades = append(grades, r)
 	}
@@ -438,11 +475,25 @@ func (h *GradeHandler) UpdateGrade(c *gin.Context) {
 	// 1. Fetch old grade data
 	var oldGrade models.Grade
 	var oldNumVal sql.NullFloat64
-	queryOld := "SELECT id, student_id, subject_id, teacher_id, value, numeric_value, grade_date, status, approved_by_parent, is_deleted FROM grades WHERE id = $1 AND is_deleted = false"
+	var gsIDNull sql.NullInt64
+	var lessonNumberNull sql.NullInt64
+	queryOld := "SELECT id, student_id, subject_id, teacher_id, value, numeric_value, grade_date, status, approved_by_parent, grading_system_id, grade_type, grade_category, lesson_number, is_deleted FROM grades WHERE id = $1 AND is_deleted = false"
 	err = tx.QueryRow(queryOld, gradeID).Scan(
 		&oldGrade.ID, &oldGrade.StudentID, &oldGrade.SubjectID, &oldGrade.TeacherID,
-		&oldGrade.Value, &oldNumVal, &oldGrade.GradeDate, &oldGrade.Status, &oldGrade.ApprovedByParent, &oldGrade.IsDeleted,
+		&oldGrade.Value, &oldNumVal, &oldGrade.GradeDate, &oldGrade.Status, &oldGrade.ApprovedByParent, &gsIDNull,
+		&oldGrade.GradeType, &oldGrade.GradeCategory, &lessonNumberNull, &oldGrade.IsDeleted,
 	)
+	if oldNumVal.Valid {
+		oldGrade.NumericValue = &oldNumVal.Float64
+	}
+	if gsIDNull.Valid {
+		val := int(gsIDNull.Int64)
+		oldGrade.GradingSystemID = &val
+	}
+	if lessonNumberNull.Valid {
+		val := int(lessonNumberNull.Int64)
+		oldGrade.LessonNumber = &val
+	}
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Grade record not found or already deleted"})
@@ -624,12 +675,29 @@ func (h *GradeHandler) UpdateGrade(c *gin.Context) {
 		gradeDate = oldGrade.GradeDate // Preserve previous date if not provided
 	}
 
+	// Check if this date falls on a holiday
+	var isHoliday bool
+	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM school_holidays WHERE holiday_date = $1::date AND is_deleted = false)", gradeDate.Format("2006-01-02")).Scan(&isHoliday)
+	if err == nil && isHoliday {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Dam olish kunlarida baho qo'yish taqiqlanadi"})
+		return
+	}
+
+	gType := "MASTERY"
+	if req.GradeType != nil && *req.GradeType != "" {
+		gType = *req.GradeType
+	}
+	gCat := "DAILY"
+	if req.GradeCategory != nil && *req.GradeCategory != "" {
+		gCat = *req.GradeCategory
+	}
+
 	// Update Grade
 	updateQuery := `
 		UPDATE grades 
-		SET student_id = $1, subject_id = $2, value = $3, numeric_value = $4, grade_date = $5, status = 'marked', approved_by_parent = false, grading_system_id = $6, updated_at = NOW()
-		WHERE id = $7`
-	_, err = tx.Exec(updateQuery, req.StudentID, req.SubjectID, req.Value, numericValue, gradeDate, gsID, gradeID)
+		SET student_id = $1, subject_id = $2, value = $3, numeric_value = $4, grade_date = $5, status = 'marked', approved_by_parent = false, grading_system_id = $6, grade_type = $7, grade_category = $8, lesson_number = $9, updated_at = NOW()
+		WHERE id = $10`
+	_, err = tx.Exec(updateQuery, req.StudentID, req.SubjectID, req.Value, numericValue, gradeDate, gsID, gType, gCat, req.LessonNumber, gradeID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update grade record", "details": err.Error()})
 		return
@@ -645,6 +713,10 @@ func (h *GradeHandler) UpdateGrade(c *gin.Context) {
 		GradeDate:        gradeDate,
 		Status:           "marked",
 		ApprovedByParent: false,
+		GradingSystemID:  &gsID,
+		GradeType:        gType,
+		GradeCategory:    gCat,
+		LessonNumber:     req.LessonNumber,
 		IsDeleted:        false,
 	}
 
@@ -686,11 +758,25 @@ func (h *GradeHandler) DeleteGrade(c *gin.Context) {
 	// 1. Fetch old grade data
 	var oldGrade models.Grade
 	var oldNumVal sql.NullFloat64
-	queryOld := "SELECT id, student_id, subject_id, teacher_id, value, numeric_value, grade_date, status, approved_by_parent, is_deleted FROM grades WHERE id = $1 AND is_deleted = false"
+	var gsIDNull sql.NullInt64
+	var lessonNumberNull sql.NullInt64
+	queryOld := "SELECT id, student_id, subject_id, teacher_id, value, numeric_value, grade_date, status, approved_by_parent, grading_system_id, grade_type, grade_category, lesson_number, is_deleted FROM grades WHERE id = $1 AND is_deleted = false"
 	err = tx.QueryRow(queryOld, gradeID).Scan(
 		&oldGrade.ID, &oldGrade.StudentID, &oldGrade.SubjectID, &oldGrade.TeacherID,
-		&oldGrade.Value, &oldNumVal, &oldGrade.GradeDate, &oldGrade.Status, &oldGrade.ApprovedByParent, &oldGrade.IsDeleted,
+		&oldGrade.Value, &oldNumVal, &oldGrade.GradeDate, &oldGrade.Status, &oldGrade.ApprovedByParent, &gsIDNull,
+		&oldGrade.GradeType, &oldGrade.GradeCategory, &lessonNumberNull, &oldGrade.IsDeleted,
 	)
+	if oldNumVal.Valid {
+		oldGrade.NumericValue = &oldNumVal.Float64
+	}
+	if gsIDNull.Valid {
+		val := int(gsIDNull.Int64)
+		oldGrade.GradingSystemID = &val
+	}
+	if lessonNumberNull.Valid {
+		val := int(lessonNumberNull.Int64)
+		oldGrade.LessonNumber = &val
+	}
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Grade record not found or already deleted"})
@@ -973,14 +1059,31 @@ func (h *GradeHandler) BatchCreateGrades(c *gin.Context) {
 			gradeDate = parsedDate
 		}
 
+		// Check if grade date falls on a holiday
+		var isHoliday bool
+		err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM school_holidays WHERE holiday_date = $1::date AND is_deleted = false)", gradeDate.Format("2006-01-02")).Scan(&isHoliday)
+		if err == nil && isHoliday {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("O'quvchi %d uchun baho qo'yish taqiqlanadi: dam olish kuni", gReq.StudentID)})
+			return
+		}
+
 		// Insert
 		var gradeID int
+		gType := "MASTERY"
+		if gReq.GradeType != nil && *gReq.GradeType != "" {
+			gType = *gReq.GradeType
+		}
+		gCat := "DAILY"
+		if gReq.GradeCategory != nil && *gReq.GradeCategory != "" {
+			gCat = *gReq.GradeCategory
+		}
+
 		insertQuery := `
-			INSERT INTO grades (student_id, subject_id, teacher_id, value, numeric_value, grade_date, grading_system_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			INSERT INTO grades (student_id, subject_id, teacher_id, value, numeric_value, grade_date, grading_system_id, grade_type, grade_category, lesson_number)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			RETURNING id`
 
-		err = tx.QueryRow(insertQuery, gReq.StudentID, gReq.SubjectID, teacherID, gReq.Value, numericValue, gradeDate, currentGsID).Scan(&gradeID)
+		err = tx.QueryRow(insertQuery, gReq.StudentID, gReq.SubjectID, teacherID, gReq.Value, numericValue, gradeDate, currentGsID, gType, gCat, gReq.LessonNumber).Scan(&gradeID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to insert grade record", "details": err.Error()})
 			return
@@ -996,6 +1099,10 @@ func (h *GradeHandler) BatchCreateGrades(c *gin.Context) {
 			GradeDate:        gradeDate,
 			Status:           "marked",
 			ApprovedByParent: false,
+			GradingSystemID:  &currentGsID,
+			GradeType:        gType,
+			GradeCategory:    gCat,
+			LessonNumber:     gReq.LessonNumber,
 			IsDeleted:        false,
 			CreatedAt:        time.Now(),
 			UpdatedAt:        time.Now(),
