@@ -24,6 +24,7 @@ type CreateParentRequest struct {
 	FirstName  string  `json:"first_name" binding:"required"`
 	LastName   string  `json:"last_name" binding:"required"`
 	MiddleName *string `json:"middle_name"`
+	Passport   *string `json:"passport"`
 	Phone      string  `json:"phone" binding:"required"`
 	Email      *string `json:"email"`
 	Password   string  `json:"password" binding:"required"`
@@ -125,10 +126,10 @@ func (h *ParentHandler) CreateAndLinkParent(c *gin.Context) {
 		}
 
 		insertUserQuery := `
-			INSERT INTO users (first_name, last_name, middle_name, phone, email, password_hash, role_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			INSERT INTO users (first_name, last_name, middle_name, passport, phone, email, password_hash, role_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			RETURNING id`
-		err = tx.QueryRow(insertUserQuery, req.FirstName, req.LastName, req.MiddleName, req.Phone, req.Email, string(hashedPassword), parentRoleID).Scan(&parentID)
+		err = tx.QueryRow(insertUserQuery, req.FirstName, req.LastName, req.MiddleName, req.Passport, req.Phone, req.Email, string(hashedPassword), parentRoleID).Scan(&parentID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create parent user profile", "details": err.Error()})
 			return
@@ -144,6 +145,7 @@ func (h *ParentHandler) CreateAndLinkParent(c *gin.Context) {
 				FirstName:  req.FirstName,
 				LastName:   req.LastName,
 				MiddleName: req.MiddleName,
+				Passport:   req.Passport,
 				Phone:      &req.Phone,
 				Email:      req.Email,
 				RoleID:     parentRoleID,
@@ -398,6 +400,7 @@ type UpdateParentRequest struct {
 	FirstName  string  `json:"first_name" binding:"required"`
 	LastName   string  `json:"last_name" binding:"required"`
 	MiddleName *string `json:"middle_name"`
+	Passport   *string `json:"passport"`
 	Phone      string  `json:"phone" binding:"required"`
 	Password   *string `json:"password"`
 }
@@ -442,8 +445,8 @@ func (h *ParentHandler) UpdateParent(c *gin.Context) {
 		return
 	}
 
-	// Authorization: admin or main teacher of any class this parent's student is in
-	if userRole != "ADMIN" {
+	// Authorization: admin, parent themselves, or main teacher of any class this parent's student is in
+	if userRole != "ADMIN" && currentUserID != parentID {
 		var isMain bool
 		dbConn.QueryRow(`
 			SELECT EXISTS(
@@ -472,22 +475,26 @@ func (h *ParentHandler) UpdateParent(c *gin.Context) {
 		FirstName  string
 		LastName   string
 		MiddleName *string
+		Passport   *string
 		Phone      *string
 		RoleID     int
 	}
-	var oldPhoneNull, oldMiddleNull sql.NullString
-	tx.QueryRow(`SELECT first_name, last_name, middle_name, phone, role_id FROM users WHERE id = $1`, parentID).
-		Scan(&oldUser.FirstName, &oldUser.LastName, &oldMiddleNull, &oldPhoneNull, &oldUser.RoleID)
+	var oldPhoneNull, oldMiddleNull, oldPassportNull sql.NullString
+	tx.QueryRow(`SELECT first_name, last_name, middle_name, passport, phone, role_id FROM users WHERE id = $1`, parentID).
+		Scan(&oldUser.FirstName, &oldUser.LastName, &oldMiddleNull, &oldPassportNull, &oldPhoneNull, &oldUser.RoleID)
 	if oldMiddleNull.Valid {
 		oldUser.MiddleName = &oldMiddleNull.String
+	}
+	if oldPassportNull.Valid {
+		oldUser.Passport = &oldPassportNull.String
 	}
 	if oldPhoneNull.Valid {
 		oldUser.Phone = &oldPhoneNull.String
 	}
 
 	// Build dynamic update
-	setClauses := []string{"first_name = $1", "last_name = $2", "middle_name = $3", "phone = $4", "updated_at = NOW()"}
-	args := []interface{}{req.FirstName, req.LastName, req.MiddleName, req.Phone}
+	setClauses := []string{"first_name = $1", "last_name = $2", "middle_name = $3", "passport = $4", "phone = $5", "updated_at = NOW()"}
+	args := []interface{}{req.FirstName, req.LastName, req.MiddleName, req.Passport, req.Phone}
 
 	if req.Password != nil && *req.Password != "" {
 		hashed, hashErr := bcrypt.GenerateFromPassword([]byte(*req.Password), bcrypt.DefaultCost)
@@ -516,7 +523,7 @@ func (h *ParentHandler) UpdateParent(c *gin.Context) {
 		TableName: "users",
 		RecordID:  strconv.Itoa(parentID),
 		OldValues: oldUser,
-		NewValues: map[string]interface{}{"first_name": req.FirstName, "last_name": req.LastName, "middle_name": req.MiddleName, "phone": req.Phone},
+		NewValues: map[string]interface{}{"first_name": req.FirstName, "last_name": req.LastName, "middle_name": req.MiddleName, "passport": req.Passport, "phone": req.Phone},
 	})
 
 	if err := tx.Commit(); err != nil {
@@ -529,6 +536,7 @@ func (h *ParentHandler) UpdateParent(c *gin.Context) {
 		"first_name":  req.FirstName,
 		"last_name":   req.LastName,
 		"middle_name": req.MiddleName,
+		"passport":    req.Passport,
 		"phone":       req.Phone,
 	})
 }

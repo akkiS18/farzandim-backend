@@ -40,6 +40,14 @@ func (h *ScheduleHandler) GetSchedule(c *gin.Context) {
 	tenantDBVal, _ := c.Get("tenantDB")
 	dbConn := tenantDBVal.(*sql.DB)
 
+	// Check if this date is a holiday
+	var isHoliday bool
+	err = dbConn.QueryRow("SELECT EXISTS(SELECT 1 FROM school_holidays WHERE holiday_date = $1 AND is_deleted = false)", parsedQueryDate).Scan(&isHoliday)
+	if err == nil && isHoliday {
+		c.JSON(http.StatusOK, []models.ClassScheduleResponse{})
+		return
+	}
+
 	// 1. Fetch recurring weekly schedule
 	query := `
 		SELECT cs.id, cs.class_id, cs.day_of_week, cs.lesson_number, cs.subject_id, s.name as subject_name, cs.start_date, cs.end_date

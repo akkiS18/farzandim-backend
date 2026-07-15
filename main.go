@@ -35,6 +35,9 @@ func main() {
 	gradeHandler := handlers.NewGradeHandler()
 	parentHandler := handlers.NewParentHandler()
 	scheduleHandler := handlers.NewScheduleHandler()
+	holidayHandler := handlers.NewHolidayHandler()
+	menuHandler := handlers.NewMenuHandler()
+	balanceHandler := handlers.NewBalanceHandler()
 
 	// 4. Initialize web server router
 	r := gin.Default()
@@ -134,7 +137,7 @@ func main() {
 		authTenantGroup.POST("/import/grades", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), importHandler.ImportGrades)
 
 		authTenantGroup.POST("/classes/:id/students", tenantUserHandler.CreateClassStudent)
-		authTenantGroup.PUT("/students/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), tenantUserHandler.UpdateStudent)
+		authTenantGroup.PUT("/students/:id", tenantUserHandler.UpdateStudent)
 		authTenantGroup.DELETE("/students/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), tenantUserHandler.DeleteStudent)
 		authTenantGroup.POST("/teachers", middleware.RequireRole("ADMIN"), tenantUserHandler.CreateTeacher)
 		authTenantGroup.GET("/teachers", tenantUserHandler.ListTeachers)
@@ -147,7 +150,7 @@ func main() {
 		authTenantGroup.POST("/students/:id/parents", parentHandler.CreateAndLinkParent)
 		authTenantGroup.GET("/students/:id/parents", parentHandler.ListStudentParents)
 		authTenantGroup.DELETE("/students/:id/parents/:parent_id", parentHandler.UnlinkParent)
-		authTenantGroup.PUT("/parents/:parent_id", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), parentHandler.UpdateParent)
+		authTenantGroup.PUT("/parents/:parent_id", parentHandler.UpdateParent)
 
 		authTenantGroup.GET("/grading-systems", gradingSystemHandler.ListGradingSystems)
 		authTenantGroup.GET("/grading-systems/active", gradingSystemHandler.GetActiveGradingSystem)
@@ -162,6 +165,17 @@ func main() {
 		authTenantGroup.DELETE("/grades/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), gradeHandler.DeleteGrade)
 		authTenantGroup.POST("/grades/change-status", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), gradeHandler.ChangeGradeStatus)
 		authTenantGroup.POST("/grades/:id/parent-approve", middleware.RequireRole("ADMIN", "PARENT"), gradeHandler.ParentApproveGrade)
+
+		authTenantGroup.GET("/holidays", holidayHandler.ListHolidays)
+		authTenantGroup.POST("/holidays", middleware.RequireRole("ADMIN"), holidayHandler.SaveHoliday)
+		authTenantGroup.DELETE("/holidays/:id", middleware.RequireRole("ADMIN"), holidayHandler.DeleteHoliday)
+
+		authTenantGroup.GET("/menu", menuHandler.GetMenu)
+		authTenantGroup.POST("/menu/cycle", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), menuHandler.SaveMenuCycle)
+		authTenantGroup.POST("/menu/exception", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), menuHandler.SaveMenuException)
+
+		authTenantGroup.POST("/students/:id/balance/transaction", middleware.RequireRole("ADMIN"), balanceHandler.AddTransaction)
+		authTenantGroup.GET("/students/:id/balance/history", balanceHandler.GetTransactionHistory)
 
 		authTenantGroup.POST("/settings/change-password", authHandler.ChangePassword)
 	}

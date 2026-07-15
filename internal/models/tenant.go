@@ -18,6 +18,7 @@ type User struct {
 	FirstName    string     `json:"first_name" db:"first_name"`
 	LastName     string     `json:"last_name" db:"last_name"`
 	MiddleName   *string    `json:"middle_name,omitempty" db:"middle_name"`
+	Passport     *string    `json:"passport,omitempty" db:"passport"`
 	RoleID       int        `json:"role_id" db:"role_id"`
 	IsDeleted    bool       `json:"is_deleted" db:"is_deleted"`
 	DeletedAt    *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
@@ -36,6 +37,10 @@ type Student struct {
 	ID        int        `json:"id" db:"id"`
 	UserID    int        `json:"user_id" db:"user_id"`
 	ClassID   int        `json:"class_id" db:"class_id"`
+	Address   *string    `json:"address,omitempty" db:"address"`
+	BirthDate *time.Time `json:"birthdate,omitempty" db:"birthdate"`
+	INA       *string    `json:"ina,omitempty" db:"ina"`
+	Balance   float64    `json:"balance" db:"balance"`
 	IsDeleted bool       `json:"is_deleted" db:"is_deleted"`
 	DeletedAt *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
 }
@@ -68,6 +73,9 @@ type Grade struct {
 	Status           string     `json:"status" db:"status"`
 	ApprovedByParent bool       `json:"approved_by_parent" db:"approved_by_parent"`
 	GradingSystemID  *int       `json:"grading_system_id,omitempty" db:"grading_system_id"`
+	GradeType        string     `json:"grade_type" db:"grade_type"`
+	GradeCategory    string     `json:"grade_category" db:"grade_category"`
+	LessonNumber     *int       `json:"lesson_number,omitempty" db:"lesson_number"`
 	IsDeleted        bool       `json:"is_deleted" db:"is_deleted"`
 	DeletedAt        *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
 	CreatedAt        time.Time  `json:"created_at" db:"created_at"`
@@ -108,3 +116,40 @@ type AuditLog struct {
 	UserAgent *string         `json:"user_agent,omitempty" db:"user_agent"`
 	CreatedAt time.Time       `json:"created_at" db:"created_at"`
 }
+
+type PaymentTransaction struct {
+	ID          int       `json:"id" db:"id"`
+	StudentID   int       `json:"student_id" db:"student_id"`
+	Amount      float64   `json:"amount" db:"amount"`
+	Type        string    `json:"type" db:"type"`
+	Description *string   `json:"description,omitempty" db:"description"`
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+}
+
+type SchoolHoliday struct {
+	ID          int        `json:"id" db:"id"`
+	HolidayDate time.Time  `json:"holiday_date" db:"holiday_date"`
+	Name        string     `json:"name" db:"name"`
+	IsDeleted   bool       `json:"is_deleted" db:"is_deleted"`
+	DeletedAt   *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
+	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at" db:"updated_at"`
+}
+
+type MenuCycle struct {
+	ID         int             `json:"id" db:"id"`
+	WeekNumber int             `json:"week_number" db:"week_number"`
+	DayOfWeek  int             `json:"day_of_week" db:"day_of_week"`
+	Meals      json.RawMessage `json:"meals" db:"meals"`
+	CreatedAt  time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt  time.Time       `json:"updated_at" db:"updated_at"`
+}
+
+type MenuException struct {
+	ID        int             `json:"id" db:"id"`
+	MenuDate  time.Time       `json:"menu_date" db:"menu_date"`
+	Meals     json.RawMessage `json:"meals,omitempty" db:"meals"`
+	CreatedAt time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at" db:"updated_at"`
+}
+
