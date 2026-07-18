@@ -25,6 +25,9 @@ type CreateStudentRequest struct {
 	LastName   string  `json:"last_name" binding:"required"`
 	MiddleName *string `json:"middle_name"`
 	Email      *string `json:"email"`
+	Address    *string `json:"address"`
+	BirthDate  *string `json:"birthdate"`
+	INA        *string `json:"ina"`
 }
 
 type CreateTeacherRequest struct {
@@ -141,11 +144,18 @@ func (h *TenantUserHandler) CreateClassStudent(c *gin.Context) {
 
 	// Insert Student link
 	var studentID int
+	var birthdateVal interface{}
+	if req.BirthDate != nil && *req.BirthDate != "" {
+		birthdateVal = *req.BirthDate
+	} else {
+		birthdateVal = nil
+	}
+
 	insertStudentQuery := `
-		INSERT INTO students (user_id, class_id)
-		VALUES ($1, $2)
+		INSERT INTO students (user_id, class_id, address, birthdate, ina)
+		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id`
-	err = tx.QueryRow(insertStudentQuery, userID, classID).Scan(&studentID)
+	err = tx.QueryRow(insertStudentQuery, userID, classID, req.Address, birthdateVal, req.INA).Scan(&studentID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to map student profile", "details": err.Error()})
 		return
@@ -794,8 +804,30 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 	}
 
 	// Build update query dynamically
-	setClauses := []string{"first_name = $1", "last_name = $2", "middle_name = $3", "phone = $4", "updated_at = NOW()"}
-	args := []interface{}{req.FirstName, req.LastName, req.MiddleName, req.Phone}
+	var setClauses []string
+	var args []interface{}
+	argIdx := 1
+
+	if req.FirstName != "" {
+		setClauses = append(setClauses, fmt.Sprintf("first_name = $%d", argIdx))
+		args = append(args, req.FirstName)
+		argIdx++
+	}
+	if req.LastName != "" {
+		setClauses = append(setClauses, fmt.Sprintf("last_name = $%d", argIdx))
+		args = append(args, req.LastName)
+		argIdx++
+	}
+	if req.MiddleName != nil {
+		setClauses = append(setClauses, fmt.Sprintf("middle_name = $%d", argIdx))
+		args = append(args, req.MiddleName)
+		argIdx++
+	}
+	if req.Phone != nil {
+		setClauses = append(setClauses, fmt.Sprintf("phone = $%d", argIdx))
+		args = append(args, req.Phone)
+		argIdx++
+	}
 
 	if req.Password != nil && *req.Password != "" {
 		hashed, hashErr := bcrypt.GenerateFromPassword([]byte(*req.Password), bcrypt.DefaultCost)
@@ -803,24 +835,28 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Parolni shifrlashda xatolik"})
 			return
 		}
-		setClauses = append(setClauses, fmt.Sprintf("password_hash = $%d", len(args)+1))
+		setClauses = append(setClauses, fmt.Sprintf("password_hash = $%d", argIdx))
 		args = append(args, string(hashed))
+		argIdx++
 	}
 
-	args = append(args, targetUserID)
-	updateQuery := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d", strings.Join(setClauses, ", "), len(args))
-	_, err = tx.Exec(updateQuery, args...)
-	if err != nil {
-		if strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "users_phone_key") {
-			phone := ""
-			if req.Phone != nil {
-				phone = *req.Phone
+	if len(setClauses) > 0 {
+		setClauses = append(setClauses, fmt.Sprintf("updated_at = NOW()"))
+		args = append(args, targetUserID)
+		updateQuery := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
+		_, err = tx.Exec(updateQuery, args...)
+		if err != nil {
+			if strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "users_phone_key") {
+				phone := ""
+				if req.Phone != nil {
+					phone = *req.Phone
+				}
+				c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("Telefon raqam '%s' allaqachon ro'yxatdan o'tgan", phone)})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "O'quvchi ma'lumotlarini yangilashda xatolik", "details": err.Error()})
 			}
-			c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("Telefon raqam '%s' allaqachon ro'yxatdan o'tgan", phone)})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "O'quvchi ma'lumotlarini yangilashda xatolik", "details": err.Error()})
+			return
 		}
-		return
 	}
 
 	var birthdate *time.Time

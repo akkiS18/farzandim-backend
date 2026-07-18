@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"strings"
+	"time"
 
 	"github.com/farzandim/backend/internal/config"
 	"github.com/farzandim/backend/internal/db"
@@ -136,6 +137,11 @@ func main() {
 		authTenantGroup.GET("/import/template/grades", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), importHandler.ExportGradeTemplate)
 		authTenantGroup.POST("/import/grades", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), importHandler.ImportGrades)
 
+		authTenantGroup.POST("/import/menu/cycle", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), menuHandler.ImportMenuCycles)
+		authTenantGroup.POST("/import/menu/exception", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), menuHandler.ImportMenuExceptions)
+		authTenantGroup.GET("/import/template/menu/cycle", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), menuHandler.ExportMenuCycleTemplate)
+		authTenantGroup.GET("/import/template/menu/exception", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), menuHandler.ExportMenuExceptionTemplate)
+
 		authTenantGroup.POST("/classes/:id/students", tenantUserHandler.CreateClassStudent)
 		authTenantGroup.PUT("/students/:id", tenantUserHandler.UpdateStudent)
 		authTenantGroup.DELETE("/students/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), tenantUserHandler.DeleteStudent)
@@ -150,6 +156,7 @@ func main() {
 		authTenantGroup.POST("/students/:id/parents", parentHandler.CreateAndLinkParent)
 		authTenantGroup.GET("/students/:id/parents", parentHandler.ListStudentParents)
 		authTenantGroup.DELETE("/students/:id/parents/:parent_id", parentHandler.UnlinkParent)
+		authTenantGroup.GET("/parents/:parent_id", parentHandler.GetParent)
 		authTenantGroup.PUT("/parents/:parent_id", parentHandler.UpdateParent)
 
 		authTenantGroup.GET("/grading-systems", gradingSystemHandler.ListGradingSystems)
@@ -171,18 +178,76 @@ func main() {
 		authTenantGroup.DELETE("/holidays/:id", middleware.RequireRole("ADMIN"), holidayHandler.DeleteHoliday)
 
 		authTenantGroup.GET("/menu", menuHandler.GetMenu)
+		authTenantGroup.GET("/menu/intervals", menuHandler.ListMenuIntervals)
+		authTenantGroup.POST("/menu/intervals", middleware.RequireRole("ADMIN"), menuHandler.SaveMenuInterval)
+		authTenantGroup.DELETE("/menu/intervals/:id", middleware.RequireRole("ADMIN"), menuHandler.DeleteMenuInterval)
+		authTenantGroup.GET("/menu/cycle", menuHandler.ListMenuCycles)
 		authTenantGroup.POST("/menu/cycle", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), menuHandler.SaveMenuCycle)
+		authTenantGroup.GET("/menu/exceptions", menuHandler.ListMenuExceptions)
 		authTenantGroup.POST("/menu/exception", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), menuHandler.SaveMenuException)
+		authTenantGroup.DELETE("/menu/exceptions/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), menuHandler.DeleteMenuException)
 
 		authTenantGroup.POST("/students/:id/balance/transaction", middleware.RequireRole("ADMIN"), balanceHandler.AddTransaction)
 		authTenantGroup.GET("/students/:id/balance/history", balanceHandler.GetTransactionHistory)
+		authTenantGroup.GET("/balance/transactions", middleware.RequireRole("ADMIN"), balanceHandler.ListAllTransactions)
+		authTenantGroup.GET("/balance/charge-plans", middleware.RequireRole("ADMIN"), balanceHandler.ListChargePlans)
+		authTenantGroup.POST("/balance/charge-plans", middleware.RequireRole("ADMIN"), balanceHandler.SaveChargePlan)
+		authTenantGroup.DELETE("/balance/charge-plans/:id", middleware.RequireRole("ADMIN"), balanceHandler.DeleteChargePlan)
+		authTenantGroup.POST("/balance/charge-plans/run", middleware.RequireRole("ADMIN"), balanceHandler.TriggerChargesManual)
+		authTenantGroup.POST("/balance/import-payments", middleware.RequireRole("ADMIN"), balanceHandler.ImportPayments)
+		authTenantGroup.GET("/students/:id/next-charge", balanceHandler.GetNextCharge)
 
 		authTenantGroup.POST("/settings/change-password", authHandler.ChangePassword)
 	}
 
-	// 5. Run the server
+	// 5. Initialize background scheduler for automated charge plans
+	go func() {
+		// Run every 6 hours
+		ticker := time.NewTicker(6 * time.Hour)
+		defer ticker.Stop()
+
+		// Run once on startup
+		runAllTenantsScheduler(balanceHandler)
+
+		for range ticker.C {
+			runAllTenantsScheduler(balanceHandler)
+		}
+	}()
+
+	// 6. Run the server
 	log.Printf("Starting Online Jurnal backend server on port %s...", cfg.Port)
 	if err := r.Run(":" + cfg.Port); err != nil {
 		log.Fatalf("Server shutdown failed: %v", err)
+	}
+}
+
+func runAllTenantsScheduler(balanceHandler *handlers.BalanceHandler) {
+	if db.CentralDB == nil {
+		return
+	}
+	rows, err := db.CentralDB.Query("SELECT id, name FROM schools WHERE is_deleted = false")
+	if err != nil {
+		log.Printf("[Scheduler] Failed to query schools: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			continue
+		}
+
+		dbConn, err := db.TenantConnManager.GetTenantDB(id)
+		if err != nil {
+			log.Printf("[Scheduler] Failed to get tenant DB for %s: %v", name, err)
+			continue
+		}
+
+		log.Printf("[Scheduler] Running charge plans sweep for school %s...", name)
+		chargedCount := balanceHandler.RunSchedulerSweep(dbConn)
+		if chargedCount > 0 {
+			log.Printf("[Scheduler] Successfully charged %d monthly fees for school %s", chargedCount, name)
+		}
 	}
 }

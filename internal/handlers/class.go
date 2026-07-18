@@ -18,7 +18,8 @@ func NewClassHandler() *ClassHandler {
 }
 
 type CreateClassRequest struct {
-	Name string `json:"name" binding:"required"`
+	Name  string `json:"name" binding:"required"`
+	Level *int   `json:"level"`
 }
 
 func (h *ClassHandler) ListClasses(c *gin.Context) {
@@ -47,7 +48,7 @@ func (h *ClassHandler) ListClasses(c *gin.Context) {
 			return
 		}
 		query := `
-			SELECT DISTINCT c.id, c.name, c.is_deleted, c.deleted_at 
+			SELECT DISTINCT c.id, c.name, c.level, c.is_deleted, c.deleted_at 
 			FROM classes c
 			JOIN students s ON s.class_id = c.id
 			JOIN student_parents sp ON sp.student_id = s.id
@@ -61,7 +62,7 @@ func (h *ClassHandler) ListClasses(c *gin.Context) {
 			return
 		}
 		query := `
-			SELECT DISTINCT c.id, c.name, c.is_deleted, c.deleted_at 
+			SELECT DISTINCT c.id, c.name, c.level, c.is_deleted, c.deleted_at 
 			FROM classes c
 			JOIN students s ON s.class_id = c.id
 			WHERE c.is_deleted = false AND s.is_deleted = false AND s.user_id = $1
@@ -74,7 +75,7 @@ func (h *ClassHandler) ListClasses(c *gin.Context) {
 			return
 		}
 		query := `
-			SELECT c.id, c.name, s.id as subject_id, s.name as subject_name
+			SELECT c.id, c.name, c.level, s.id as subject_id, s.name as subject_name
 			FROM classes c
 			JOIN class_teachers ct ON ct.class_id = c.id
 			JOIN subjects s ON ct.subject_id = s.id
@@ -82,7 +83,7 @@ func (h *ClassHandler) ListClasses(c *gin.Context) {
 			ORDER BY c.name ASC`
 		rows, err = dbConn.Query(query, teacherID)
 	} else {
-		rows, err = dbConn.Query("SELECT id, name, is_deleted, deleted_at FROM classes WHERE is_deleted = false ORDER BY name ASC")
+		rows, err = dbConn.Query("SELECT id, name, level, is_deleted, deleted_at FROM classes WHERE is_deleted = false ORDER BY name ASC")
 	}
 
 	if err != nil {
@@ -95,13 +96,14 @@ func (h *ClassHandler) ListClasses(c *gin.Context) {
 		type TeacherClass struct {
 			ID          int    `json:"id"`
 			Name        string `json:"name"`
+			Level       int    `json:"level"`
 			SubjectID   int    `json:"subject_id"`
 			SubjectName string `json:"subject_name"`
 		}
 		classesList := []TeacherClass{}
 		for rows.Next() {
 			var tc TeacherClass
-			if err := rows.Scan(&tc.ID, &tc.Name, &tc.SubjectID, &tc.SubjectName); err != nil {
+			if err := rows.Scan(&tc.ID, &tc.Name, &tc.Level, &tc.SubjectID, &tc.SubjectName); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse records", "details": err.Error()})
 				return
 			}
@@ -114,7 +116,7 @@ func (h *ClassHandler) ListClasses(c *gin.Context) {
 	classes := []models.Class{}
 	for rows.Next() {
 		var class models.Class
-		err := rows.Scan(&class.ID, &class.Name, &class.IsDeleted, &class.DeletedAt)
+		err := rows.Scan(&class.ID, &class.Name, &class.Level, &class.IsDeleted, &class.DeletedAt)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan class data", "details": err.Error()})
 			return
@@ -145,7 +147,11 @@ func (h *ClassHandler) CreateClass(c *gin.Context) {
 
 	// Insert Class record
 	var classID int
-	err = tx.QueryRow("INSERT INTO classes (name) VALUES ($1) RETURNING id", req.Name).Scan(&classID)
+	lvlVal := 1
+	if req.Level != nil {
+		lvlVal = *req.Level
+	}
+	err = tx.QueryRow("INSERT INTO classes (name, level) VALUES ($1, $2) RETURNING id", req.Name, lvlVal).Scan(&classID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write class record", "details": err.Error()})
 		return
@@ -154,6 +160,7 @@ func (h *ClassHandler) CreateClass(c *gin.Context) {
 	newClass := models.Class{
 		ID:        classID,
 		Name:      req.Name,
+		Level:     lvlVal,
 		IsDeleted: false,
 	}
 
@@ -200,8 +207,8 @@ func (h *ClassHandler) UpdateClass(c *gin.Context) {
 
 	// Query old class data before mutating
 	var oldClass models.Class
-	err = tx.QueryRow("SELECT id, name, is_deleted, deleted_at FROM classes WHERE id = $1 AND is_deleted = false", classID).
-		Scan(&oldClass.ID, &oldClass.Name, &oldClass.IsDeleted, &oldClass.DeletedAt)
+	err = tx.QueryRow("SELECT id, name, level, is_deleted, deleted_at FROM classes WHERE id = $1 AND is_deleted = false", classID).
+		Scan(&oldClass.ID, &oldClass.Name, &oldClass.Level, &oldClass.IsDeleted, &oldClass.DeletedAt)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -212,8 +219,13 @@ func (h *ClassHandler) UpdateClass(c *gin.Context) {
 		return
 	}
 
+	lvlVal := oldClass.Level
+	if req.Level != nil {
+		lvlVal = *req.Level
+	}
+
 	// Perform database update
-	_, err = tx.Exec("UPDATE classes SET name = $1 WHERE id = $2", req.Name, classID)
+	_, err = tx.Exec("UPDATE classes SET name = $1, level = $2 WHERE id = $3", req.Name, lvlVal, classID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update class details", "details": err.Error()})
 		return
@@ -222,6 +234,7 @@ func (h *ClassHandler) UpdateClass(c *gin.Context) {
 	updatedClass := models.Class{
 		ID:        classID,
 		Name:      req.Name,
+		Level:     lvlVal,
 		IsDeleted: false,
 	}
 
@@ -262,8 +275,8 @@ func (h *ClassHandler) DeleteClass(c *gin.Context) {
 
 	// Query old class data before mutating
 	var oldClass models.Class
-	err = tx.QueryRow("SELECT id, name, is_deleted, deleted_at FROM classes WHERE id = $1 AND is_deleted = false", classID).
-		Scan(&oldClass.ID, &oldClass.Name, &oldClass.IsDeleted, &oldClass.DeletedAt)
+	err = tx.QueryRow("SELECT id, name, level, is_deleted, deleted_at FROM classes WHERE id = $1 AND is_deleted = false", classID).
+		Scan(&oldClass.ID, &oldClass.Name, &oldClass.Level, &oldClass.IsDeleted, &oldClass.DeletedAt)
 
 	if err != nil {
 		if err == sql.ErrNoRows {

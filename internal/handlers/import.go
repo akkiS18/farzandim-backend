@@ -102,7 +102,7 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		query = fmt.Sprintf(`
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
-			       NULL::int as student_id, NULL::text as student_name,
+			       s.id as student_id, NULL::text as student_name,
 			       u.passport, s.address, s.birthdate, s.ina, s.balance
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
@@ -121,7 +121,7 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		query = fmt.Sprintf(`
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
-			       NULL::int as student_id, NULL::text as student_name,
+			       s.id as student_id, NULL::text as student_name,
 			       u.passport, s.address, s.birthdate, s.ina, s.balance
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
@@ -504,8 +504,6 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 		manzil := getCell(row, "manzil")
 		tugilganSanaStr := getCell(row, "tug'ilgan sana")
 		ina := getCell(row, "guvohnoma raqami")
-		balansStr := getCell(row, "balans")
-
 		var addressPtr *string
 		if manzil != "" {
 			addressPtr = &manzil
@@ -524,19 +522,13 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 		if ina != "" {
 			inaPtr = &ina
 		}
-		balansVal := 0.00
-		if balansStr != "" {
-			if val, err := strconv.ParseFloat(balansStr, 64); err == nil {
-				balansVal = val
-			}
-		}
 
 		var studentID int
 		insertStudentQuery := `
-			INSERT INTO students (user_id, class_id, address, birthdate, ina, balance)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			INSERT INTO students (user_id, class_id, address, birthdate, ina)
+			VALUES ($1, $2, $3, $4, $5)
 			RETURNING id`
-		err = tx.QueryRow(insertStudentQuery, userID, classID, addressPtr, birthdate, inaPtr, balansVal).Scan(&studentID)
+		err = tx.QueryRow(insertStudentQuery, userID, classID, addressPtr, birthdate, inaPtr).Scan(&studentID)
 		if err != nil {
 			tx.Rollback()
 			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("O'quvchi profilini yaratib bo'lmadi: %v", err)})

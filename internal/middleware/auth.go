@@ -18,20 +18,29 @@ type Claims struct {
 func AuthMiddleware(jwtSecret string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header required"})
+		tokenStr := ""
+
+		if authHeader != "" {
+			parts := strings.Split(authHeader, " ")
+			if len(parts) == 2 && parts[0] == "Bearer" {
+				tokenStr = parts[1]
+			} else {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token format (Bearer <token> expected)"})
+				c.Abort()
+				return
+			}
+		}
+
+		if tokenStr == "" {
+			tokenStr = c.Query("token")
+		}
+
+		if tokenStr == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization token required"})
 			c.Abort()
 			return
 		}
 
-		parts := strings.Split(authHeader, " ")
-		if len(parts) != 2 || parts[0] != "Bearer" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token format (Bearer <token> expected)"})
-			c.Abort()
-			return
-		}
-
-		tokenStr := parts[1]
 		claims := &Claims{}
 		token, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
 			return []byte(jwtSecret), nil

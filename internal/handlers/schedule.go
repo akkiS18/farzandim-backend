@@ -107,20 +107,27 @@ func (h *ScheduleHandler) GetSchedule(c *gin.Context) {
 		}
 	}
 
+	targetDayOfWeek := int(parsedQueryDate.Weekday())
+	if targetDayOfWeek == 0 {
+		targetDayOfWeek = 7
+	}
+
 	// 3. Merge exceptions into the schedule list
 	// Replace or cancel existing slots in the list
 	for i, item := range list {
-		if exc, found := exceptions[item.LessonNumber]; found {
-			if exc.SubjectID == nil {
-				list[i].SubjectID = 0
-				list[i].SubjectName = "Bekor qilingan"
-			} else {
-				list[i].SubjectID = *exc.SubjectID
-				if exc.SubjectName != nil {
-					list[i].SubjectName = *exc.SubjectName
+		if item.DayOfWeek == targetDayOfWeek {
+			if exc, found := exceptions[item.LessonNumber]; found {
+				if exc.SubjectID == nil {
+					list[i].SubjectID = 0
+					list[i].SubjectName = "Bekor qilingan"
+				} else {
+					list[i].SubjectID = *exc.SubjectID
+					if exc.SubjectName != nil {
+						list[i].SubjectName = *exc.SubjectName
+					}
 				}
+				delete(exceptions, item.LessonNumber)
 			}
-			delete(exceptions, item.LessonNumber)
 		}
 	}
 

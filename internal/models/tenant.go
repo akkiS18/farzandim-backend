@@ -29,6 +29,7 @@ type User struct {
 type Class struct {
 	ID        int        `json:"id" db:"id"`
 	Name      string     `json:"name" db:"name"`
+	Level     int        `json:"level" db:"level"`
 	IsDeleted bool       `json:"is_deleted" db:"is_deleted"`
 	DeletedAt *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
 }
@@ -136,8 +137,19 @@ type SchoolHoliday struct {
 	UpdatedAt   time.Time  `json:"updated_at" db:"updated_at"`
 }
 
+type MenuInterval struct {
+	ID         int       `json:"id" db:"id"`
+	Name       string    `json:"name" db:"name"`
+	StartDate  time.Time `json:"start_date" db:"start_date"`
+	EndDate    time.Time `json:"end_date" db:"end_date"`
+	CycleWeeks int       `json:"cycle_weeks" db:"cycle_weeks"`
+	CreatedAt  time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at" db:"updated_at"`
+}
+
 type MenuCycle struct {
 	ID         int             `json:"id" db:"id"`
+	IntervalID int             `json:"interval_id" db:"interval_id"`
 	WeekNumber int             `json:"week_number" db:"week_number"`
 	DayOfWeek  int             `json:"day_of_week" db:"day_of_week"`
 	Meals      json.RawMessage `json:"meals" db:"meals"`
@@ -151,5 +163,29 @@ type MenuException struct {
 	Meals     json.RawMessage `json:"meals,omitempty" db:"meals"`
 	CreatedAt time.Time       `json:"created_at" db:"created_at"`
 	UpdatedAt time.Time       `json:"updated_at" db:"updated_at"`
+}
+
+type ChargePlan struct {
+	ID        int       `json:"id" db:"id"`
+	Name      string    `json:"name" db:"name"`
+	Amount    float64   `json:"amount" db:"amount"`
+	StartDate time.Time `json:"start_date" db:"start_date"`
+	EndDate   time.Time `json:"end_date" db:"end_date"`
+	ChargeDay int       `json:"charge_day" db:"charge_day"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
+
+	Levels   []int `json:"levels,omitempty"`
+	Classes  []int `json:"classes,omitempty"`
+	Students []int `json:"students,omitempty"`
+}
+
+type ChargeLog struct {
+	ID            int       `json:"id" db:"id"`
+	ChargePlanID  int       `json:"charge_plan_id" db:"charge_plan_id"`
+	StudentID     int       `json:"student_id" db:"student_id"`
+	BillingMonth  time.Time `json:"billing_month" db:"billing_month"`
+	TransactionID *int      `json:"transaction_id" db:"transaction_id"`
+	CreatedAt     time.Time `json:"created_at" db:"created_at"`
 }
 
