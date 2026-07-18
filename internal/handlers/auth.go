@@ -264,12 +264,13 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 	var passwordHash string
 	var firstName, lastName string
 	var roleName string
+	var passportNull, phoneNull sql.NullString
 	query := `
-		SELECT u.id, u.password_hash, u.first_name, u.last_name, r.name 
+		SELECT u.id, u.password_hash, u.first_name, u.last_name, r.name, u.passport, u.phone 
 		FROM users u 
 		JOIN roles r ON u.role_id = r.id 
 		WHERE u.phone = $1 AND u.is_deleted = false`
-	err := tenantDB.QueryRow(query, req.Phone).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName)
+	err := tenantDB.QueryRow(query, req.Phone).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull)
 
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid phone or password"})
@@ -288,6 +289,15 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 		return
 	}
 
+	var passport *string
+	if passportNull.Valid {
+		passport = &passportNull.String
+	}
+	var phone *string
+	if phoneNull.Valid {
+		phone = &phoneNull.String
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"token": token,
 		"user": gin.H{
@@ -296,6 +306,8 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 			"last_name":  lastName,
 			"role":       roleName,
 			"school_id":  schoolID,
+			"passport":   passport,
+			"phone":      phone,
 		},
 	})
 }

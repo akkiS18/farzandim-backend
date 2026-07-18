@@ -68,6 +68,8 @@ model UserStudent {
   grades     Grade[]
   codes      ParentAccessCode[]
   payment_transactions PaymentTransaction[]
+  charge_plans ChargePlanStudent[]
+  charge_logs ChargeLog[]
 
   @@map("students")
 }
@@ -88,10 +90,12 @@ model StudentParent {
 model Class {
   id         Int           @id @default(autoincrement())
   name       String        @unique // e.g. "5-A", "11-B"
+  level      Int           @default(1)
   is_deleted Boolean       @default(false)
   deleted_at DateTime?
   students   UserStudent[]
   teachers   ClassTeacher[]
+  charge_plans ChargePlanClass[]
 
   @@map("classes")
 }
@@ -198,6 +202,7 @@ model PaymentTransaction {
   type        String      // 'PAYMENT' or 'CHARGE'
   description String?
   created_at  DateTime    @default(now())
+  charge_logs ChargeLog[]
 
   @@map("payment_transactions")
 }
@@ -214,15 +219,30 @@ model SchoolHoliday {
   @@map("school_holidays")
 }
 
+model MenuInterval {
+  id           Int         @id @default(autoincrement())
+  name         String      @db.VarChar(100)
+  start_date   DateTime    @db.Date
+  end_date     DateTime    @db.Date
+  cycle_weeks  Int
+  created_at   DateTime    @default(now())
+  updated_at   DateTime    @updatedAt
+  menu_cycles  MenuCycle[]
+
+  @@map("menu_intervals")
+}
+
 model MenuCycle {
-  id           Int      @id @default(autoincrement())
+  id           Int          @id @default(autoincrement())
+  interval_id  Int
   week_number  Int
   day_of_week  Int
   meals        Json
-  created_at   DateTime @default(now())
-  updated_at   DateTime @updatedAt
+  created_at   DateTime     @default(now())
+  updated_at   DateTime     @updatedAt
+  interval     MenuInterval @relation(fields: [interval_id], references: [id], onDelete: Cascade)
 
-  @@unique([week_number, day_of_week])
+  @@unique([interval_id, week_number, day_of_week])
   @@map("menu_cycles")
 }
 
@@ -234,5 +254,66 @@ model MenuException {
   updated_at  DateTime @updatedAt
 
   @@map("menu_exceptions")
+}
+
+model ChargePlan {
+  id           Int                  @id @default(autoincrement())
+  name         String
+  amount       Decimal              @db.Decimal(12, 2)
+  start_date   DateTime             @db.Date
+  end_date     DateTime             @db.Date
+  charge_day   Int
+  created_at   DateTime             @default(now())
+  updated_at   DateTime             @updatedAt
+  levels       ChargePlanLevel[]
+  classes      ChargePlanClass[]
+  students     ChargePlanStudent[]
+  logs         ChargeLog[]
+
+  @@map("charge_plans")
+}
+
+model ChargePlanLevel {
+  charge_plan_id Int
+  level          Int
+  charge_plan    ChargePlan @relation(fields: [charge_plan_id], references: [id], onDelete: Cascade)
+
+  @@id([charge_plan_id, level])
+  @@map("charge_plan_levels")
+}
+
+model ChargePlanClass {
+  charge_plan_id Int
+  class_id       Int
+  charge_plan    ChargePlan @relation(fields: [charge_plan_id], references: [id], onDelete: Cascade)
+  class          Class      @relation(fields: [class_id], references: [id], onDelete: Cascade)
+
+  @@id([charge_plan_id, class_id])
+  @@map("charge_plan_classes")
+}
+
+model ChargePlanStudent {
+  charge_plan_id Int
+  student_id     Int
+  charge_plan    ChargePlan  @relation(fields: [charge_plan_id], references: [id], onDelete: Cascade)
+  student        UserStudent @relation(fields: [student_id], references: [id], onDelete: Cascade)
+
+  @@id([charge_plan_id, student_id])
+  @@map("charge_plan_students")
+}
+
+model ChargeLog {
+  id             Int                  @id @default(autoincrement())
+  charge_plan_id Int
+  student_id     Int
+  billing_month  DateTime             @db.Date
+  transaction_id Int?
+  created_at     DateTime             @default(now())
+  charge_plan    ChargePlan           @relation(fields: [charge_plan_id], references: [id], onDelete: Cascade)
+  student        UserStudent          @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  transaction    PaymentTransaction?  @relation(fields: [transaction_id], references: [id], onDelete: SetNull)
+
+  @@unique([charge_plan_id, student_id, billing_month])
+  @@map("charge_logs")
 }
 

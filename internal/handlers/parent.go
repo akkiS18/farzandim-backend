@@ -397,11 +397,11 @@ func (h *ParentHandler) UnlinkParent(c *gin.Context) {
 
 // UpdateParentRequest holds editable fields for a parent user
 type UpdateParentRequest struct {
-	FirstName  string  `json:"first_name" binding:"required"`
-	LastName   string  `json:"last_name" binding:"required"`
+	FirstName  *string `json:"first_name"`
+	LastName   *string `json:"last_name"`
 	MiddleName *string `json:"middle_name"`
 	Passport   *string `json:"passport"`
-	Phone      string  `json:"phone" binding:"required"`
+	Phone      *string `json:"phone"`
 	Password   *string `json:"password"`
 }
 
@@ -493,8 +493,36 @@ func (h *ParentHandler) UpdateParent(c *gin.Context) {
 	}
 
 	// Build dynamic update
+	firstName := oldUser.FirstName
+	if req.FirstName != nil && *req.FirstName != "" {
+		firstName = *req.FirstName
+	}
+
+	lastName := oldUser.LastName
+	if req.LastName != nil && *req.LastName != "" {
+		lastName = *req.LastName
+	}
+
+	middleName := oldUser.MiddleName
+	if req.MiddleName != nil {
+		middleName = req.MiddleName
+	}
+
+	passport := oldUser.Passport
+	if req.Passport != nil {
+		passport = req.Passport
+	}
+
+	phone := ""
+	if oldUser.Phone != nil {
+		phone = *oldUser.Phone
+	}
+	if req.Phone != nil && *req.Phone != "" {
+		phone = *req.Phone
+	}
+
 	setClauses := []string{"first_name = $1", "last_name = $2", "middle_name = $3", "passport = $4", "phone = $5", "updated_at = NOW()"}
-	args := []interface{}{req.FirstName, req.LastName, req.MiddleName, req.Passport, req.Phone}
+	args := []interface{}{firstName, lastName, middleName, passport, phone}
 
 	if req.Password != nil && *req.Password != "" {
 		hashed, hashErr := bcrypt.GenerateFromPassword([]byte(*req.Password), bcrypt.DefaultCost)
@@ -511,7 +539,7 @@ func (h *ParentHandler) UpdateParent(c *gin.Context) {
 	_, err = tx.Exec(updateQuery, args...)
 	if err != nil {
 		if strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "users_phone_key") {
-			c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("Telefon raqam '%s' allaqachon ro'yxatdan o'tgan", req.Phone)})
+			c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("Telefon raqam '%s' allaqachon ro'yxatdan o'tgan", phone)})
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Ota-ona ma'lumotlarini yangilashda xatolik", "details": err.Error()})
 		}
@@ -523,7 +551,7 @@ func (h *ParentHandler) UpdateParent(c *gin.Context) {
 		TableName: "users",
 		RecordID:  strconv.Itoa(parentID),
 		OldValues: oldUser,
-		NewValues: map[string]interface{}{"first_name": req.FirstName, "last_name": req.LastName, "middle_name": req.MiddleName, "passport": req.Passport, "phone": req.Phone},
+		NewValues: map[string]interface{}{"first_name": firstName, "last_name": lastName, "middle_name": middleName, "passport": passport, "phone": phone},
 	})
 
 	if err := tx.Commit(); err != nil {
@@ -533,10 +561,69 @@ func (h *ParentHandler) UpdateParent(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"id":          parentID,
-		"first_name":  req.FirstName,
-		"last_name":   req.LastName,
-		"middle_name": req.MiddleName,
-		"passport":    req.Passport,
-		"phone":       req.Phone,
+		"first_name":  firstName,
+		"last_name":   lastName,
+		"middle_name": middleName,
+		"passport":    passport,
+		"phone":       phone,
 	})
+}
+
+// GetParent retrieves a parent user's profile details from the database
+func (h *ParentHandler) GetParent(c *gin.Context) {
+	parentIDStr := c.Param("parent_id")
+	parentID, err := strconv.Atoi(parentIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid parent ID"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	var user struct {
+		ID         int     `json:"id"`
+		FirstName  string  `json:"first_name"`
+		LastName   string  `json:"last_name"`
+		MiddleName *string `json:"middle_name"`
+		Passport   *string `json:"passport"`
+		Phone      *string `json:"phone"`
+		Email      *string `json:"email"`
+		Role       string  `json:"role"`
+	}
+
+	query := `
+		SELECT u.id, u.first_name, u.last_name, u.middle_name, u.passport, u.phone, u.email, r.name
+		FROM users u
+		JOIN roles r ON u.role_id = r.id
+		WHERE u.id = $1 AND u.is_deleted = false`
+
+	var middleName, passport, phone, email sql.NullString
+	err = dbConn.QueryRow(query, parentID).Scan(
+		&user.ID, &user.FirstName, &user.LastName, &middleName, &passport, &phone, &email, &user.Role,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Ota-ona topilmadi"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database query failed", "details": err.Error()})
+		}
+		return
+	}
+
+	if middleName.Valid {
+		user.MiddleName = &middleName.String
+	}
+	if passport.Valid {
+		user.Passport = &passport.String
+	}
+	if phone.Valid {
+		user.Phone = &phone.String
+	}
+	if email.Valid {
+		user.Email = &email.String
+	}
+
+	c.JSON(http.StatusOK, user)
 }

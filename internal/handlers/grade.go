@@ -120,99 +120,124 @@ func (h *GradeHandler) CreateGrade(c *gin.Context) {
 	}
 
 	// 4. Resolve and query active grading system
-	var gsID int
+	var gsID *int
 	var gsName, gsType string
 	var minVal, maxVal sql.NullFloat64
 	var optionsBytes []byte
-
-	if req.GradingSystemID != nil {
-		err = tx.QueryRow("SELECT id, name, type, min_value, max_value, options FROM grading_systems WHERE id = $1", *req.GradingSystemID).
-			Scan(&gsID, &gsName, &gsType, &minVal, &maxVal, &optionsBytes)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Tanlangan baholash tizimi topilmadi"})
-			return
-		}
-	} else {
-		err = tx.QueryRow("SELECT id, name, type, min_value, max_value, options FROM grading_systems WHERE is_active = true").
-			Scan(&gsID, &gsName, &gsType, &minVal, &maxVal, &optionsBytes)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "No active grading system configured for the school"})
-				return
-			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve active grading system details"})
-			return
-		}
-	}
-
-	// 5. Validate grade value using active grading system
 	var numericValue *float64
 
-	switch gsType {
-	case "NUMERIC":
+	isAttendance := req.GradeType != nil && *req.GradeType == "ATTENDANCE"
+	isBehaviorWithoutGS := req.GradeType != nil && *req.GradeType == "BEHAVIOR" && req.GradingSystemID == nil
+
+	if isAttendance {
+		// Validate attendance values: +, -, k
+		if req.Value != "+" && req.Value != "-" && req.Value != "k" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Davomat qiymati faqat '+', '-' yoki 'k' bo'lishi mumkin"})
+			return
+		}
+	} else if isBehaviorWithoutGS {
+		// Validate behavior values: -5 to 5
 		val, err := strconv.ParseFloat(req.Value, 64)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value must be a valid number for '%s' grading system", gsName)})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Xulq qiymati faqat -5 va 5 oralig'idagi son bo'lishi mumkin"})
 			return
 		}
-		if minVal.Valid && val < minVal.Float64 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value %s is below minimum allowed value of %.2f", req.Value, minVal.Float64)})
-			return
-		}
-		if maxVal.Valid && val > maxVal.Float64 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value %s is above maximum allowed value of %.2f", req.Value, maxVal.Float64)})
+		if val < -5 || val > 5 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Xulq qiymati -5 va 5 oralig'ida bo'lishi shart"})
 			return
 		}
 		numericValue = &val
-
-	case "PERCENTAGE":
-		val, err := strconv.ParseFloat(req.Value, 64)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value must be a valid percentage for '%s' grading system", gsName)})
-			return
-		}
-		minLimit := 0.0
-		maxLimit := 100.0
-		if minVal.Valid {
-			minLimit = minVal.Float64
-		}
-		if maxVal.Valid {
-			maxLimit = maxVal.Float64
-		}
-		if val < minLimit || val > maxLimit {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value %s must be between %.2f and %.2f", req.Value, minLimit, maxLimit)})
-			return
-		}
-		numericValue = &val
-
-	case "LETTER":
-		if optionsBytes == nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Active letter grading system options are missing in DB"})
-			return
-		}
-		var opts []GradingSystemOption
-		if err := json.Unmarshal(optionsBytes, &opts); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse grading system options"})
-			return
-		}
-
-		found := false
-		for _, opt := range opts {
-			if opt.Label == req.Value {
-				found = true
-				numericValue = opt.NumericValue
-				break
+	} else {
+		// Retrieve and validate using the requested or active grading system
+		var dbGsID int
+		if req.GradingSystemID != nil {
+			err = tx.QueryRow("SELECT id, name, type, min_value, max_value, options FROM grading_systems WHERE id = $1", *req.GradingSystemID).
+				Scan(&dbGsID, &gsName, &gsType, &minVal, &maxVal, &optionsBytes)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Tanlangan baholash tizimi topilmadi"})
+				return
+			}
+		} else {
+			err = tx.QueryRow("SELECT id, name, type, min_value, max_value, options FROM grading_systems WHERE is_active = true").
+				Scan(&dbGsID, &gsName, &gsType, &minVal, &maxVal, &optionsBytes)
+			if err != nil {
+				if err == sql.ErrNoRows {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "No active grading system configured for the school"})
+					return
+				}
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve active grading system details"})
+				return
 			}
 		}
-		if !found {
-			allowedLabels := make([]string, len(opts))
-			for i, opt := range opts {
-				allowedLabels[i] = opt.Label
+		gsID = &dbGsID
+
+		// 5. Validate grade value using active grading system
+		switch gsType {
+		case "NUMERIC":
+			val, err := strconv.ParseFloat(req.Value, 64)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value must be a valid number for '%s' grading system", gsName)})
+				return
 			}
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": fmt.Sprintf("Invalid grade value '%s' for '%s' grading system. Allowed values: %s", req.Value, gsName, strings.Join(allowedLabels, ", ")),
-			})
-			return
+			if minVal.Valid && val < minVal.Float64 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value %s is below minimum allowed value of %.2f", req.Value, minVal.Float64)})
+				return
+			}
+			if maxVal.Valid && val > maxVal.Float64 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value %s is above maximum allowed value of %.2f", req.Value, maxVal.Float64)})
+				return
+			}
+			numericValue = &val
+
+		case "PERCENTAGE":
+			val, err := strconv.ParseFloat(req.Value, 64)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value must be a valid percentage for '%s' grading system", gsName)})
+				return
+			}
+			minLimit := 0.0
+			maxLimit := 100.0
+			if minVal.Valid {
+				minLimit = minVal.Float64
+			}
+			if maxVal.Valid {
+				maxLimit = maxVal.Float64
+			}
+			if val < minLimit || val > maxLimit {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value %s must be between %.2f and %.2f", req.Value, minLimit, maxLimit)})
+				return
+			}
+			numericValue = &val
+
+		case "LETTER":
+			if optionsBytes == nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Active letter grading system options are missing in DB"})
+				return
+			}
+			var opts []GradingSystemOption
+			if err := json.Unmarshal(optionsBytes, &opts); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse grading system options"})
+				return
+			}
+
+			found := false
+			for _, opt := range opts {
+				if opt.Label == req.Value {
+					found = true
+					numericValue = opt.NumericValue
+					break
+				}
+			}
+			if !found {
+				allowedLabels := make([]string, len(opts))
+				for i, opt := range opts {
+					allowedLabels[i] = opt.Label
+				}
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error": fmt.Sprintf("Invalid grade value '%s' for '%s' grading system. Allowed values: %s", req.Value, gsName, strings.Join(allowedLabels, ", ")),
+				})
+				return
+			}
 		}
 	}
 
@@ -269,6 +294,7 @@ func (h *GradeHandler) CreateGrade(c *gin.Context) {
 		GradeType:        gType,
 		GradeCategory:    gCat,
 		LessonNumber:     req.LessonNumber,
+		GradingSystemID:  gsID,
 		CreatedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
 	}
@@ -563,102 +589,124 @@ func (h *GradeHandler) UpdateGrade(c *gin.Context) {
 	}
 
 	// 4. Query active/selected grading system to validate new value
-	var gsID int
+	var gsID *int
 	var gsName, gsType string
 	var minVal, maxVal sql.NullFloat64
 	var optionsBytes []byte
-
-	if req.GradingSystemID != nil {
-		err = tx.QueryRow("SELECT id, name, type, min_value, max_value, options FROM grading_systems WHERE id = $1", *req.GradingSystemID).
-			Scan(&gsID, &gsName, &gsType, &minVal, &maxVal, &optionsBytes)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Tanlangan baholash tizimi topilmadi"})
-			return
-		}
-	} else {
-		var existingGsID sql.NullInt64
-		tx.QueryRow("SELECT grading_system_id FROM grades WHERE id = $1", gradeID).Scan(&existingGsID)
-		if existingGsID.Valid {
-			err = tx.QueryRow("SELECT id, name, type, min_value, max_value, options FROM grading_systems WHERE id = $1", existingGsID.Int64).
-				Scan(&gsID, &gsName, &gsType, &minVal, &maxVal, &optionsBytes)
-		} else {
-			err = tx.QueryRow("SELECT id, name, type, min_value, max_value, options FROM grading_systems WHERE is_active = true").
-				Scan(&gsID, &gsName, &gsType, &minVal, &maxVal, &optionsBytes)
-		}
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve grading system details"})
-			return
-		}
-	}
-
-	// Validate new grade value
 	var numericValue *float64
 
-	switch gsType {
-	case "NUMERIC":
+	isAttendance := req.GradeType != nil && *req.GradeType == "ATTENDANCE"
+	isBehaviorWithoutGS := req.GradeType != nil && *req.GradeType == "BEHAVIOR" && req.GradingSystemID == nil
+
+	if isAttendance {
+		if req.Value != "+" && req.Value != "-" && req.Value != "k" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Davomat qiymati faqat '+', '-' yoki 'k' bo'lishi mumkin"})
+			return
+		}
+	} else if isBehaviorWithoutGS {
 		val, err := strconv.ParseFloat(req.Value, 64)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value must be a valid number for '%s' grading system", gsName)})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Xulq qiymati faqat -5 va 5 oralig'idagi son bo'lishi mumkin"})
 			return
 		}
-		if minVal.Valid && val < minVal.Float64 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value %s is below minimum allowed value of %.2f", req.Value, minVal.Float64)})
-			return
-		}
-		if maxVal.Valid && val > maxVal.Float64 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value %s is above maximum allowed value of %.2f", req.Value, maxVal.Float64)})
+		if val < -5 || val > 5 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Xulq qiymati -5 va 5 oralig'ida bo'lishi shart"})
 			return
 		}
 		numericValue = &val
-
-	case "PERCENTAGE":
-		val, err := strconv.ParseFloat(req.Value, 64)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value must be a valid percentage for '%s' grading system", gsName)})
-			return
-		}
-		minLimit := 0.0
-		maxLimit := 100.0
-		if minVal.Valid {
-			minLimit = minVal.Float64
-		}
-		if maxVal.Valid {
-			maxLimit = maxVal.Float64
-		}
-		if val < minLimit || val > maxLimit {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value %s must be between %.2f and %.2f", req.Value, minLimit, maxLimit)})
-			return
-		}
-		numericValue = &val
-
-	case "LETTER":
-		if optionsBytes == nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Active letter grading system options are missing in DB"})
-			return
-		}
-		var opts []GradingSystemOption
-		if err := json.Unmarshal(optionsBytes, &opts); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse grading system options"})
-			return
-		}
-
-		found := false
-		for _, opt := range opts {
-			if opt.Label == req.Value {
-				found = true
-				numericValue = opt.NumericValue
-				break
+	} else {
+		var dbGsID int
+		if req.GradingSystemID != nil {
+			err = tx.QueryRow("SELECT id, name, type, min_value, max_value, options FROM grading_systems WHERE id = $1", *req.GradingSystemID).
+				Scan(&dbGsID, &gsName, &gsType, &minVal, &maxVal, &optionsBytes)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Tanlangan baholash tizimi topilmadi"})
+				return
+			}
+		} else {
+			var existingGsID sql.NullInt64
+			tx.QueryRow("SELECT grading_system_id FROM grades WHERE id = $1", gradeID).Scan(&existingGsID)
+			if existingGsID.Valid {
+				err = tx.QueryRow("SELECT id, name, type, min_value, max_value, options FROM grading_systems WHERE id = $1", existingGsID.Int64).
+					Scan(&dbGsID, &gsName, &gsType, &minVal, &maxVal, &optionsBytes)
+			} else {
+				err = tx.QueryRow("SELECT id, name, type, min_value, max_value, options FROM grading_systems WHERE is_active = true").
+					Scan(&dbGsID, &gsName, &gsType, &minVal, &maxVal, &optionsBytes)
+			}
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve grading system details"})
+				return
 			}
 		}
-		if !found {
-			allowedLabels := make([]string, len(opts))
-			for i, opt := range opts {
-				allowedLabels[i] = opt.Label
+		gsID = &dbGsID
+
+		// Validate new grade value
+		switch gsType {
+		case "NUMERIC":
+			val, err := strconv.ParseFloat(req.Value, 64)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value must be a valid number for '%s' grading system", gsName)})
+				return
 			}
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": fmt.Sprintf("Invalid grade value '%s' for '%s' grading system. Allowed values: %s", req.Value, gsName, strings.Join(allowedLabels, ", ")),
-			})
-			return
+			if minVal.Valid && val < minVal.Float64 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value %s is below minimum allowed value of %.2f", req.Value, minVal.Float64)})
+				return
+			}
+			if maxVal.Valid && val > maxVal.Float64 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value %s is above maximum allowed value of %.2f", req.Value, maxVal.Float64)})
+				return
+			}
+			numericValue = &val
+
+		case "PERCENTAGE":
+			val, err := strconv.ParseFloat(req.Value, 64)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value must be a valid percentage for '%s' grading system", gsName)})
+				return
+			}
+			minLimit := 0.0
+			maxLimit := 100.0
+			if minVal.Valid {
+				minLimit = minVal.Float64
+			}
+			if maxVal.Valid {
+				maxLimit = maxVal.Float64
+			}
+			if val < minLimit || val > maxLimit {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value %s must be between %.2f and %.2f", req.Value, minLimit, maxLimit)})
+				return
+			}
+			numericValue = &val
+
+		case "LETTER":
+			if optionsBytes == nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Active letter grading system options are missing in DB"})
+				return
+			}
+			var opts []GradingSystemOption
+			if err := json.Unmarshal(optionsBytes, &opts); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse grading system options"})
+				return
+			}
+
+			found := false
+			for _, opt := range opts {
+				if opt.Label == req.Value {
+					found = true
+					numericValue = opt.NumericValue
+					break
+				}
+			}
+			if !found {
+				allowedLabels := make([]string, len(opts))
+				for i, opt := range opts {
+					allowedLabels[i] = opt.Label
+				}
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error": fmt.Sprintf("Invalid grade value '%s' for '%s' grading system. Allowed values: %s", req.Value, gsName, strings.Join(allowedLabels, ", ")),
+				})
+				return
+			}
 		}
 	}
 
@@ -713,7 +761,7 @@ func (h *GradeHandler) UpdateGrade(c *gin.Context) {
 		GradeDate:        gradeDate,
 		Status:           "marked",
 		ApprovedByParent: false,
-		GradingSystemID:  &gsID,
+		GradingSystemID:  gsID,
 		GradeType:        gType,
 		GradeCategory:    gCat,
 		LessonNumber:     req.LessonNumber,
@@ -952,99 +1000,119 @@ func (h *GradeHandler) BatchCreateGrades(c *gin.Context) {
 			return
 		}
 
-		// Validate value and determine grading system
+		isAttendance := gReq.GradeType != nil && *gReq.GradeType == "ATTENDANCE"
+		isBehaviorWithoutGS := gReq.GradeType != nil && *gReq.GradeType == "BEHAVIOR" && gReq.GradingSystemID == nil
 		var numericValue *float64
 
-		// Resolve grading system for this specific grade
-		var currentGsID int
+		var currentGsID *int
 		var currentGsName, currentGsType string
 		var currentMinVal, currentMaxVal sql.NullFloat64
 		var currentOptionsBytes []byte
 
-		if gReq.GradingSystemID != nil {
-			err = tx.QueryRow("SELECT id, name, type, min_value, max_value, options FROM grading_systems WHERE id = $1", *gReq.GradingSystemID).
-				Scan(&currentGsID, &currentGsName, &currentGsType, &currentMinVal, &currentMaxVal, &currentOptionsBytes)
-			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Student %d: Tanlangan baholash tizimi topilmadi", gReq.StudentID)})
+		if isAttendance {
+			if gReq.Value != "+" && gReq.Value != "-" && gReq.Value != "k" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Student %d: Davomat qiymati faqat '+', '-' yoki 'k' bo'lishi mumkin", gReq.StudentID)})
 				return
 			}
+		} else if isBehaviorWithoutGS {
+			val, err := strconv.ParseFloat(gReq.Value, 64)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Student %d: Xulq qiymati faqat -5 va 5 oralig'idagi son bo'lishi mumkin", gReq.StudentID)})
+				return
+			}
+			if val < -5 || val > 5 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Student %d: Xulq qiymati -5 va 5 oralig'ida bo'lishi shart", gReq.StudentID)})
+				return
+			}
+			numericValue = &val
 		} else {
-			currentGsID = gsID
-			currentGsName = gsName
-			currentGsType = gsType
-			currentMinVal = minVal
-			currentMaxVal = maxVal
-			currentOptionsBytes = optionsBytes
-		}
+			var dbGsID int
+			if gReq.GradingSystemID != nil {
+				err = tx.QueryRow("SELECT id, name, type, min_value, max_value, options FROM grading_systems WHERE id = $1", *gReq.GradingSystemID).
+					Scan(&dbGsID, &currentGsName, &currentGsType, &currentMinVal, &currentMaxVal, &currentOptionsBytes)
+				if err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Student %d: Tanlangan baholash tizimi topilmadi", gReq.StudentID)})
+					return
+				}
+			} else {
+				dbGsID = gsID
+				currentGsName = gsName
+				currentGsType = gsType
+				currentMinVal = minVal
+				currentMaxVal = maxVal
+				currentOptionsBytes = optionsBytes
+			}
+			currentGsID = &dbGsID
 
-		var currentOpts []GradingSystemOption
-		var currentAllowedLabels []string
-		if currentGsType == "LETTER" {
-			if currentOptionsBytes == nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Active letter grading system options are missing in DB"})
-				return
-			}
-			if err := json.Unmarshal(currentOptionsBytes, &currentOpts); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse grading system options"})
-				return
-			}
-			currentAllowedLabels = make([]string, len(currentOpts))
-			for i, opt := range currentOpts {
-				currentAllowedLabels[i] = opt.Label
-			}
-		}
-
-		switch currentGsType {
-		case "NUMERIC":
-			val, err := strconv.ParseFloat(gReq.Value, 64)
-			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value for student %d must be a valid number", gReq.StudentID)})
-				return
-			}
-			if currentMinVal.Valid && val < currentMinVal.Float64 {
-				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade %.2f for student %d is below minimum %.2f", val, gReq.StudentID, currentMinVal.Float64)})
-				return
-			}
-			if currentMaxVal.Valid && val > currentMaxVal.Float64 {
-				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade %.2f for student %d is above maximum %.2f", val, gReq.StudentID, currentMaxVal.Float64)})
-				return
-			}
-			numericValue = &val
-
-		case "PERCENTAGE":
-			val, err := strconv.ParseFloat(gReq.Value, 64)
-			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value for student %d must be a valid percentage", gReq.StudentID)})
-				return
-			}
-			minLimit := 0.0
-			maxLimit := 100.0
-			if currentMinVal.Valid {
-				minLimit = currentMinVal.Float64
-			}
-			if currentMaxVal.Valid {
-				maxLimit = currentMaxVal.Float64
-			}
-			if val < minLimit || val > maxLimit {
-				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade %.2f for student %d must be between %.2f and %.2f", val, gReq.StudentID, minLimit, maxLimit)})
-				return
-			}
-			numericValue = &val
-
-		case "LETTER":
-			found := false
-			for _, opt := range currentOpts {
-				if opt.Label == gReq.Value {
-					found = true
-					numericValue = opt.NumericValue
-					break
+			var currentOpts []GradingSystemOption
+			var currentAllowedLabels []string
+			if currentGsType == "LETTER" {
+				if currentOptionsBytes == nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Active letter grading system options are missing in DB"})
+					return
+				}
+				if err := json.Unmarshal(currentOptionsBytes, &currentOpts); err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse grading system options"})
+					return
+				}
+				currentAllowedLabels = make([]string, len(currentOpts))
+				for i, opt := range currentOpts {
+					currentAllowedLabels[i] = opt.Label
 				}
 			}
-			if !found {
-				c.JSON(http.StatusBadRequest, gin.H{
-					"error": fmt.Sprintf("Invalid grade value '%s' for student %d. Allowed: %s", gReq.Value, gReq.StudentID, strings.Join(currentAllowedLabels, ", ")),
-				})
-				return
+
+			switch currentGsType {
+			case "NUMERIC":
+				val, err := strconv.ParseFloat(gReq.Value, 64)
+				if err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value for student %d must be a valid number", gReq.StudentID)})
+					return
+				}
+				if currentMinVal.Valid && val < currentMinVal.Float64 {
+					c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade %.2f for student %d is below minimum %.2f", val, gReq.StudentID, currentMinVal.Float64)})
+					return
+				}
+				if currentMaxVal.Valid && val > currentMaxVal.Float64 {
+					c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade %.2f for student %d is above maximum %.2f", val, gReq.StudentID, currentMaxVal.Float64)})
+					return
+				}
+				numericValue = &val
+
+			case "PERCENTAGE":
+				val, err := strconv.ParseFloat(gReq.Value, 64)
+				if err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade value for student %d must be a valid percentage", gReq.StudentID)})
+					return
+				}
+				minLimit := 0.0
+				maxLimit := 100.0
+				if currentMinVal.Valid {
+					minLimit = currentMinVal.Float64
+				}
+				if currentMaxVal.Valid {
+					maxLimit = currentMaxVal.Float64
+				}
+				if val < minLimit || val > maxLimit {
+					c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Grade %.2f for student %d must be between %.2f and %.2f", val, gReq.StudentID, minLimit, maxLimit)})
+					return
+				}
+				numericValue = &val
+
+			case "LETTER":
+				found := false
+				for _, opt := range currentOpts {
+					if opt.Label == gReq.Value {
+						found = true
+						numericValue = opt.NumericValue
+						break
+					}
+				}
+				if !found {
+					c.JSON(http.StatusBadRequest, gin.H{
+						"error": fmt.Sprintf("Invalid grade value '%s' for student %d. Allowed: %s", gReq.Value, gReq.StudentID, strings.Join(currentAllowedLabels, ", ")),
+					})
+					return
+				}
 			}
 		}
 
@@ -1099,7 +1167,7 @@ func (h *GradeHandler) BatchCreateGrades(c *gin.Context) {
 			GradeDate:        gradeDate,
 			Status:           "marked",
 			ApprovedByParent: false,
-			GradingSystemID:  &currentGsID,
+			GradingSystemID:  currentGsID,
 			GradeType:        gType,
 			GradeCategory:    gCat,
 			LessonNumber:     gReq.LessonNumber,
