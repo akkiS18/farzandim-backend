@@ -9,6 +9,7 @@ import (
 	"github.com/farzandim/backend/internal/db"
 	"github.com/farzandim/backend/internal/handlers"
 	"github.com/farzandim/backend/internal/middleware"
+	"github.com/farzandim/backend/internal/services"
 	"github.com/gin-gonic/gin"
 )
 
@@ -18,7 +19,28 @@ func main() {
 
 	// 2. Initialize Central DB pool and Tenant DB Connection manager
 	db.InitCentralDB(cfg.CentralDBURL)
+	db.MigrateCentralDB()
 	db.InitTenantManager()
+
+	// Load and start telegram bots for all configured schools from central database
+	log.Println("Starting Telegram Bots for schools...")
+	go func() {
+		// Wait a bit for DB connections to settle
+		time.Sleep(1 * time.Second)
+		rows, err := db.CentralDB.Query("SELECT id, bot_token FROM schools WHERE is_deleted = false AND bot_token IS NOT NULL AND bot_token <> ''")
+		if err != nil {
+			log.Printf("Failed to query schools telegram bot tokens: %v", err)
+			return
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var schoolID, botToken string
+			if err := rows.Scan(&schoolID, &botToken); err == nil {
+				services.Manager.StartBotForSchool(schoolID, botToken)
+			}
+		}
+	}()
 
 	// Run migrations on all existing tenant DBs at startup
 	log.Println("Running startup migrations on all tenant DBs...")
@@ -39,6 +61,10 @@ func main() {
 	holidayHandler := handlers.NewHolidayHandler()
 	menuHandler := handlers.NewMenuHandler()
 	balanceHandler := handlers.NewBalanceHandler()
+	announcementHandler := handlers.NewAnnouncementHandler()
+	commentHandler := handlers.NewCommentHandler()
+	clubHandler := handlers.NewClubHandler()
+	telegramHandler := handlers.NewTelegramHandler()
 
 	// 4. Initialize web server router
 	r := gin.Default()
@@ -198,6 +224,33 @@ func main() {
 		authTenantGroup.GET("/students/:id/next-charge", balanceHandler.GetNextCharge)
 
 		authTenantGroup.POST("/settings/change-password", authHandler.ChangePassword)
+
+		authTenantGroup.GET("/announcements", announcementHandler.ListAnnouncements)
+		authTenantGroup.POST("/announcements", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), announcementHandler.CreateAnnouncement)
+		authTenantGroup.DELETE("/announcements/:id", middleware.RequireRole("ADMIN"), announcementHandler.DeleteAnnouncement)
+
+		// Comments & Feedback Loop
+		authTenantGroup.POST("/grades/:id/comments", middleware.RequireRole("PARENT", "ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), commentHandler.CreateGradeComment)
+		authTenantGroup.POST("/menu/comments", middleware.RequireRole("PARENT", "ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), commentHandler.CreateMenuComment)
+		authTenantGroup.GET("/grades/:id/comments", middleware.RequireRole("PARENT", "ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), commentHandler.GetGradeComments)
+		authTenantGroup.GET("/menu/comments", middleware.RequireRole("PARENT", "ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), commentHandler.GetMenuComments)
+		authTenantGroup.GET("/comments/feed", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER", "PARENT"), commentHandler.GetCommentsFeed)
+
+		// Extracurricular Clubs
+		authTenantGroup.POST("/clubs", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.CreateClub)
+		authTenantGroup.GET("/clubs", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER", "PARENT"), clubHandler.GetClubs)
+		authTenantGroup.POST("/clubs/:id/request", middleware.RequireRole("PARENT"), clubHandler.RequestJoinClub)
+		authTenantGroup.POST("/clubs/:id/cancel-request", middleware.RequireRole("PARENT"), clubHandler.CancelClubRequest)
+		authTenantGroup.GET("/clubs/:id/students", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.GetClubStudents)
+		authTenantGroup.POST("/clubs/:id/approve-student", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.ApproveClubStudent)
+		authTenantGroup.POST("/clubs/:id/add-student", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.AddClubStudentDirectly)
+		authTenantGroup.DELETE("/clubs/:id/remove-student", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.RemoveClubStudent)
+		authTenantGroup.POST("/clubs/:id/schedules", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.CreateClubSchedule)
+		authTenantGroup.DELETE("/clubs/schedules/:schedule_id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.DeleteClubSchedule)
+
+		// Telegram Bot Settings
+		authTenantGroup.GET("/telegram/config", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER", "PARENT"), telegramHandler.GetTelegramConfig)
+		authTenantGroup.POST("/telegram/config", middleware.RequireRole("ADMIN"), telegramHandler.SaveTelegramConfig)
 	}
 
 	// 5. Initialize background scheduler for automated charge plans

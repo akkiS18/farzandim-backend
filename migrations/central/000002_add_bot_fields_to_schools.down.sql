@@ -1,0 +1,2 @@
+ALTER TABLE schools DROP COLUMN IF EXISTS bot_token;
+ALTER TABLE schools DROP COLUMN IF EXISTS bot_username;

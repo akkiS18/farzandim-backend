@@ -1,0 +1,1 @@
+ALTER TABLE menu_comments ADD COLUMN parent_id INT REFERENCES users(id) ON DELETE CASCADE;

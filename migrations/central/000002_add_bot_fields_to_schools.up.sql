@@ -1,0 +1,2 @@
+ALTER TABLE schools ADD COLUMN bot_token VARCHAR(255);
+ALTER TABLE schools ADD COLUMN bot_username VARCHAR(255);
