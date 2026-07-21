@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS club_schedules;
+DROP TABLE IF EXISTS club_students;
+DROP TABLE IF EXISTS clubs;

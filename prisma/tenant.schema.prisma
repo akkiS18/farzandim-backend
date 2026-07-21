@@ -23,6 +23,7 @@ model User {
   last_name     String
   middle_name   String?
   passport      String?
+  telegram_id   String? @unique
   role_id       Int
   role          Role    @relation(fields: [role_id], references: [id])
 
@@ -43,8 +44,16 @@ model User {
   class_teachers ClassTeacher[]
   graded_grades  Grade[]
 
+  // Announcements authored
+  announcements Announcement[]
+
   // Audit Logs
   audit_logs AuditLog[]
+
+  grade_comments         GradeComment[]
+  menu_comments_authored MenuComment[]  @relation("MenuCommentAuthor")
+  menu_comments_parented MenuComment[]  @relation("MenuCommentParent")
+  clubs                  Club[]
 
   @@map("users")
 }
@@ -70,6 +79,8 @@ model UserStudent {
   payment_transactions PaymentTransaction[]
   charge_plans ChargePlanStudent[]
   charge_logs ChargeLog[]
+  announcements AnnouncementStudent[]
+  clubs ClubStudent[]
 
   @@map("students")
 }
@@ -96,6 +107,7 @@ model Class {
   students   UserStudent[]
   teachers   ClassTeacher[]
   charge_plans ChargePlanClass[]
+  announcements AnnouncementClass[]
 
   @@map("classes")
 }
@@ -107,6 +119,7 @@ model Subject {
   deleted_at DateTime?
   teachers   ClassTeacher[]
   grades     Grade[]
+  clubs      Club[]
 
   @@map("subjects")
 }
@@ -147,6 +160,7 @@ model Grade {
   student        UserStudent @relation(fields: [student_id], references: [id])
   subject        Subject     @relation(fields: [subject_id], references: [id])
   teacher        User        @relation(fields: [teacher_id], references: [id])
+  comments       GradeComment[]
 
   @@map("grades")
 }
@@ -317,3 +331,120 @@ model ChargeLog {
   @@map("charge_logs")
 }
 
+model Announcement {
+  id         Int                   @id @default(autoincrement())
+  title      String
+  content    String
+  author_id  Int
+  author     User                  @relation(fields: [author_id], references: [id])
+  is_deleted Boolean               @default(false)
+  deleted_at DateTime?
+  created_at DateTime              @default(now())
+  updated_at DateTime              @updatedAt
+  classes    AnnouncementClass[]
+  levels     AnnouncementLevel[]
+  students   AnnouncementStudent[]
+
+  @@map("announcements")
+}
+
+model AnnouncementClass {
+  announcement_id Int
+  class_id       Int
+  announcement   Announcement @relation(fields: [announcement_id], references: [id], onDelete: Cascade)
+  class          Class        @relation(fields: [class_id], references: [id], onDelete: Cascade)
+
+  @@id([announcement_id, class_id])
+  @@map("announcement_classes")
+}
+
+model AnnouncementLevel {
+  announcement_id Int
+  level           Int
+  announcement    Announcement @relation(fields: [announcement_id], references: [id], onDelete: Cascade)
+
+  @@id([announcement_id, level])
+  @@map("announcement_levels")
+}
+
+model AnnouncementStudent {
+  announcement_id Int
+  student_id      Int
+  announcement    Announcement @relation(fields: [announcement_id], references: [id], onDelete: Cascade)
+  student         UserStudent  @relation(fields: [student_id], references: [id], onDelete: Cascade)
+
+  @@id([announcement_id, student_id])
+  @@map("announcement_students")
+}
+
+model GradeComment {
+  id         Int      @id @default(autoincrement())
+  grade_id   Int
+  grade      Grade    @relation(fields: [grade_id], references: [id], onDelete: Cascade)
+  author_id  Int
+  author     User     @relation(fields: [author_id], references: [id], onDelete: Cascade)
+  content    String
+  created_at DateTime @default(now())
+
+  @@map("grade_comments")
+}
+
+model MenuComment {
+  id         Int      @id @default(autoincrement())
+  menu_date  DateTime @db.Date
+  parent_id  Int
+  parent     User     @relation("MenuCommentParent", fields: [parent_id], references: [id], onDelete: Cascade)
+  author_id  Int
+  author     User     @relation("MenuCommentAuthor", fields: [author_id], references: [id], onDelete: Cascade)
+  content    String
+  created_at DateTime @default(now())
+
+  @@map("menu_comments")
+}
+
+model Club {
+  id                   Int            @id @default(autoincrement())
+  name                 String
+  subject_id           Int
+  subject              Subject        @relation(fields: [subject_id], references: [id], onDelete: Cascade)
+  teacher_id           Int
+  teacher              User           @relation(fields: [teacher_id], references: [id], onDelete: Cascade)
+  allowed_class_levels Int[]
+  is_deleted           Boolean        @default(false)
+  deleted_at           DateTime?
+  created_at           DateTime       @default(now())
+  updated_at           DateTime       @default(now()) @updatedAt
+  students             ClubStudent[]
+  schedules            ClubSchedule[]
+
+  @@map("clubs")
+}
+
+model ClubStudent {
+  id         Int      @id @default(autoincrement())
+  club_id    Int
+  club       Club     @relation(fields: [club_id], references: [id], onDelete: Cascade)
+  student_id Int
+  student    UserStudent @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  status     String   @default("APPROVED")
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt
+
+  @@unique([club_id, student_id])
+  @@map("club_students")
+}
+
+model ClubSchedule {
+  id          Int      @id @default(autoincrement())
+  club_id     Int
+  club        Club     @relation(fields: [club_id], references: [id], onDelete: Cascade)
+  day_of_week Int
+  start_time  String
+  end_time    String
+  is_deleted  Boolean  @default(false)
+  deleted_at  DateTime?
+  created_at  DateTime @default(now())
+  updated_at  DateTime @default(now()) @updatedAt
+
+  @@map("club_schedules")
+}

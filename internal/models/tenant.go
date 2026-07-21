@@ -19,6 +19,7 @@ type User struct {
 	LastName     string     `json:"last_name" db:"last_name"`
 	MiddleName   *string    `json:"middle_name,omitempty" db:"middle_name"`
 	Passport     *string    `json:"passport,omitempty" db:"passport"`
+	TelegramID   *string    `json:"telegram_id,omitempty" db:"telegram_id"`
 	RoleID       int        `json:"role_id" db:"role_id"`
 	IsDeleted    bool       `json:"is_deleted" db:"is_deleted"`
 	DeletedAt    *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
@@ -187,5 +188,68 @@ type ChargeLog struct {
 	BillingMonth  time.Time `json:"billing_month" db:"billing_month"`
 	TransactionID *int      `json:"transaction_id" db:"transaction_id"`
 	CreatedAt     time.Time `json:"created_at" db:"created_at"`
+}
+
+type Announcement struct {
+	ID         int        `json:"id" db:"id"`
+	Title      string     `json:"title" db:"title"`
+	Content    string     `json:"content" db:"content"`
+	AuthorID   int        `json:"author_id" db:"author_id"`
+	AuthorName string     `json:"author_name,omitempty" db:"author_name"`
+	IsDeleted  bool       `json:"is_deleted" db:"is_deleted"`
+	DeletedAt  *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
+	CreatedAt  time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at" db:"updated_at"`
+	ClassIDs   []int      `json:"class_ids,omitempty"`   // Helper for API
+	LevelIDs   []int      `json:"level_ids,omitempty"`   // Helper for API
+	StudentIDs []int      `json:"student_ids,omitempty"` // Helper for API
+}
+
+type AnnouncementClass struct {
+	AnnouncementID int `json:"announcement_id" db:"announcement_id"`
+	ClassID        int `json:"class_id" db:"class_id"`
+}
+
+type AnnouncementLevel struct {
+	AnnouncementID int `json:"announcement_id" db:"announcement_id"`
+	Level          int `json:"level" db:"level"`
+}
+
+type AnnouncementStudent struct {
+	AnnouncementID int `json:"announcement_id" db:"announcement_id"`
+	StudentID      int `json:"student_id" db:"student_id"`
+}
+
+type GradeComment struct {
+	ID        int       `json:"id" db:"id"`
+	GradeID   int       `json:"grade_id" db:"grade_id"`
+	AuthorID  int       `json:"author_id" db:"author_id"`
+	Content   string    `json:"content" db:"content"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+}
+
+type MenuComment struct {
+	ID        int       `json:"id" db:"id"`
+	MenuDate  time.Time `json:"menu_date" db:"menu_date"`
+	ParentID  int       `json:"parent_id" db:"parent_id"`
+	AuthorID  int       `json:"author_id" db:"author_id"`
+	Content   string    `json:"content" db:"content"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+}
+
+type FeedbackComment struct {
+	ID          int        `json:"id" db:"id"`
+	Type        string     `json:"type" db:"type"` // "GRADE" or "MENU"
+	GradeID     *int       `json:"grade_id,omitempty" db:"grade_id"`
+	ParentID    int        `json:"parent_id" db:"parent_id"`
+	AuthorID    int        `json:"author_id" db:"author_id"`
+	Content     string     `json:"content" db:"content"`
+	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
+	AuthorName  string     `json:"author_name" db:"author_name"`
+	SubjectName string     `json:"subject_name,omitempty" db:"subject_name"`
+	GradeValue  string     `json:"grade_value,omitempty" db:"grade_value"`
+	StudentName string     `json:"student_name,omitempty" db:"student_name"`
+	ClassName   string     `json:"class_name,omitempty" db:"class_name"`
+	MenuDate    *time.Time `json:"menu_date,omitempty" db:"menu_date"`
 }
 

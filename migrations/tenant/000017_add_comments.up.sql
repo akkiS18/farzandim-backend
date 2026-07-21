@@ -1,0 +1,15 @@
+CREATE TABLE grade_comments (
+    id SERIAL PRIMARY KEY,
+    grade_id INT NOT NULL REFERENCES grades(id) ON DELETE CASCADE,
+    author_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE menu_comments (
+    id SERIAL PRIMARY KEY,
+    menu_date DATE NOT NULL,
+    author_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

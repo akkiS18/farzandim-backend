@@ -590,17 +590,18 @@ func (h *ParentHandler) GetParent(c *gin.Context) {
 		Phone      *string `json:"phone"`
 		Email      *string `json:"email"`
 		Role       string  `json:"role"`
+		TelegramID *string `json:"telegram_id"`
 	}
 
 	query := `
-		SELECT u.id, u.first_name, u.last_name, u.middle_name, u.passport, u.phone, u.email, r.name
+		SELECT u.id, u.first_name, u.last_name, u.middle_name, u.passport, u.phone, u.email, r.name, u.telegram_id
 		FROM users u
 		JOIN roles r ON u.role_id = r.id
 		WHERE u.id = $1 AND u.is_deleted = false`
 
-	var middleName, passport, phone, email sql.NullString
+	var middleName, passport, phone, email, telegramID sql.NullString
 	err = dbConn.QueryRow(query, parentID).Scan(
-		&user.ID, &user.FirstName, &user.LastName, &middleName, &passport, &phone, &email, &user.Role,
+		&user.ID, &user.FirstName, &user.LastName, &middleName, &passport, &phone, &email, &user.Role, &telegramID,
 	)
 
 	if err != nil {
@@ -623,6 +624,9 @@ func (h *ParentHandler) GetParent(c *gin.Context) {
 	}
 	if email.Valid {
 		user.Email = &email.String
+	}
+	if telegramID.Valid {
+		user.TelegramID = &telegramID.String
 	}
 
 	c.JSON(http.StatusOK, user)
