@@ -65,6 +65,7 @@ func main() {
 	commentHandler := handlers.NewCommentHandler()
 	clubHandler := handlers.NewClubHandler()
 	telegramHandler := handlers.NewTelegramHandler()
+	dashboardHandler := handlers.NewDashboardHandler()
 
 	// 4. Initialize web server router
 	r := gin.Default()
@@ -152,6 +153,8 @@ func main() {
 		authTenantGroup.GET("/classes/:id/schedule-exceptions", scheduleHandler.ListScheduleExceptions)
 		authTenantGroup.POST("/classes/:id/schedule-exceptions", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), scheduleHandler.SaveScheduleException)
 		authTenantGroup.DELETE("/classes/:id/schedule-exceptions/:exception_id", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), scheduleHandler.DeleteScheduleException)
+
+		authTenantGroup.GET("/dashboard/stats", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), dashboardHandler.GetStats)
 
 		authTenantGroup.GET("/users", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER", "PARENT", "STUDENT"), importHandler.ListUsers)
 		authTenantGroup.POST("/import/students", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), importHandler.ImportStudents)
