@@ -18,3 +18,8 @@ tmp/
 .idea/
 .vscode/
 *.swp
+
+# Mock data & Seed scripts
+seed_mock_data.go
+*.xlsx
+
