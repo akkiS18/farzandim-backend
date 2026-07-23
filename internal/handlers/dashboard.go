@@ -32,6 +32,8 @@ type StudentAttendanceStat struct {
 type DashboardStatsResponse struct {
 	Date                  string                  `json:"date"`
 	TotalStudents         int                     `json:"total_students"`
+	TotalClasses          int                     `json:"total_classes"`
+	TotalClubs            int                     `json:"total_clubs"`
 	CompletelyAbsentCount int                     `json:"completely_absent_count"`
 	PartiallyAbsentCount  int                     `json:"partially_absent_count"`
 	Students              []StudentAttendanceStat `json:"students"`
@@ -160,9 +162,17 @@ func (h *DashboardHandler) GetStats(c *gin.Context) {
 		studentList = append(studentList, st)
 	}
 
+	var totalClasses int
+	_ = dbConn.QueryRow("SELECT COUNT(*) FROM classes WHERE is_deleted = false").Scan(&totalClasses)
+
+	var totalClubs int
+	_ = dbConn.QueryRow("SELECT COUNT(*) FROM clubs WHERE is_deleted = false").Scan(&totalClubs)
+
 	resp := DashboardStatsResponse{
 		Date:                  dateParam,
 		TotalStudents:         totalStudents,
+		TotalClasses:          totalClasses,
+		TotalClubs:            totalClubs,
 		CompletelyAbsentCount: completelyAbsent,
 		PartiallyAbsentCount:  partiallyAbsent,
 		Students:              studentList,
