@@ -69,6 +69,22 @@ func (tm *TenantManager) GetTenantDB(schoolID string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to ping tenant DB: %w", err)
 	}
 
+	// Ensure paid_amount and bonus_amount columns exist on payment_transactions, and charge_plan_history table exists
+	_, _ = newDB.Exec(`
+		ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS paid_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00;
+		ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS bonus_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00;
+		CREATE TABLE IF NOT EXISTS charge_plan_history (
+			id SERIAL PRIMARY KEY,
+			charge_plan_id INTEGER NOT NULL REFERENCES charge_plans(id) ON DELETE CASCADE,
+			edited_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+			edited_by_user_name VARCHAR(255),
+			edited_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			old_state JSONB NOT NULL DEFAULT '{}'::jsonb,
+			new_state JSONB NOT NULL DEFAULT '{}'::jsonb,
+			change_summary TEXT
+		);
+	`)
+
 	tm.connections[schoolID] = newDB
 	log.Printf("Successfully established connection to Tenant DB for School ID: %s", schoolID)
 

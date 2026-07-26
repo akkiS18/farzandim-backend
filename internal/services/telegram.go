@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -66,7 +67,7 @@ func (bm *BotManager) StartBotForSchool(schoolID string, token string) {
 				log.Printf("Stopping Telegram Bot loop for school %s", schoolID)
 				return
 			default:
-				url := fmt.Sprintf("%s/getUpdates?offset=%d&timeout=20", apiURL, offset)
+				url := fmt.Sprintf("%s/getUpdates?offset=%d&timeout=20&allowed_updates=[\"message\",\"poll_answer\",\"poll\"]", apiURL, offset)
 				req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 				if err != nil {
 					log.Printf("[%s] Poll request creation error: %v", schoolID, err)
@@ -104,6 +105,13 @@ func (bm *BotManager) StartBotForSchool(schoolID string, token string) {
 							} `json:"chat"`
 							Text string `json:"text"`
 						} `json:"message"`
+						PollAnswer *struct {
+							PollID string `json:"poll_id"`
+							User   struct {
+								ID int64 `json:"id"`
+							} `json:"user"`
+							OptionIDs []int `json:"option_ids"`
+						} `json:"poll_answer"`
 					} `json:"result"`
 				}
 
@@ -123,6 +131,9 @@ func (bm *BotManager) StartBotForSchool(schoolID string, token string) {
 					offset = update.UpdateID + 1
 					if update.Message != nil {
 						bm.handleMessage(schoolID, token, update.Message.Chat.ID, update.Message.Text)
+					}
+					if update.PollAnswer != nil {
+						bm.handlePollAnswer(schoolID, update.PollAnswer.PollID, update.PollAnswer.User.ID, update.PollAnswer.OptionIDs)
 					}
 				}
 			}
@@ -287,6 +298,138 @@ func (bm *BotManager) sendTextMessage(token string, chatID int64, text string) {
 	defer resp.Body.Close()
 }
 
+func (bm *BotManager) sendTextMessageWithButton(token string, chatID int64, text string, buttonText string, buttonURL string) {
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
+	payload := map[string]interface{}{
+		"chat_id":    chatID,
+		"text":       text,
+		"parse_mode": "HTML",
+		"reply_markup": map[string]interface{}{
+			"inline_keyboard": [][]map[string]interface{}{
+				{
+					{"text": buttonText, "url": buttonURL},
+				},
+			},
+		},
+	}
+
+	jsonBytes, _ := json.Marshal(payload)
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
+	if err != nil {
+		log.Printf("Failed to send telegram message with button: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+}
+
+func (bm *BotManager) sendPollMessage(token string, chatID int64, question string, options []string) string {
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendPoll", token)
+
+	if len(question) > 290 {
+		question = question[:287] + "..."
+	}
+
+	payload := map[string]interface{}{
+		"chat_id":      chatID,
+		"question":     question,
+		"options":      options,
+		"is_anonymous": false,
+	}
+
+	jsonBytes, _ := json.Marshal(payload)
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
+	if err != nil {
+		log.Printf("Failed to send telegram poll: %v", err)
+		return ""
+	}
+	defer resp.Body.Close()
+
+	var res struct {
+		Ok     bool `json:"ok"`
+		Result struct {
+			Poll struct {
+				ID string `json:"id"`
+			} `json:"poll"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err == nil && res.Ok {
+		return res.Result.Poll.ID
+	}
+	return ""
+}
+
+func (bm *BotManager) handlePollAnswer(schoolID string, pollID string, telegramUserID int64, optionIDs []int) {
+	if pollID == "" || len(optionIDs) == 0 {
+		return
+	}
+
+	tenantDB, err := db.TenantConnManager.GetTenantDB(schoolID)
+	if err != nil {
+		log.Printf("[%s] handlePollAnswer failed to get tenant DB: %v", schoolID, err)
+		return
+	}
+
+	// 1. Find announcement ID from telegram_polls table or announcements table
+	var annID int
+	err = tenantDB.QueryRow("SELECT announcement_id FROM telegram_polls WHERE telegram_poll_id = $1", pollID).Scan(&annID)
+	if err != nil {
+		err = tenantDB.QueryRow("SELECT id FROM announcements WHERE telegram_poll_id = $1 AND is_deleted = false", pollID).Scan(&annID)
+	}
+	if err != nil {
+		log.Printf("[%s] Poll answer received for poll_id %s but announcement not found: %v", schoolID, pollID, err)
+		return
+	}
+
+	// 2. Find user ID by telegram_id
+	var userID int
+	telegramIDStr := fmt.Sprintf("%d", telegramUserID)
+	err = tenantDB.QueryRow("SELECT id FROM users WHERE telegram_id = $1 AND is_deleted = false", telegramIDStr).Scan(&userID)
+	if err != nil {
+		err = tenantDB.QueryRow("SELECT id FROM users WHERE telegram_id LIKE $1 AND is_deleted = false", "%"+telegramIDStr+"%").Scan(&userID)
+	}
+	if err != nil {
+		log.Printf("[%s] Poll answer received from unknown telegram user %s: %v", schoolID, telegramIDStr, err)
+		return
+	}
+
+	// 3. Find option ID from announcement_poll_options by index
+	optionIndex := optionIDs[0]
+	rows, err := tenantDB.Query("SELECT id FROM announcement_poll_options WHERE announcement_id = $1 ORDER BY id ASC", annID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	var optionList []int
+	for rows.Next() {
+		var optID int
+		if err := rows.Scan(&optID); err == nil {
+			optionList = append(optionList, optID)
+		}
+	}
+
+	if optionIndex < 0 || optionIndex >= len(optionList) {
+		log.Printf("[%s] Option index %d out of bounds for poll %s", schoolID, optionIndex, pollID)
+		return
+	}
+
+	chosenOptionID := optionList[optionIndex]
+
+	// 4. Upsert vote into announcement_poll_votes
+	_, err = tenantDB.Exec(`
+		INSERT INTO announcement_poll_votes (announcement_id, option_id, user_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (announcement_id, user_id)
+		DO UPDATE SET option_id = EXCLUDED.option_id, created_at = NOW()
+	`, annID, chosenOptionID, userID)
+
+	if err != nil {
+		log.Printf("[%s] Failed to record telegram poll vote: %v", schoolID, err)
+	} else {
+		log.Printf("[%s] Successfully synced Telegram poll vote! User %d voted for option %d on announcement %d", schoolID, userID, chosenOptionID, annID)
+	}
+}
+
 // SendAnnouncementNotification sends the announcement to all configured parents
 func SendAnnouncementNotification(schoolID string, ann *models.Announcement) {
 	var token string
@@ -386,14 +529,40 @@ func SendAnnouncementNotification(schoolID string, ann *models.Announcement) {
 		return
 	}
 
-	msgText := fmt.Sprintf("📢 *Yangi e'lon! (%s)*\n\n📌 *%s*\n\n%s", schoolName, ann.Title, ann.Content)
+	frontendURL := os.Getenv("FRONTEND_URL")
+	if frontendURL == "" {
+		frontendURL = "http://localhost:6501"
+	}
 
 	go func() {
 		for _, tid := range telegramIDs {
 			chatID := int64(0)
 			fmt.Sscanf(tid, "%d", &chatID)
 			if chatID != 0 {
-				Manager.sendTextMessage(token, chatID, msgText)
+				if ann.IsPoll && len(ann.PollOptions) >= 2 {
+					var optTexts []string
+					for _, opt := range ann.PollOptions {
+						if strings.TrimSpace(opt.OptionText) != "" {
+							optTexts = append(optTexts, opt.OptionText)
+						}
+					}
+
+					msgText := fmt.Sprintf("📊 <b>Yangi So'rovnoma! (%s)</b>\n\n📌 <b>%s</b>\n\n%s", schoolName, ann.Title, ann.Content)
+					Manager.sendTextMessageWithButton(token, chatID, msgText, "🌐 Portalda ko'rish va ovoz berish", fmt.Sprintf("%s/parents", frontendURL))
+
+					if len(optTexts) >= 2 {
+						time.Sleep(100 * time.Millisecond)
+						pollQuestion := fmt.Sprintf("📊 %s", ann.Title)
+						tgPollID := Manager.sendPollMessage(token, chatID, pollQuestion, optTexts)
+						if tgPollID != "" {
+							_, _ = tenantDB.Exec("INSERT INTO telegram_polls (announcement_id, telegram_poll_id, chat_id) VALUES ($1, $2, $3) ON CONFLICT (telegram_poll_id) DO NOTHING", ann.ID, tgPollID, chatID)
+							_, _ = tenantDB.Exec("UPDATE announcements SET telegram_poll_id = $1 WHERE id = $2", tgPollID, ann.ID)
+						}
+					}
+				} else {
+					msgText := fmt.Sprintf("📢 <b>Yangi e'lon! (%s)</b>\n\n📌 <b>%s</b>\n\n%s", schoolName, ann.Title, ann.Content)
+					Manager.sendTextMessageWithButton(token, chatID, msgText, "🌐 Portalda ko'rish", fmt.Sprintf("%s/parents", frontendURL))
+				}
 				time.Sleep(35 * time.Millisecond)
 			}
 		}

@@ -9,6 +9,7 @@ import (
 	"github.com/farzandim/backend/internal/audit"
 	"github.com/farzandim/backend/internal/models"
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 )
 
 type HolidayHandler struct{}
@@ -18,8 +19,17 @@ func NewHolidayHandler() *HolidayHandler {
 }
 
 type SaveHolidayRequest struct {
-	HolidayDate string `json:"holiday_date" binding:"required"` // Format: YYYY-MM-DD
-	Name        string `json:"name" binding:"required"`
+	HolidayDate   string  `json:"holiday_date" binding:"required"` // Format: YYYY-MM-DD
+	Name          string  `json:"name" binding:"required"`
+	TargetLevels  []int64 `json:"target_levels"`
+	TargetClasses []int64 `json:"target_classes"`
+}
+
+func ensureHolidayColumns(db *sql.DB) {
+	_, _ = db.Exec(`
+		ALTER TABLE school_holidays ADD COLUMN IF NOT EXISTS target_levels INT[];
+		ALTER TABLE school_holidays ADD COLUMN IF NOT EXISTS target_classes INT[];
+	`)
 }
 
 // ListHolidays lists all active school holidays
@@ -27,7 +37,13 @@ func (h *HolidayHandler) ListHolidays(c *gin.Context) {
 	tenantDBVal, _ := c.Get("tenantDB")
 	dbConn := tenantDBVal.(*sql.DB)
 
-	rows, err := dbConn.Query("SELECT id, holiday_date, name, created_at, updated_at FROM school_holidays WHERE is_deleted = false ORDER BY holiday_date ASC")
+	ensureHolidayColumns(dbConn)
+
+	rows, err := dbConn.Query(`
+		SELECT id, holiday_date, name, COALESCE(target_levels, '{}'), COALESCE(target_classes, '{}'), created_at, updated_at 
+		FROM school_holidays 
+		WHERE is_deleted = false 
+		ORDER BY holiday_date ASC`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query holidays", "details": err.Error()})
 		return
@@ -38,11 +54,15 @@ func (h *HolidayHandler) ListHolidays(c *gin.Context) {
 	for rows.Next() {
 		var hol models.SchoolHoliday
 		var holidayDate time.Time
-		if err := rows.Scan(&hol.ID, &holidayDate, &hol.Name, &hol.CreatedAt, &hol.UpdatedAt); err != nil {
+		var targetLevels pq.Int64Array
+		var targetClasses pq.Int64Array
+		if err := rows.Scan(&hol.ID, &holidayDate, &hol.Name, &targetLevels, &targetClasses, &hol.CreatedAt, &hol.UpdatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan holiday record", "details": err.Error()})
 			return
 		}
 		hol.HolidayDate = holidayDate
+		hol.TargetLevels = targetLevels
+		hol.TargetClasses = targetClasses
 		list = append(list, hol)
 	}
 
@@ -66,6 +86,8 @@ func (h *HolidayHandler) SaveHoliday(c *gin.Context) {
 	tenantDBVal, _ := c.Get("tenantDB")
 	dbConn := tenantDBVal.(*sql.DB)
 
+	ensureHolidayColumns(dbConn)
+
 	tx, err := dbConn.Begin()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failure", "details": err.Error()})
@@ -83,9 +105,9 @@ func (h *HolidayHandler) SaveHoliday(c *gin.Context) {
 		if err == sql.ErrNoRows {
 			// Insert new holiday
 			err = tx.QueryRow(`
-				INSERT INTO school_holidays (holiday_date, name)
-				VALUES ($1, $2)
-				RETURNING id`, holidayDate, req.Name).Scan(&holidayID)
+				INSERT INTO school_holidays (holiday_date, name, target_levels, target_classes)
+				VALUES ($1, $2, $3, $4)
+				RETURNING id`, holidayDate, req.Name, pq.Int64Array(req.TargetLevels), pq.Int64Array(req.TargetClasses)).Scan(&holidayID)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to insert holiday", "details": err.Error()})
 				return
@@ -94,7 +116,13 @@ func (h *HolidayHandler) SaveHoliday(c *gin.Context) {
 				Action:    "CREATE",
 				TableName: "school_holidays",
 				RecordID:  strconv.Itoa(holidayID),
-				NewValues: models.SchoolHoliday{ID: holidayID, HolidayDate: holidayDate, Name: req.Name},
+				NewValues: models.SchoolHoliday{
+					ID:            holidayID,
+					HolidayDate:   holidayDate,
+					Name:          req.Name,
+					TargetLevels:  req.TargetLevels,
+					TargetClasses: req.TargetClasses,
+				},
 			})
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error checking holiday", "details": err.Error()})
@@ -104,8 +132,8 @@ func (h *HolidayHandler) SaveHoliday(c *gin.Context) {
 		// Update existing
 		_, err = tx.Exec(`
 			UPDATE school_holidays 
-			SET name = $1, is_deleted = false, deleted_at = NULL, updated_at = NOW() 
-			WHERE id = $2`, req.Name, holidayID)
+			SET name = $1, target_levels = $2, target_classes = $3, is_deleted = false, deleted_at = NULL, updated_at = NOW() 
+			WHERE id = $4`, req.Name, pq.Int64Array(req.TargetLevels), pq.Int64Array(req.TargetClasses), holidayID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update holiday", "details": err.Error()})
 			return
@@ -115,7 +143,7 @@ func (h *HolidayHandler) SaveHoliday(c *gin.Context) {
 			TableName: "school_holidays",
 			RecordID:  strconv.Itoa(holidayID),
 			OldValues: map[string]interface{}{"name": oldName, "is_deleted": isDeleted},
-			NewValues: map[string]interface{}{"name": req.Name, "is_deleted": false},
+			NewValues: map[string]interface{}{"name": req.Name, "target_levels": req.TargetLevels, "target_classes": req.TargetClasses, "is_deleted": false},
 		})
 	}
 

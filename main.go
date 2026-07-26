@@ -1,5 +1,7 @@
 package main
 
+// Main entrypoint for Online Jurnal Backend - Tenant Schema DDL Ready
+
 import (
 	"log"
 	"strings"
@@ -177,11 +179,14 @@ func main() {
 		authTenantGroup.DELETE("/students/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), tenantUserHandler.DeleteStudent)
 		authTenantGroup.POST("/teachers", middleware.RequireRole("ADMIN"), tenantUserHandler.CreateTeacher)
 		authTenantGroup.GET("/teachers", tenantUserHandler.ListTeachers)
+		authTenantGroup.PUT("/teachers/:id", middleware.RequireRole("ADMIN"), tenantUserHandler.UpdateTeacher)
+		authTenantGroup.DELETE("/teachers/:id", middleware.RequireRole("ADMIN"), tenantUserHandler.DeleteTeacher)
 		authTenantGroup.GET("/classes/:id/teachers", tenantUserHandler.ListClassTeachers)
 		authTenantGroup.POST("/classes/:id/teachers", tenantUserHandler.AssignClassTeacher)
 		authTenantGroup.DELETE("/classes/:id/teachers/:class_teacher_id", tenantUserHandler.UnassignClassTeacher)
 		authTenantGroup.GET("/subjects", tenantUserHandler.ListSubjects)
 		authTenantGroup.POST("/subjects", tenantUserHandler.CreateSubject)
+		authTenantGroup.DELETE("/subjects/:id", middleware.RequireRole("ADMIN"), tenantUserHandler.DeleteSubject)
 
 		authTenantGroup.POST("/students/:id/parents", parentHandler.CreateAndLinkParent)
 		authTenantGroup.GET("/students/:id/parents", parentHandler.ListStudentParents)
@@ -222,9 +227,12 @@ func main() {
 		authTenantGroup.GET("/balance/transactions", middleware.RequireRole("ADMIN"), balanceHandler.ListAllTransactions)
 		authTenantGroup.GET("/balance/charge-plans", middleware.RequireRole("ADMIN"), balanceHandler.ListChargePlans)
 		authTenantGroup.POST("/balance/charge-plans", middleware.RequireRole("ADMIN"), balanceHandler.SaveChargePlan)
+		authTenantGroup.PUT("/balance/charge-plans/:id", middleware.RequireRole("ADMIN"), balanceHandler.UpdateChargePlan)
 		authTenantGroup.DELETE("/balance/charge-plans/:id", middleware.RequireRole("ADMIN"), balanceHandler.DeleteChargePlan)
+		authTenantGroup.GET("/balance/charge-plans/:id/history", middleware.RequireRole("ADMIN"), balanceHandler.GetChargePlanHistory)
 		authTenantGroup.POST("/balance/charge-plans/run", middleware.RequireRole("ADMIN"), balanceHandler.TriggerChargesManual)
 		authTenantGroup.POST("/balance/import-payments", middleware.RequireRole("ADMIN"), balanceHandler.ImportPayments)
+		authTenantGroup.GET("/balance/import-template/payments", middleware.RequireRole("ADMIN"), balanceHandler.ExportPaymentTemplate)
 		authTenantGroup.GET("/students/:id/next-charge", balanceHandler.GetNextCharge)
 
 		authTenantGroup.POST("/settings/change-password", authHandler.ChangePassword)
@@ -232,6 +240,7 @@ func main() {
 		authTenantGroup.GET("/announcements", announcementHandler.ListAnnouncements)
 		authTenantGroup.POST("/announcements", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), announcementHandler.CreateAnnouncement)
 		authTenantGroup.DELETE("/announcements/:id", middleware.RequireRole("ADMIN"), announcementHandler.DeleteAnnouncement)
+		authTenantGroup.POST("/announcements/:id/vote", announcementHandler.VotePoll)
 
 		// Comments & Feedback Loop
 		authTenantGroup.POST("/grades/:id/comments", middleware.RequireRole("PARENT", "ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), commentHandler.CreateGradeComment)

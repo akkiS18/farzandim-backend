@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -21,7 +22,9 @@ func NewBalanceHandler() *BalanceHandler {
 }
 
 type CreateTransactionRequest struct {
-	Amount      float64 `json:"amount" binding:"required,gt=0"`
+	Amount      float64 `json:"amount"`
+	PaidAmount  float64 `json:"paid_amount"`
+	BonusAmount float64 `json:"bonus_amount"`
 	Type        string  `json:"type" binding:"required"` // 'PAYMENT' or 'CHARGE'
 	Description string  `json:"description"`
 }
@@ -67,36 +70,77 @@ func (h *BalanceHandler) AddTransaction(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	// 1. Verify student exists and get current balance
+	// 1. Verify student exists and get current balance (Lookup by student.id first, then user_id fallback)
 	var currentBalance float64
 	var classID int
 	err = tx.QueryRow("SELECT class_id, balance FROM students WHERE id = $1 AND is_deleted = false", studentID).Scan(&classID, &currentBalance)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "O'quvchi topilmadi yoki o'chirilgan"})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify student details", "details": err.Error()})
+			// Fallback to user_id lookup in case user_id was passed
+			var realStudentID int
+			err = tx.QueryRow("SELECT id, class_id, balance FROM students WHERE user_id = $1 AND is_deleted = false", studentID).Scan(&realStudentID, &classID, &currentBalance)
+			if err == nil {
+				studentID = realStudentID
+			}
 		}
-		return
+		if err != nil {
+			if err == sql.ErrNoRows {
+				c.JSON(http.StatusNotFound, gin.H{"error": "O'quvchi topilmadi yoki o'chirilgan"})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify student details", "details": err.Error()})
+			}
+			return
+		}
 	}
 
-	// 2. Calculate new balance
-	newBalance := currentBalance
-	signedAmount := req.Amount
+	// 2. Calculate paid, bonus and total amount
+	var paidAmount float64
+	var bonusAmount float64
+	var totalAmount float64
+
 	if req.Type == "PAYMENT" {
-		newBalance += req.Amount
+		paidAmount = req.PaidAmount
+		bonusAmount = req.BonusAmount
+
+		if bonusAmount > 0 && paidAmount == 0 && req.Amount > bonusAmount {
+			paidAmount = req.Amount - bonusAmount
+		} else if paidAmount == 0 && bonusAmount == 0 && req.Amount > 0 {
+			paidAmount = req.Amount
+		}
+
+		totalAmount = paidAmount + bonusAmount
+		if req.Amount > totalAmount {
+			totalAmount = req.Amount
+		}
+
+		if totalAmount <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "To'lov summasi musbat bo'lishi kerak"})
+			return
+		}
 	} else {
-		newBalance -= req.Amount
-		signedAmount = -req.Amount
+		if req.Amount <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Yechim summasi musbat bo'lishi kerak"})
+			return
+		}
+		totalAmount = req.Amount
+	}
+
+	newBalance := currentBalance
+	signedAmount := totalAmount
+	if req.Type == "PAYMENT" {
+		newBalance += totalAmount
+	} else {
+		newBalance -= totalAmount
+		signedAmount = -totalAmount
 	}
 
 	// 3. Insert transaction log
 	var transactionID int
 	insertTxQuery := `
-		INSERT INTO payment_transactions (student_id, amount, type, description)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO payment_transactions (student_id, amount, paid_amount, bonus_amount, type, description)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id`
-	err = tx.QueryRow(insertTxQuery, studentID, signedAmount, req.Type, req.Description).Scan(&transactionID)
+	err = tx.QueryRow(insertTxQuery, studentID, signedAmount, paidAmount, bonusAmount, req.Type, req.Description).Scan(&transactionID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to record transaction log", "details": err.Error()})
 		return
@@ -115,7 +159,7 @@ func (h *BalanceHandler) AddTransaction(c *gin.Context) {
 		TableName: "students",
 		RecordID:  strconv.Itoa(studentID),
 		OldValues: map[string]interface{}{"balance": currentBalance},
-		NewValues: map[string]interface{}{"balance": newBalance, "transaction_id": transactionID, "amount": signedAmount, "type": req.Type},
+		NewValues: map[string]interface{}{"balance": newBalance, "transaction_id": transactionID, "amount": signedAmount, "paid_amount": paidAmount, "bonus_amount": bonusAmount, "type": req.Type},
 	})
 
 	if err := tx.Commit(); err != nil {
@@ -130,6 +174,8 @@ func (h *BalanceHandler) AddTransaction(c *gin.Context) {
 		"old_balance":     currentBalance,
 		"new_balance":     newBalance,
 		"recorded_amount": signedAmount,
+		"paid_amount":     paidAmount,
+		"bonus_amount":    bonusAmount,
 		"type":            req.Type,
 	})
 }
@@ -197,7 +243,15 @@ func (h *BalanceHandler) GetTransactionHistory(c *gin.Context) {
 	}
 
 	rows, err := dbConn.Query(`
-		SELECT id, student_id, amount, type, COALESCE(description, '') as description, created_at 
+		SELECT id, student_id, amount,
+		       CASE 
+		         WHEN type = 'PAYMENT' AND COALESCE(bonus_amount, 0) > 0 THEN (amount - bonus_amount)
+		         WHEN type = 'PAYMENT' AND paid_amount > 0 THEN paid_amount
+		         WHEN type = 'PAYMENT' THEN amount 
+		         ELSE 0 
+		       END as paid_amount,
+		       COALESCE(bonus_amount, 0) as bonus_amount,
+		       type, COALESCE(description, '') as description, created_at 
 		FROM payment_transactions 
 		WHERE student_id = $1 
 		ORDER BY created_at DESC`, studentID)
@@ -211,7 +265,7 @@ func (h *BalanceHandler) GetTransactionHistory(c *gin.Context) {
 	for rows.Next() {
 		var pt models.PaymentTransaction
 		var desc string
-		err := rows.Scan(&pt.ID, &pt.StudentID, &pt.Amount, &pt.Type, &desc, &pt.CreatedAt)
+		err := rows.Scan(&pt.ID, &pt.StudentID, &pt.Amount, &pt.PaidAmount, &pt.BonusAmount, &pt.Type, &desc, &pt.CreatedAt)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan transaction record", "details": err.Error()})
 			return
@@ -229,13 +283,21 @@ func (h *BalanceHandler) ListAllTransactions(c *gin.Context) {
 	dbConn := tenantDBVal.(*sql.DB)
 
 	rows, err := dbConn.Query(`
-		SELECT pt.id, pt.student_id, pt.amount, pt.type, COALESCE(pt.description, '') as description, pt.created_at,
+		SELECT pt.id, pt.student_id, pt.amount,
+		       CASE 
+		         WHEN pt.type = 'PAYMENT' AND COALESCE(pt.bonus_amount, 0) > 0 THEN (pt.amount - pt.bonus_amount)
+		         WHEN pt.type = 'PAYMENT' AND pt.paid_amount > 0 THEN pt.paid_amount
+		         WHEN pt.type = 'PAYMENT' THEN pt.amount 
+		         ELSE 0 
+		       END as paid_amount,
+		       COALESCE(pt.bonus_amount, 0) as bonus_amount,
+		       pt.type, COALESCE(pt.description, '') as description, pt.created_at,
 		       u.first_name, u.last_name, c.name as class_name
 		FROM payment_transactions pt
 		JOIN students s ON pt.student_id = s.id
 		JOIN users u ON s.user_id = u.id
 		JOIN classes c ON s.class_id = c.id
-		ORDER BY pt.created_at DESC LIMIT 200`)
+		ORDER BY pt.created_at DESC LIMIT 500`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query transactions list", "details": err.Error()})
 		return
@@ -243,9 +305,16 @@ func (h *BalanceHandler) ListAllTransactions(c *gin.Context) {
 	defer rows.Close()
 
 	type ExtendedTransaction struct {
-		models.PaymentTransaction
-		StudentName string `json:"student_name"`
-		ClassName   string `json:"class_name"`
+		ID          int       `json:"id"`
+		StudentID   int       `json:"student_id"`
+		Amount      float64   `json:"amount"`
+		PaidAmount  float64   `json:"paid_amount"`
+		BonusAmount float64   `json:"bonus_amount"`
+		Type        string    `json:"type"`
+		Description *string   `json:"description,omitempty"`
+		CreatedAt   time.Time `json:"created_at"`
+		StudentName string    `json:"student_name"`
+		ClassName   string    `json:"class_name"`
 	}
 
 	list := []ExtendedTransaction{}
@@ -253,7 +322,7 @@ func (h *BalanceHandler) ListAllTransactions(c *gin.Context) {
 		var pt ExtendedTransaction
 		var desc string
 		var fname, lname string
-		err := rows.Scan(&pt.ID, &pt.StudentID, &pt.Amount, &pt.Type, &desc, &pt.CreatedAt, &fname, &lname, &pt.ClassName)
+		err := rows.Scan(&pt.ID, &pt.StudentID, &pt.Amount, &pt.PaidAmount, &pt.BonusAmount, &pt.Type, &desc, &pt.CreatedAt, &fname, &lname, &pt.ClassName)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan transaction details", "details": err.Error()})
 			return
@@ -324,6 +393,13 @@ func (h *BalanceHandler) SaveChargePlan(c *gin.Context) {
 			return
 		}
 	}
+
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "CREATE",
+		TableName: "charge_plans",
+		RecordID:  strconv.Itoa(planID),
+		NewValues: req,
+	})
 
 	err = tx.Commit()
 	if err != nil {
@@ -444,6 +520,221 @@ func (h *BalanceHandler) DeleteChargePlan(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Plan deleted successfully"})
+}
+
+// UpdateChargePlan updates an existing charge plan and records its audit history snapshot
+func (h *BalanceHandler) UpdateChargePlan(c *gin.Context) {
+	planIDStr := c.Param("id")
+	planID, err := strconv.Atoi(planIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid plan ID"})
+		return
+	}
+
+	var req CreateChargePlanRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid inputs", "details": err.Error()})
+		return
+	}
+
+	_, err1 := time.Parse("2006-01-02", req.StartDate)
+	endDate, err2 := time.Parse("2006-01-02", req.EndDate)
+	if err1 != nil || err2 != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid date format, must be YYYY-MM-DD"})
+		return
+	}
+
+	// Validate minimum end date: End date cannot be before today
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	if endDate.Before(today) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Tugash sanasi bugungi sanadan oldin bo'lishi mumkin emas"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	userIDVal, _ := c.Get("userID")
+	userIDStr, _ := userIDVal.(string)
+	currentUserID, _ := strconv.Atoi(userIDStr)
+
+	// Fetch current user name for history log
+	var editorName string
+	_ = dbConn.QueryRow("SELECT CONCAT(first_name, ' ', last_name) FROM users WHERE id = $1", currentUserID).Scan(&editorName)
+	if strings.TrimSpace(editorName) == "" {
+		editorName = "Administrator"
+	}
+
+	// Fetch old plan state before edit
+	var oldPlan models.ChargePlan
+	err = dbConn.QueryRow("SELECT id, name, amount, start_date, end_date, charge_day FROM charge_plans WHERE id = $1", planID).
+		Scan(&oldPlan.ID, &oldPlan.Name, &oldPlan.Amount, &oldPlan.StartDate, &oldPlan.EndDate, &oldPlan.ChargeDay)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Plan not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database query error", "details": err.Error()})
+		}
+		return
+	}
+
+	// Fetch old levels, classes, students
+	lvlRows, _ := dbConn.Query("SELECT level FROM charge_plan_levels WHERE charge_plan_id = $1", planID)
+	oldLevels := []int{}
+	for lvlRows.Next() {
+		var l int
+		if err := lvlRows.Scan(&l); err == nil {
+			oldLevels = append(oldLevels, l)
+		}
+	}
+	lvlRows.Close()
+
+	clsRows, _ := dbConn.Query("SELECT class_id FROM charge_plan_classes WHERE charge_plan_id = $1", planID)
+	oldClasses := []int{}
+	for clsRows.Next() {
+		var cl int
+		if err := clsRows.Scan(&cl); err == nil {
+			oldClasses = append(oldClasses, cl)
+		}
+	}
+	clsRows.Close()
+
+	stdRows, _ := dbConn.Query("SELECT student_id FROM charge_plan_students WHERE charge_plan_id = $1", planID)
+	oldStudents := []int{}
+	for stdRows.Next() {
+		var st int
+		if err := stdRows.Scan(&st); err == nil {
+			oldStudents = append(oldStudents, st)
+		}
+	}
+	stdRows.Close()
+
+	oldStateMap := map[string]interface{}{
+		"name":       oldPlan.Name,
+		"amount":     oldPlan.Amount,
+		"start_date": oldPlan.StartDate.Format("2006-01-02"),
+		"end_date":   oldPlan.EndDate.Format("2006-01-02"),
+		"charge_day": oldPlan.ChargeDay,
+		"levels":     oldLevels,
+		"classes":    oldClasses,
+		"students":   oldStudents,
+	}
+
+	// Enforce immutable fields: Amount and StartDate cannot be modified during edit
+	finalAmount := oldPlan.Amount
+	finalStartDate := oldPlan.StartDate
+
+	newStateMap := map[string]interface{}{
+		"name":       req.Name,
+		"amount":     finalAmount,
+		"start_date": finalStartDate.Format("2006-01-02"),
+		"end_date":   endDate.Format("2006-01-02"),
+		"charge_day": req.ChargeDay,
+		"levels":     req.Levels,
+		"classes":    req.Classes,
+		"students":   req.Students,
+	}
+
+	oldJSON, _ := json.Marshal(oldStateMap)
+	newJSON, _ := json.Marshal(newStateMap)
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to begin transaction"})
+		return
+	}
+	defer tx.Rollback()
+
+	// Update main plan (preserving amount and start_date)
+	_, err = tx.Exec(`
+		UPDATE charge_plans 
+		SET name = $1, amount = $2, start_date = $3, end_date = $4, charge_day = $5, updated_at = NOW()
+		WHERE id = $6`, req.Name, finalAmount, finalStartDate, endDate, req.ChargeDay, planID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update charge plan", "details": err.Error()})
+		return
+	}
+
+	// Delete and re-map levels, classes, students
+	_, _ = tx.Exec("DELETE FROM charge_plan_levels WHERE charge_plan_id = $1", planID)
+	_, _ = tx.Exec("DELETE FROM charge_plan_classes WHERE charge_plan_id = $1", planID)
+	_, _ = tx.Exec("DELETE FROM charge_plan_students WHERE charge_plan_id = $1", planID)
+
+	for _, lvl := range req.Levels {
+		_, _ = tx.Exec("INSERT INTO charge_plan_levels (charge_plan_id, level) VALUES ($1, $2)", planID, lvl)
+	}
+	for _, classID := range req.Classes {
+		_, _ = tx.Exec("INSERT INTO charge_plan_classes (charge_plan_id, class_id) VALUES ($1, $2)", planID, classID)
+	}
+	for _, studentID := range req.Students {
+		_, _ = tx.Exec("INSERT INTO charge_plan_students (charge_plan_id, student_id) VALUES ($1, $2)", planID, studentID)
+	}
+
+	// Record audit history snapshot
+	summary := fmt.Sprintf("Reja tahrirlandi: %s tomonidan", editorName)
+	_, err = tx.Exec(`
+		INSERT INTO charge_plan_history (charge_plan_id, edited_by_user_id, edited_by_user_name, old_state, new_state, change_summary)
+		VALUES ($1, $2, $3, $4, $5, $6)`, planID, currentUserID, editorName, oldJSON, newJSON, summary)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to record plan history log", "details": err.Error()})
+		return
+	}
+
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "UPDATE",
+		TableName: "charge_plans",
+		RecordID:  strconv.Itoa(planID),
+		OldValues: oldStateMap,
+		NewValues: newStateMap,
+	})
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit changes"})
+		return
+	}
+
+	// Trigger execution sweep immediately for this updated plan
+	go h.processSinglePlanSweep(dbConn, planID)
+
+	c.JSON(http.StatusOK, gin.H{"message": "To'lov rejasi muvaffaqiyatli yangilandi"})
+}
+
+// GetChargePlanHistory returns the audit history of edits for a plan
+func (h *BalanceHandler) GetChargePlanHistory(c *gin.Context) {
+	planIDStr := c.Param("id")
+	planID, err := strconv.Atoi(planIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid plan ID"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	rows, err := dbConn.Query(`
+		SELECT id, charge_plan_id, edited_by_user_id, COALESCE(edited_by_user_name, 'Administrator') as edited_by_user_name,
+		       edited_at, old_state, new_state, COALESCE(change_summary, '') as change_summary
+		FROM charge_plan_history
+		WHERE charge_plan_id = $1
+		ORDER BY edited_at DESC`, planID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query history", "details": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	list := []models.ChargePlanHistory{}
+	for rows.Next() {
+		var item models.ChargePlanHistory
+		err := rows.Scan(&item.ID, &item.ChargePlanID, &item.EditedByUserID, &item.EditedUserName, &item.EditedAt, &item.OldState, &item.NewState, &item.ChangeSummary)
+		if err != nil {
+			continue
+		}
+		list = append(list, item)
+	}
+
+	c.JSON(http.StatusOK, list)
 }
 
 // TriggerChargesManual executes plans sweep manually
@@ -918,8 +1209,8 @@ func (h *BalanceHandler) ImportPayments(c *gin.Context) {
 
 		var transactionID int
 		err = tx.QueryRow(`
-			INSERT INTO payment_transactions (student_id, amount, type, description)
-			VALUES ($1, $2, 'PAYMENT', $3)
+			INSERT INTO payment_transactions (student_id, amount, paid_amount, bonus_amount, type, description)
+			VALUES ($1, $2, $2, 0.00, 'PAYMENT', $3)
 			RETURNING id`, studentID, amount, descStr).Scan(&transactionID)
 		if err != nil {
 			tx.Rollback()
@@ -960,6 +1251,40 @@ func (h *BalanceHandler) ImportPayments(c *gin.Context) {
 		"failed_count":   failedCount,
 		"errors":         rowErrors,
 	})
+}
+
+// ExportPaymentTemplate generates an Excel template for bulk payment import
+func (h *BalanceHandler) ExportPaymentTemplate(c *gin.Context) {
+	f := excelize.NewFile()
+	defer f.Close()
+
+	sheetName := "Sheet1"
+	f.SetSheetName("Sheet1", sheetName)
+
+	headers := []string{"O'quvchi ID", "Telefon", "Summa", "Izoh"}
+	for colIdx, text := range headers {
+		cell, _ := excelize.CoordinatesToCellName(colIdx+1, 1)
+		f.SetCellValue(sheetName, cell, text)
+	}
+
+	// Add sample rows for guidance
+	f.SetCellValue(sheetName, "A2", "1")
+	f.SetCellValue(sheetName, "B2", "+998901234567")
+	f.SetCellValue(sheetName, "C2", "500000")
+	f.SetCellValue(sheetName, "D2", "Iyul oyi ta'lim to'lovi")
+
+	f.SetCellValue(sheetName, "A3", "2")
+	f.SetCellValue(sheetName, "B3", "+998919876543")
+	f.SetCellValue(sheetName, "C3", "650000")
+	f.SetCellValue(sheetName, "D3", "Kassa orqali naqd to'lov")
+
+	c.Header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	c.Header("Content-Disposition", "attachment; filename=tolovlar_import_shablon.xlsx")
+	c.Header("File-Name", "tolovlar_import_shablon.xlsx")
+
+	if err := f.Write(c.Writer); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Faylni yaratishda xatolik"})
+	}
 }
 
 func lastDayOfMonth(year int, month time.Month) int {

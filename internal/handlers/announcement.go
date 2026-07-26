@@ -21,11 +21,44 @@ func NewAnnouncementHandler() *AnnouncementHandler {
 }
 
 type CreateAnnouncementRequest struct {
-	Title      string `json:"title" binding:"required"`
-	Content    string `json:"content" binding:"required"`
-	ClassIDs   []int  `json:"class_ids"`   // Optional.
-	LevelIDs   []int  `json:"level_ids"`   // Optional.
-	StudentIDs []int  `json:"student_ids"` // Optional.
+	Title      string   `json:"title" binding:"required"`
+	Content    string   `json:"content" binding:"required"`
+	ClassIDs   []int    `json:"class_ids"`   // Optional.
+	LevelIDs   []int    `json:"level_ids"`   // Optional.
+	StudentIDs []int    `json:"student_ids"` // Optional.
+	IsPoll     bool     `json:"is_poll"`
+	Options    []string `json:"options"`
+}
+
+func ensureAnnouncementPollColumns(db *sql.DB) {
+	_, _ = db.Exec(`
+		ALTER TABLE announcements ADD COLUMN IF NOT EXISTS is_poll BOOLEAN NOT NULL DEFAULT FALSE;
+		ALTER TABLE announcements ADD COLUMN IF NOT EXISTS telegram_poll_id VARCHAR(255);
+
+		CREATE TABLE IF NOT EXISTS announcement_poll_options (
+			id SERIAL PRIMARY KEY,
+			announcement_id INT NOT NULL REFERENCES announcements(id) ON DELETE CASCADE,
+			option_text VARCHAR(255) NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS announcement_poll_votes (
+			id SERIAL PRIMARY KEY,
+			announcement_id INT NOT NULL REFERENCES announcements(id) ON DELETE CASCADE,
+			option_id INT NOT NULL REFERENCES announcement_poll_options(id) ON DELETE CASCADE,
+			user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE (announcement_id, user_id)
+		);
+
+		CREATE TABLE IF NOT EXISTS telegram_polls (
+			id SERIAL PRIMARY KEY,
+			announcement_id INT NOT NULL REFERENCES announcements(id) ON DELETE CASCADE,
+			telegram_poll_id VARCHAR(255) NOT NULL UNIQUE,
+			chat_id BIGINT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+	`)
 }
 
 func (h *AnnouncementHandler) CreateAnnouncement(c *gin.Context) {
@@ -37,6 +70,8 @@ func (h *AnnouncementHandler) CreateAnnouncement(c *gin.Context) {
 
 	tenantDBVal, _ := c.Get("tenantDB")
 	dbConn := tenantDBVal.(*sql.DB)
+
+	ensureAnnouncementPollColumns(dbConn)
 
 	userIDVal, _ := c.Get("userID")
 	userIDStr := userIDVal.(string)
@@ -163,15 +198,29 @@ func (h *AnnouncementHandler) CreateAnnouncement(c *gin.Context) {
 	// Insert Announcement
 	var announcementID int
 	query := `
-		INSERT INTO announcements (title, content, author_id) 
-		VALUES ($1, $2, $3) 
+		INSERT INTO announcements (title, content, author_id, is_poll) 
+		VALUES ($1, $2, $3, $4) 
 		RETURNING id, created_at, updated_at
 	`
 	var createdAt, updatedAt time.Time
-	err = tx.QueryRow(query, req.Title, req.Content, userID).Scan(&announcementID, &createdAt, &updatedAt)
+	err = tx.QueryRow(query, req.Title, req.Content, userID, req.IsPoll).Scan(&announcementID, &createdAt, &updatedAt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create announcement", "details": err.Error()})
 		return
+	}
+
+	// Insert poll options if poll
+	if req.IsPoll && len(req.Options) > 0 {
+		for _, optText := range req.Options {
+			optText = strings.TrimSpace(optText)
+			if optText != "" {
+				_, err = tx.Exec("INSERT INTO announcement_poll_options (announcement_id, option_text) VALUES ($1, $2)", announcementID, optText)
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to insert poll option", "details": err.Error()})
+					return
+				}
+			}
+		}
 	}
 
 	// Insert into announcement_classes if specific classes are targetted
@@ -216,17 +265,31 @@ func (h *AnnouncementHandler) CreateAnnouncement(c *gin.Context) {
 		}
 	}
 
+	var pollOptionsList []models.PollOptionResponse
+	if req.IsPoll && len(req.Options) > 0 {
+		for _, optText := range req.Options {
+			optText = strings.TrimSpace(optText)
+			if optText != "" {
+				pollOptionsList = append(pollOptionsList, models.PollOptionResponse{
+					OptionText: optText,
+				})
+			}
+		}
+	}
+
 	ann := models.Announcement{
-		ID:         announcementID,
-		Title:      req.Title,
-		Content:    req.Content,
-		AuthorID:   userID,
-		ClassIDs:   req.ClassIDs,
-		LevelIDs:   req.LevelIDs,
-		StudentIDs: req.StudentIDs,
-		IsDeleted:  false,
-		CreatedAt:  createdAt,
-		UpdatedAt:  updatedAt,
+		ID:          announcementID,
+		Title:       req.Title,
+		Content:     req.Content,
+		AuthorID:    userID,
+		IsPoll:      req.IsPoll,
+		PollOptions: pollOptionsList,
+		ClassIDs:    req.ClassIDs,
+		LevelIDs:    req.LevelIDs,
+		StudentIDs:  req.StudentIDs,
+		IsDeleted:   false,
+		CreatedAt:   createdAt,
+		UpdatedAt:   updatedAt,
 	}
 
 	// Write Audit Log
@@ -256,6 +319,8 @@ func (h *AnnouncementHandler) ListAnnouncements(c *gin.Context) {
 	tenantDBVal, _ := c.Get("tenantDB")
 	dbConn := tenantDBVal.(*sql.DB)
 
+	ensureAnnouncementPollColumns(dbConn)
+
 	roleVal, exists := c.Get("role")
 	role := ""
 	if exists {
@@ -267,6 +332,7 @@ func (h *AnnouncementHandler) ListAnnouncements(c *gin.Context) {
 	if exists {
 		userIDStr = userIDVal.(string)
 	}
+	currentUserID, _ := strconv.Atoi(userIDStr)
 
 	var rows *sql.Rows
 	var err error
@@ -281,7 +347,7 @@ func (h *AnnouncementHandler) ListAnnouncements(c *gin.Context) {
 		query := `
 			SELECT DISTINCT a.id, a.title, a.content, a.author_id, 
 				u.first_name || ' ' || u.last_name as author_name, 
-				a.created_at, a.updated_at
+				a.is_poll, a.created_at, a.updated_at
 			FROM announcements a
 			JOIN users u ON a.author_id = u.id
 			LEFT JOIN announcement_classes ac ON a.id = ac.announcement_id
@@ -319,7 +385,7 @@ func (h *AnnouncementHandler) ListAnnouncements(c *gin.Context) {
 		query := `
 			SELECT DISTINCT a.id, a.title, a.content, a.author_id, 
 				u.first_name || ' ' || u.last_name as author_name, 
-				a.created_at, a.updated_at
+				a.is_poll, a.created_at, a.updated_at
 			FROM announcements a
 			JOIN users u ON a.author_id = u.id
 			LEFT JOIN announcement_classes ac ON a.id = ac.announcement_id
@@ -351,7 +417,7 @@ func (h *AnnouncementHandler) ListAnnouncements(c *gin.Context) {
 		query := `
 			SELECT a.id, a.title, a.content, a.author_id, 
 				u.first_name || ' ' || u.last_name as author_name, 
-				a.created_at, a.updated_at
+				a.is_poll, a.created_at, a.updated_at
 			FROM announcements a
 			JOIN users u ON a.author_id = u.id
 			WHERE a.is_deleted = false
@@ -368,10 +434,33 @@ func (h *AnnouncementHandler) ListAnnouncements(c *gin.Context) {
 	announcements := []models.Announcement{}
 	for rows.Next() {
 		var ann models.Announcement
-		err := rows.Scan(&ann.ID, &ann.Title, &ann.Content, &ann.AuthorID, &ann.AuthorName, &ann.CreatedAt, &ann.UpdatedAt)
+		err := rows.Scan(&ann.ID, &ann.Title, &ann.Content, &ann.AuthorID, &ann.AuthorName, &ann.IsPoll, &ann.CreatedAt, &ann.UpdatedAt)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan announcement data", "details": err.Error()})
 			return
+		}
+
+		if ann.IsPoll {
+			optRows, err := dbConn.Query(`
+				SELECT po.id, po.option_text,
+					(SELECT COUNT(v.id) FROM announcement_poll_votes v WHERE v.option_id = po.id) as vote_count,
+					EXISTS(SELECT 1 FROM announcement_poll_votes v WHERE v.option_id = po.id AND v.user_id = $2) as user_voted
+				FROM announcement_poll_options po
+				WHERE po.announcement_id = $1
+				ORDER BY po.id ASC
+			`, ann.ID, currentUserID)
+
+			if err == nil {
+				var pollOptions []models.PollOptionResponse
+				for optRows.Next() {
+					var opt models.PollOptionResponse
+					if err := optRows.Scan(&opt.ID, &opt.OptionText, &opt.VoteCount, &opt.UserVoted); err == nil {
+						pollOptions = append(pollOptions, opt)
+					}
+				}
+				optRows.Close()
+				ann.PollOptions = pollOptions
+			}
 		}
 
 		// Fetch class IDs linked to this announcement
@@ -506,4 +595,65 @@ func (h *AnnouncementHandler) DeleteAnnouncement(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Announcement successfully deleted"})
+}
+
+type VotePollRequest struct {
+	OptionID int `json:"option_id" binding:"required"`
+}
+
+// VotePoll records or updates a user's vote on an announcement poll
+func (h *AnnouncementHandler) VotePoll(c *gin.Context) {
+	announcementIDStr := c.Param("id")
+	announcementID, err := strconv.Atoi(announcementIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid announcement ID"})
+		return
+	}
+
+	var req VotePollRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "option_id is required"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	userIDVal, _ := c.Get("userID")
+	userIDStr := userIDVal.(string)
+	userID, _ := strconv.Atoi(userIDStr)
+
+	roleVal, roleExists := c.Get("role")
+	if roleExists {
+		role := roleVal.(string)
+		if role == "ADMIN" || role == "MAIN_TEACHER" || role == "SUBJECT_TEACHER" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Admin va o'qituvchilar so'rovnomada ovoz bera olmaydilar (faqat natijalarni ko'rishlari mumkin)"})
+			return
+		}
+	}
+
+	ensureAnnouncementPollColumns(dbConn)
+
+	// Verify option belongs to announcement
+	var exists bool
+	err = dbConn.QueryRow("SELECT EXISTS(SELECT 1 FROM announcement_poll_options WHERE id = $1 AND announcement_id = $2)", req.OptionID, announcementID).Scan(&exists)
+	if err != nil || !exists {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Variant topilmadi"})
+		return
+	}
+
+	// Upsert vote
+	_, err = dbConn.Exec(`
+		INSERT INTO announcement_poll_votes (announcement_id, option_id, user_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (announcement_id, user_id) 
+		DO UPDATE SET option_id = EXCLUDED.option_id, created_at = NOW()
+	`, announcementID, req.OptionID, userID)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Ovoz berishda xatolik", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Ovozingiz muvaffaqiyatli qabul qilindi"})
 }

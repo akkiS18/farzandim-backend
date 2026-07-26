@@ -48,10 +48,11 @@ type Student struct {
 }
 
 type Subject struct {
-	ID        int        `json:"id" db:"id"`
-	Name      string     `json:"name" db:"name"`
-	IsDeleted bool       `json:"is_deleted" db:"is_deleted"`
-	DeletedAt *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
+	ID           int        `json:"id" db:"id"`
+	Name         string     `json:"name" db:"name"`
+	TargetLevels []int64    `json:"target_levels"`
+	IsDeleted    bool       `json:"is_deleted" db:"is_deleted"`
+	DeletedAt    *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
 }
 
 type ClassTeacher struct {
@@ -123,19 +124,23 @@ type PaymentTransaction struct {
 	ID          int       `json:"id" db:"id"`
 	StudentID   int       `json:"student_id" db:"student_id"`
 	Amount      float64   `json:"amount" db:"amount"`
+	PaidAmount  float64   `json:"paid_amount" db:"paid_amount"`
+	BonusAmount float64   `json:"bonus_amount" db:"bonus_amount"`
 	Type        string    `json:"type" db:"type"`
 	Description *string   `json:"description,omitempty" db:"description"`
 	CreatedAt   time.Time `json:"created_at" db:"created_at"`
 }
 
 type SchoolHoliday struct {
-	ID          int        `json:"id" db:"id"`
-	HolidayDate time.Time  `json:"holiday_date" db:"holiday_date"`
-	Name        string     `json:"name" db:"name"`
-	IsDeleted   bool       `json:"is_deleted" db:"is_deleted"`
-	DeletedAt   *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
-	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at" db:"updated_at"`
+	ID            int        `json:"id" db:"id"`
+	HolidayDate   time.Time  `json:"holiday_date" db:"holiday_date"`
+	Name          string     `json:"name" db:"name"`
+	TargetLevels  []int64    `json:"target_levels"`
+	TargetClasses []int64    `json:"target_classes"`
+	IsDeleted     bool       `json:"is_deleted" db:"is_deleted"`
+	DeletedAt     *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
+	CreatedAt     time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at" db:"updated_at"`
 }
 
 type MenuInterval struct {
@@ -181,6 +186,17 @@ type ChargePlan struct {
 	Students []int `json:"students,omitempty"`
 }
 
+type ChargePlanHistory struct {
+	ID             int             `json:"id" db:"id"`
+	ChargePlanID   int             `json:"charge_plan_id" db:"charge_plan_id"`
+	EditedByUserID *int            `json:"edited_by_user_id,omitempty" db:"edited_by_user_id"`
+	EditedUserName string          `json:"edited_by_user_name" db:"edited_by_user_name"`
+	EditedAt       time.Time       `json:"edited_at" db:"edited_at"`
+	OldState       json.RawMessage `json:"old_state" db:"old_state"`
+	NewState       json.RawMessage `json:"new_state" db:"new_state"`
+	ChangeSummary  string          `json:"change_summary" db:"change_summary"`
+}
+
 type ChargeLog struct {
 	ID            int       `json:"id" db:"id"`
 	ChargePlanID  int       `json:"charge_plan_id" db:"charge_plan_id"`
@@ -190,19 +206,28 @@ type ChargeLog struct {
 	CreatedAt     time.Time `json:"created_at" db:"created_at"`
 }
 
+type PollOptionResponse struct {
+	ID         int    `json:"id"`
+	OptionText string `json:"option_text"`
+	VoteCount  int    `json:"vote_count"`
+	UserVoted  bool   `json:"user_voted"`
+}
+
 type Announcement struct {
-	ID         int        `json:"id" db:"id"`
-	Title      string     `json:"title" db:"title"`
-	Content    string     `json:"content" db:"content"`
-	AuthorID   int        `json:"author_id" db:"author_id"`
-	AuthorName string     `json:"author_name,omitempty" db:"author_name"`
-	IsDeleted  bool       `json:"is_deleted" db:"is_deleted"`
-	DeletedAt  *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
-	CreatedAt  time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at" db:"updated_at"`
-	ClassIDs   []int      `json:"class_ids,omitempty"`   // Helper for API
-	LevelIDs   []int      `json:"level_ids,omitempty"`   // Helper for API
-	StudentIDs []int      `json:"student_ids,omitempty"` // Helper for API
+	ID          int                  `json:"id" db:"id"`
+	Title       string               `json:"title" db:"title"`
+	Content     string               `json:"content" db:"content"`
+	AuthorID    int                  `json:"author_id" db:"author_id"`
+	AuthorName  string               `json:"author_name,omitempty" db:"author_name"`
+	IsPoll      bool                 `json:"is_poll" db:"is_poll"`
+	PollOptions []PollOptionResponse `json:"poll_options,omitempty"`
+	IsDeleted   bool                 `json:"is_deleted" db:"is_deleted"`
+	DeletedAt   *time.Time           `json:"deleted_at,omitempty" db:"deleted_at"`
+	CreatedAt   time.Time            `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time            `json:"updated_at" db:"updated_at"`
+	ClassIDs    []int                `json:"class_ids,omitempty"`   // Helper for API
+	LevelIDs    []int                `json:"level_ids,omitempty"`   // Helper for API
+	StudentIDs  []int                `json:"student_ids,omitempty"` // Helper for API
 }
 
 type AnnouncementClass struct {

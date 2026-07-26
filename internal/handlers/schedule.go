@@ -40,9 +40,22 @@ func (h *ScheduleHandler) GetSchedule(c *gin.Context) {
 	tenantDBVal, _ := c.Get("tenantDB")
 	dbConn := tenantDBVal.(*sql.DB)
 
-	// Check if this date is a holiday
+	// Check if this date is a holiday for this class
+	var classLevel int
+	_ = dbConn.QueryRow("SELECT level FROM classes WHERE id = $1 AND is_deleted = false", classID).Scan(&classLevel)
+
 	var isHoliday bool
-	err = dbConn.QueryRow("SELECT EXISTS(SELECT 1 FROM school_holidays WHERE holiday_date = $1 AND is_deleted = false)", parsedQueryDate).Scan(&isHoliday)
+	err = dbConn.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM school_holidays 
+			WHERE holiday_date = $1 AND is_deleted = false
+			  AND (
+				(cardinality(target_levels) IS NULL OR cardinality(target_levels) = 0)
+				AND (cardinality(target_classes) IS NULL OR cardinality(target_classes) = 0)
+				OR $2 = ANY(target_levels)
+				OR $3 = ANY(target_classes)
+			  )
+		)`, parsedQueryDate, classLevel, classID).Scan(&isHoliday)
 	if err == nil && isHoliday {
 		c.JSON(http.StatusOK, []models.ClassScheduleResponse{})
 		return

@@ -11,6 +11,7 @@ import (
 	"github.com/farzandim/backend/internal/audit"
 	"github.com/farzandim/backend/internal/models"
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -40,6 +41,15 @@ type CreateTeacherRequest struct {
 	Email      *string `json:"email"`
 }
 
+type UpdateTeacherRequest struct {
+	FirstName  string  `json:"first_name" binding:"required"`
+	LastName   string  `json:"last_name" binding:"required"`
+	MiddleName *string `json:"middle_name"`
+	Phone      string  `json:"phone" binding:"required"`
+	RoleName   string  `json:"role" binding:"required"` // MAIN_TEACHER or SUBJECT_TEACHER
+	Password   *string `json:"password"`
+}
+
 type AssignTeacherRequest struct {
 	TeacherID     int  `json:"teacher_id" binding:"required"`
 	SubjectID     int  `json:"subject_id" binding:"required"`
@@ -47,7 +57,8 @@ type AssignTeacherRequest struct {
 }
 
 type SubjectRequest struct {
-	Name string `json:"name" binding:"required"`
+	Name         string  `json:"name" binding:"required"`
+	TargetLevels []int64 `json:"target_levels"`
 }
 
 type ClassTeacherResponse struct {
@@ -311,6 +322,190 @@ func (h *TenantUserHandler) ListTeachers(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, teachers)
+}
+
+// UpdateTeacher updates a teacher user's profile details
+func (h *TenantUserHandler) UpdateTeacher(c *gin.Context) {
+	teacherIDStr := c.Param("id")
+	teacherID, err := strconv.Atoi(teacherIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid teacher ID"})
+		return
+	}
+
+	var req UpdateTeacherRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid fields", "details": err.Error()})
+		return
+	}
+
+	req.RoleName = strings.ToUpper(req.RoleName)
+	if req.RoleName != "MAIN_TEACHER" && req.RoleName != "SUBJECT_TEACHER" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Rol faqat MAIN_TEACHER yoki SUBJECT_TEACHER bo'lishi mumkin"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	var roleID int
+	err = dbConn.QueryRow("SELECT id FROM roles WHERE name = $1", req.RoleName).Scan(&roleID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Role '%s' is not initialized", req.RoleName)})
+		return
+	}
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failure", "details": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	// Get old user details for audit
+	var oldUser models.User
+	var oldPhoneNull, oldMiddleNameNull sql.NullString
+	err = tx.QueryRow(`
+		SELECT u.id, u.first_name, u.last_name, u.middle_name, u.phone, u.role_id 
+		FROM users u 
+		JOIN roles r ON u.role_id = r.id
+		WHERE u.id = $1 AND r.name IN ('MAIN_TEACHER', 'SUBJECT_TEACHER') AND u.is_deleted = false
+	`, teacherID).Scan(&oldUser.ID, &oldUser.FirstName, &oldUser.LastName, &oldMiddleNameNull, &oldPhoneNull, &oldUser.RoleID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "O'qituvchi topilmadi"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query teacher details", "details": err.Error()})
+		}
+		return
+	}
+	if oldMiddleNameNull.Valid {
+		oldUser.MiddleName = &oldMiddleNameNull.String
+	}
+	if oldPhoneNull.Valid {
+		oldUser.Phone = &oldPhoneNull.String
+	}
+
+	setClauses := []string{
+		"first_name = $1",
+		"last_name = $2",
+		"middle_name = $3",
+		"phone = $4",
+		"role_id = $5",
+		"updated_at = NOW()",
+	}
+	args := []interface{}{req.FirstName, req.LastName, req.MiddleName, req.Phone, roleID}
+
+	if req.Password != nil && *req.Password != "" {
+		hashed, hashErr := bcrypt.GenerateFromPassword([]byte(*req.Password), bcrypt.DefaultCost)
+		if hashErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encrypt password"})
+			return
+		}
+		setClauses = append(setClauses, fmt.Sprintf("password_hash = $%d", len(args)+1))
+		args = append(args, string(hashed))
+	}
+
+	args = append(args, teacherID)
+	updateQuery := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d", strings.Join(setClauses, ", "), len(args))
+
+	_, err = tx.Exec(updateQuery, args...)
+	if err != nil {
+		if strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "users_phone_key") {
+			c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("Telefon raqam '%s' allaqachon ro'yxatdan o'tgan", req.Phone)})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update teacher profile", "details": err.Error()})
+		}
+		return
+	}
+
+	newUser := models.User{
+		ID:         teacherID,
+		FirstName:  req.FirstName,
+		LastName:   req.LastName,
+		MiddleName: req.MiddleName,
+		Phone:      &req.Phone,
+		RoleID:     roleID,
+		IsDeleted:  false,
+	}
+
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "UPDATE",
+		TableName: "users",
+		RecordID:  strconv.Itoa(teacherID),
+		OldValues: oldUser,
+		NewValues: newUser,
+	})
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit teacher update", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, newUser)
+}
+
+// DeleteTeacher soft-deletes a teacher user and unassigns from class subjects
+func (h *TenantUserHandler) DeleteTeacher(c *gin.Context) {
+	teacherIDStr := c.Param("id")
+	teacherID, err := strconv.Atoi(teacherIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid teacher ID"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failure", "details": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	var oldUser models.User
+	err = tx.QueryRow(`
+		SELECT u.id, u.first_name, u.last_name, u.role_id 
+		FROM users u
+		JOIN roles r ON u.role_id = r.id
+		WHERE u.id = $1 AND r.name IN ('MAIN_TEACHER', 'SUBJECT_TEACHER') AND u.is_deleted = false
+	`, teacherID).Scan(&oldUser.ID, &oldUser.FirstName, &oldUser.LastName, &oldUser.RoleID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "O'qituvchi topilmadi"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query teacher", "details": err.Error()})
+		}
+		return
+	}
+
+	now := time.Now()
+	_, err = tx.Exec("UPDATE users SET is_deleted = true, deleted_at = $1 WHERE id = $2", now, teacherID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to soft delete user", "details": err.Error()})
+		return
+	}
+
+	_, err = tx.Exec("UPDATE class_teachers SET is_deleted = true, deleted_at = $1 WHERE teacher_id = $2", now, teacherID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to unassign class teacher links", "details": err.Error()})
+		return
+	}
+
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "DELETE",
+		TableName: "users",
+		RecordID:  strconv.Itoa(teacherID),
+		OldValues: oldUser,
+	})
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit deletion", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "O'qituvchi muvaffaqiyatli o'chirildi"})
 }
 
 // ListClassTeachers lists teachers assigned to a specific class
@@ -618,12 +813,18 @@ func (h *TenantUserHandler) UnassignClassTeacher(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "O'qituvchi sinfdan muvaffaqiyatli o'chirildi"})
 }
 
+func ensureSubjectColumns(db *sql.DB) {
+	_, _ = db.Exec(`ALTER TABLE subjects ADD COLUMN IF NOT EXISTS target_levels INT[];`)
+}
+
 // ListSubjects fetches all active subjects
 func (h *TenantUserHandler) ListSubjects(c *gin.Context) {
 	tenantDBVal, _ := c.Get("tenantDB")
 	dbConn := tenantDBVal.(*sql.DB)
 
-	rows, err := dbConn.Query("SELECT id, name FROM subjects WHERE is_deleted = false ORDER BY name ASC")
+	ensureSubjectColumns(dbConn)
+
+	rows, err := dbConn.Query("SELECT id, name, COALESCE(target_levels, '{}') FROM subjects WHERE is_deleted = false ORDER BY name ASC")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query subjects", "details": err.Error()})
 		return
@@ -633,10 +834,12 @@ func (h *TenantUserHandler) ListSubjects(c *gin.Context) {
 	list := []models.Subject{}
 	for rows.Next() {
 		var s models.Subject
-		if err := rows.Scan(&s.ID, &s.Name); err != nil {
+		var targetLevels pq.Int64Array
+		if err := rows.Scan(&s.ID, &s.Name, &targetLevels); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan subject", "details": err.Error()})
 			return
 		}
+		s.TargetLevels = targetLevels
 		list = append(list, s)
 	}
 
@@ -654,6 +857,8 @@ func (h *TenantUserHandler) CreateSubject(c *gin.Context) {
 	tenantDBVal, _ := c.Get("tenantDB")
 	dbConn := tenantDBVal.(*sql.DB)
 
+	ensureSubjectColumns(dbConn)
+
 	tx, err := dbConn.Begin()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failure", "details": err.Error()})
@@ -669,7 +874,10 @@ func (h *TenantUserHandler) CreateSubject(c *gin.Context) {
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// Insert new
-			err = tx.QueryRow("INSERT INTO subjects (name) VALUES ($1) RETURNING id", strings.TrimSpace(req.Name)).Scan(&subjectID)
+			err = tx.QueryRow(`
+				INSERT INTO subjects (name, target_levels) 
+				VALUES ($1, $2) 
+				RETURNING id`, strings.TrimSpace(req.Name), pq.Int64Array(req.TargetLevels)).Scan(&subjectID)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write subject record", "details": err.Error()})
 				return
@@ -680,8 +888,8 @@ func (h *TenantUserHandler) CreateSubject(c *gin.Context) {
 		}
 	} else {
 		if isDeleted {
-			// Reactivate
-			_, err = tx.Exec("UPDATE subjects SET is_deleted = false, deleted_at = NULL WHERE id = $1", subjectID)
+			// Reactivate & Update levels
+			_, err = tx.Exec("UPDATE subjects SET is_deleted = false, deleted_at = NULL, target_levels = $2 WHERE id = $1", subjectID, pq.Int64Array(req.TargetLevels))
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reactivate subject", "details": err.Error()})
 				return
@@ -693,9 +901,10 @@ func (h *TenantUserHandler) CreateSubject(c *gin.Context) {
 	}
 
 	newSubject := models.Subject{
-		ID:        subjectID,
-		Name:      strings.TrimSpace(req.Name),
-		IsDeleted: false,
+		ID:           subjectID,
+		Name:         strings.TrimSpace(req.Name),
+		TargetLevels: req.TargetLevels,
+		IsDeleted:    false,
 	}
 
 	audit.LogChange(c, tx, audit.LogData{
@@ -711,6 +920,52 @@ func (h *TenantUserHandler) CreateSubject(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, newSubject)
+}
+
+// DeleteSubject soft-deletes a subject
+func (h *TenantUserHandler) DeleteSubject(c *gin.Context) {
+	idStr := c.Param("id")
+	subjectID, err := strconv.Atoi(idStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid subject ID"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failure", "details": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	var exists bool
+	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM subjects WHERE id = $1 AND is_deleted = false)", subjectID).Scan(&exists)
+	if err != nil || !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Fan topilmadi"})
+		return
+	}
+
+	_, err = tx.Exec("UPDATE subjects SET is_deleted = true, deleted_at = NOW() WHERE id = $1", subjectID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete subject", "details": err.Error()})
+		return
+	}
+
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "DELETE",
+		TableName: "subjects",
+		RecordID:  strconv.Itoa(subjectID),
+	})
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit delete subject", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Fan muvaffaqiyatli o'chirildi"})
 }
 
 // UpdateStudentRequest holds fields that can be updated for a student
