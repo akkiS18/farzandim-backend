@@ -252,9 +252,22 @@ func (h *GradeHandler) CreateGrade(c *gin.Context) {
 		gradeDate = parsedDate
 	}
 
-	// Check if this date falls on a holiday
+	// Check if this date falls on a holiday for this class
+	var classLevel int
+	_ = tx.QueryRow("SELECT level FROM classes WHERE id = $1 AND is_deleted = false", studentClassID).Scan(&classLevel)
+
 	var isHoliday bool
-	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM school_holidays WHERE holiday_date = $1::date AND is_deleted = false)", gradeDate.Format("2006-01-02")).Scan(&isHoliday)
+	err = tx.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM school_holidays 
+			WHERE holiday_date = $1::date AND is_deleted = false
+			  AND (
+				(cardinality(target_levels) IS NULL OR cardinality(target_levels) = 0)
+				AND (cardinality(target_classes) IS NULL OR cardinality(target_classes) = 0)
+				OR $2 = ANY(target_levels)
+				OR $3 = ANY(target_classes)
+			  )
+		)`, gradeDate.Format("2006-01-02"), classLevel, studentClassID).Scan(&isHoliday)
 	if err == nil && isHoliday {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Dam olish kunlarida baho qo'yish taqiqlanadi"})
 		return
@@ -723,9 +736,22 @@ func (h *GradeHandler) UpdateGrade(c *gin.Context) {
 		gradeDate = oldGrade.GradeDate // Preserve previous date if not provided
 	}
 
-	// Check if this date falls on a holiday
+	// Check if this date falls on a holiday for this class
+	var studentClassID, classLevel int
+	_ = tx.QueryRow("SELECT c.id, c.level FROM students s JOIN classes c ON s.class_id = c.id WHERE s.id = $1", oldGrade.StudentID).Scan(&studentClassID, &classLevel)
+
 	var isHoliday bool
-	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM school_holidays WHERE holiday_date = $1::date AND is_deleted = false)", gradeDate.Format("2006-01-02")).Scan(&isHoliday)
+	err = tx.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM school_holidays 
+			WHERE holiday_date = $1::date AND is_deleted = false
+			  AND (
+				(cardinality(target_levels) IS NULL OR cardinality(target_levels) = 0)
+				AND (cardinality(target_classes) IS NULL OR cardinality(target_classes) = 0)
+				OR $2 = ANY(target_levels)
+				OR $3 = ANY(target_classes)
+			  )
+		)`, gradeDate.Format("2006-01-02"), classLevel, studentClassID).Scan(&isHoliday)
 	if err == nil && isHoliday {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Dam olish kunlarida baho qo'yish taqiqlanadi"})
 		return
@@ -1127,9 +1153,22 @@ func (h *GradeHandler) BatchCreateGrades(c *gin.Context) {
 			gradeDate = parsedDate
 		}
 
-		// Check if grade date falls on a holiday
+		// Check if grade date falls on a holiday for this student's class
+		var classLevel int
+		_ = tx.QueryRow("SELECT level FROM classes WHERE id = $1 AND is_deleted = false", studentClassID).Scan(&classLevel)
+
 		var isHoliday bool
-		err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM school_holidays WHERE holiday_date = $1::date AND is_deleted = false)", gradeDate.Format("2006-01-02")).Scan(&isHoliday)
+		err = tx.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM school_holidays 
+				WHERE holiday_date = $1::date AND is_deleted = false
+				  AND (
+					(cardinality(target_levels) IS NULL OR cardinality(target_levels) = 0)
+					AND (cardinality(target_classes) IS NULL OR cardinality(target_classes) = 0)
+					OR $2 = ANY(target_levels)
+					OR $3 = ANY(target_classes)
+				  )
+			)`, gradeDate.Format("2006-01-02"), classLevel, studentClassID).Scan(&isHoliday)
 		if err == nil && isHoliday {
 			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("O'quvchi %d uchun baho qo'yish taqiqlanadi: dam olish kuni", gReq.StudentID)})
 			return

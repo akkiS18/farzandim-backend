@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/farzandim/backend/internal/audit"
 	"github.com/farzandim/backend/internal/models"
 	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
@@ -61,6 +62,13 @@ func (h *ClubHandler) CreateClub(c *gin.Context) {
 			return
 		}
 	}
+
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "CREATE",
+		TableName: "clubs",
+		RecordID:  strconv.Itoa(clubID),
+		NewValues: req,
+	})
 
 	if err := tx.Commit(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Commit xatoligi"})

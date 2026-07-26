@@ -209,14 +209,16 @@ model AuditLog {
 }
 
 model PaymentTransaction {
-  id          Int         @id @default(autoincrement())
-  student_id  Int
-  student     UserStudent @relation(fields: [student_id], references: [id])
-  amount      Decimal     @db.Decimal(12, 2)
-  type        String      // 'PAYMENT' or 'CHARGE'
-  description String?
-  created_at  DateTime    @default(now())
-  charge_logs ChargeLog[]
+  id           Int         @id @default(autoincrement())
+  student_id   Int
+  student      UserStudent @relation(fields: [student_id], references: [id])
+  amount       Decimal     @db.Decimal(12, 2)
+  paid_amount  Decimal     @default(0.00) @db.Decimal(12, 2)
+  bonus_amount Decimal     @default(0.00) @db.Decimal(12, 2)
+  type         String      // 'PAYMENT' or 'CHARGE'
+  description  String?
+  created_at   DateTime    @default(now())
+  charge_logs  ChargeLog[]
 
   @@map("payment_transactions")
 }
