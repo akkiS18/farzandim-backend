@@ -83,12 +83,43 @@ func (h *ScheduleHandler) GetSchedule(c *gin.Context) {
 		var startDate, endDate time.Time
 		err := rows.Scan(&item.ID, &item.ClassID, &item.DayOfWeek, &item.LessonNumber, &item.SubjectID, &item.SubjectName, &startDate, &endDate)
 		if err != nil {
+			rows.Close()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse schedule row", "details": err.Error()})
 			return
 		}
 		item.StartDate = startDate.Format("2006-01-02")
 		item.EndDate = endDate.Format("2006-01-02")
 		list = append(list, item)
+	}
+	rows.Close()
+
+	// If no schedule matches the specific date, fallback to the latest active schedule period for this class
+	if len(list) == 0 {
+		fallbackQuery := `
+			SELECT cs.id, cs.class_id, cs.day_of_week, cs.lesson_number, cs.subject_id, s.name as subject_name, cs.start_date, cs.end_date
+			FROM class_schedules cs
+			JOIN subjects s ON cs.subject_id = s.id
+			WHERE cs.class_id = $1 AND cs.is_deleted = false AND s.is_deleted = false
+			  AND cs.start_date = (
+				SELECT start_date FROM class_schedules 
+				WHERE class_id = $1 AND is_deleted = false 
+				ORDER BY start_date DESC LIMIT 1
+			  )
+			ORDER BY cs.day_of_week, cs.lesson_number`
+
+		fbRows, fbErr := dbConn.Query(fallbackQuery, classID)
+		if fbErr == nil {
+			for fbRows.Next() {
+				var item models.ClassScheduleResponse
+				var startDate, endDate time.Time
+				if scanErr := fbRows.Scan(&item.ID, &item.ClassID, &item.DayOfWeek, &item.LessonNumber, &item.SubjectID, &item.SubjectName, &startDate, &endDate); scanErr == nil {
+					item.StartDate = startDate.Format("2006-01-02")
+					item.EndDate = endDate.Format("2006-01-02")
+					list = append(list, item)
+				}
+			}
+			fbRows.Close()
+		}
 	}
 
 	// 2. Fetch exceptions for this specific date
