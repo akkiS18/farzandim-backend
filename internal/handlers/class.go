@@ -75,9 +75,12 @@ func (h *ClassHandler) ListClasses(c *gin.Context) {
 			return
 		}
 		query := `
-			SELECT c.id, c.name, c.level, s.id as subject_id, s.name as subject_name
+			SELECT c.id, c.name, c.level, s.id as subject_id, s.name as subject_name,
+			       (ct.is_main_teacher OR r.name = 'MAIN_TEACHER') as is_main_teacher
 			FROM classes c
 			JOIN class_teachers ct ON ct.class_id = c.id
+			JOIN users u ON ct.teacher_id = u.id
+			JOIN roles r ON u.role_id = r.id
 			JOIN subjects s ON ct.subject_id = s.id
 			WHERE c.is_deleted = false AND ct.is_deleted = false AND s.is_deleted = false AND ct.teacher_id = $1
 			ORDER BY c.name ASC`
@@ -94,16 +97,17 @@ func (h *ClassHandler) ListClasses(c *gin.Context) {
 
 	if role == "MAIN_TEACHER" || role == "SUBJECT_TEACHER" {
 		type TeacherClass struct {
-			ID          int    `json:"id"`
-			Name        string `json:"name"`
-			Level       int    `json:"level"`
-			SubjectID   int    `json:"subject_id"`
-			SubjectName string `json:"subject_name"`
+			ID            int    `json:"id"`
+			Name          string `json:"name"`
+			Level         int    `json:"level"`
+			SubjectID     int    `json:"subject_id"`
+			SubjectName   string `json:"subject_name"`
+			IsMainTeacher bool   `json:"is_main_teacher"`
 		}
 		classesList := []TeacherClass{}
 		for rows.Next() {
 			var tc TeacherClass
-			if err := rows.Scan(&tc.ID, &tc.Name, &tc.Level, &tc.SubjectID, &tc.SubjectName); err != nil {
+			if err := rows.Scan(&tc.ID, &tc.Name, &tc.Level, &tc.SubjectID, &tc.SubjectName, &tc.IsMainTeacher); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse records", "details": err.Error()})
 				return
 			}
