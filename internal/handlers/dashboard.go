@@ -25,8 +25,10 @@ type StudentAttendanceStat struct {
 	ClassName           string  `json:"class_name"`
 	ClassLevel          int     `json:"class_level"`
 	AbsentCount         int     `json:"absent_count"`
+	TardyCount          int     `json:"tardy_count"`
+	PresentCount        int     `json:"present_count"`
 	PresentOrTardyCount int     `json:"present_or_tardy_count"`
-	Status              string  `json:"status"` // "absent", "partial", "present", "no_data"
+	Status              string  `json:"status"` // "absent", "partial", "tardy", "present", "no_data"
 }
 
 type DailyAttendanceStat struct {
@@ -79,6 +81,8 @@ func (h *DashboardHandler) GetStats(c *gin.Context) {
 			c.name as class_name,
 			c.level as class_level,
 			COALESCE(att.absent_count, 0) as absent_count,
+			COALESCE(att.tardy_count, 0) as tardy_count,
+			COALESCE(att.present_count, 0) as present_count,
 			COALESCE(att.present_or_tardy_count, 0) as present_or_tardy_count
 		FROM students s
 		JOIN users u ON s.user_id = u.id
@@ -87,6 +91,8 @@ func (h *DashboardHandler) GetStats(c *gin.Context) {
 			SELECT 
 				g.student_id,
 				COUNT(CASE WHEN g.value = '-' THEN 1 END) as absent_count,
+				COUNT(CASE WHEN g.value = 'k' THEN 1 END) as tardy_count,
+				COUNT(CASE WHEN g.value = '+' THEN 1 END) as present_count,
 				COUNT(CASE WHEN g.value IN ('+', 'k') THEN 1 END) as present_or_tardy_count
 			FROM grades g
 			WHERE g.grade_type = 'ATTENDANCE'
@@ -143,6 +149,8 @@ func (h *DashboardHandler) GetStats(c *gin.Context) {
 			&st.ClassName,
 			&st.ClassLevel,
 			&st.AbsentCount,
+			&st.TardyCount,
+			&st.PresentCount,
 			&st.PresentOrTardyCount,
 		)
 		if err != nil {
@@ -159,7 +167,9 @@ func (h *DashboardHandler) GetStats(c *gin.Context) {
 		} else if st.AbsentCount > 0 && st.PresentOrTardyCount > 0 {
 			st.Status = "partial"
 			partiallyAbsent++
-		} else if st.AbsentCount == 0 && st.PresentOrTardyCount > 0 {
+		} else if st.AbsentCount == 0 && st.TardyCount > 0 {
+			st.Status = "tardy"
+		} else if st.AbsentCount == 0 && st.PresentCount > 0 {
 			st.Status = "present"
 		} else {
 			st.Status = "no_data"

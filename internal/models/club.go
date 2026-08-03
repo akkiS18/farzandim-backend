@@ -52,6 +52,12 @@ type CreateClubRequest struct {
 	ExtraStudentIDs    []int   `json:"extra_student_ids"`
 }
 
+type UpdateClubRequest struct {
+	Name               string  `json:"name" binding:"required"`
+	SubjectID          int     `json:"subject_id" binding:"required"`
+	AllowedClassLevels []int64 `json:"allowed_class_levels" binding:"required"`
+}
+
 type CreateScheduleRequest struct {
 	DayOfWeek int    `json:"day_of_week" binding:"required"`
 	StartTime string `json:"start_time" binding:"required"`

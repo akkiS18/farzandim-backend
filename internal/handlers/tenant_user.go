@@ -813,6 +813,161 @@ func (h *TenantUserHandler) UnassignClassTeacher(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "O'qituvchi sinfdan muvaffaqiyatli o'chirildi"})
 }
 
+type UpdateClassTeacherRequest struct {
+	SubjectID     *int  `json:"subject_id"`
+	TeacherID     *int  `json:"teacher_id"`
+	IsMainTeacher *bool `json:"is_main_teacher"`
+}
+
+// UpdateClassTeacher updates an existing class teacher subject assignment
+func (h *TenantUserHandler) UpdateClassTeacher(c *gin.Context) {
+	classTeacherIDStr := c.Param("class_teacher_id")
+	classTeacherID, err := strconv.Atoi(classTeacherIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid mapping ID"})
+		return
+	}
+
+	var req UpdateClassTeacherRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body", "details": err.Error()})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open transaction", "details": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	var oldMapping models.ClassTeacher
+	err = tx.QueryRow("SELECT id, class_id, subject_id, teacher_id, is_main_teacher, is_deleted FROM class_teachers WHERE id = $1 AND is_deleted = false", classTeacherID).
+		Scan(&oldMapping.ID, &oldMapping.ClassID, &oldMapping.SubjectID, &oldMapping.TeacherID, &oldMapping.IsMainTeacher, &oldMapping.IsDeleted)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "O'qituvchi biriktiruvi topilmadi"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query assignment", "details": err.Error()})
+		}
+		return
+	}
+
+	subjectID := oldMapping.SubjectID
+	if req.SubjectID != nil && *req.SubjectID > 0 {
+		subjectID = *req.SubjectID
+	}
+
+	teacherID := oldMapping.TeacherID
+	if req.TeacherID != nil && *req.TeacherID > 0 {
+		teacherID = *req.TeacherID
+	}
+
+	isMainTeacher := oldMapping.IsMainTeacher
+	if req.IsMainTeacher != nil {
+		isMainTeacher = *req.IsMainTeacher
+	}
+
+	if isMainTeacher {
+		_, _ = tx.Exec("UPDATE class_teachers SET is_main_teacher = false WHERE class_id = $1 AND id != $2", oldMapping.ClassID, classTeacherID)
+	}
+
+	_, err = tx.Exec("UPDATE class_teachers SET subject_id = $1, teacher_id = $2, is_main_teacher = $3, updated_at = NOW() WHERE id = $4", subjectID, teacherID, isMainTeacher, classTeacherID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update assignment", "details": err.Error()})
+		return
+	}
+
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "UPDATE",
+		TableName: "class_teachers",
+		RecordID:  strconv.Itoa(classTeacherID),
+		OldValues: oldMapping,
+		NewValues: map[string]interface{}{
+			"subject_id":      subjectID,
+			"teacher_id":      teacherID,
+			"is_main_teacher": isMainTeacher,
+		},
+	})
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction commit failed"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "O'qituvchi biriktiruvi muvaffaqiyatli yangilandi"})
+}
+
+type ClassTeacherHistoryItem struct {
+	ID            int        `json:"id"`
+	ClassID       int        `json:"class_id"`
+	SubjectID     int        `json:"subject_id"`
+	SubjectName   string     `json:"subject_name"`
+	TeacherID     int        `json:"teacher_id"`
+	FirstName     string     `json:"first_name"`
+	LastName      string     `json:"last_name"`
+	MiddleName    string     `json:"middle_name"`
+	Phone         string     `json:"phone"`
+	IsMainTeacher bool       `json:"is_main_teacher"`
+	IsDeleted     bool       `json:"is_deleted"`
+	CreatedAt     time.Time  `json:"created_at"`
+	DeletedAt     *time.Time `json:"deleted_at"`
+}
+
+// GetClassTeacherHistory retrieves history of active and past teacher assignments for a class
+func (h *TenantUserHandler) GetClassTeacherHistory(c *gin.Context) {
+	classIDStr := c.Param("id")
+	classID, err := strconv.Atoi(classIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid class ID"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	query := `
+		SELECT ct.id, ct.class_id, ct.subject_id, s.name as subject_name, ct.teacher_id,
+		       u.first_name, u.last_name, COALESCE(u.middle_name, ''), COALESCE(u.phone, ''),
+		       ct.is_main_teacher, ct.is_deleted, ct.created_at, ct.deleted_at
+		FROM class_teachers ct
+		JOIN users u ON ct.teacher_id = u.id
+		JOIN subjects s ON ct.subject_id = s.id
+		WHERE ct.class_id = $1
+		ORDER BY ct.created_at DESC, ct.id DESC`
+
+	rows, err := dbConn.Query(query, classID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch teacher assignment history", "details": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	list := []ClassTeacherHistoryItem{}
+	for rows.Next() {
+		var item ClassTeacherHistoryItem
+		var deletedAtNull sql.NullTime
+		err := rows.Scan(
+			&item.ID, &item.ClassID, &item.SubjectID, &item.SubjectName, &item.TeacherID,
+			&item.FirstName, &item.LastName, &item.MiddleName, &item.Phone,
+			&item.IsMainTeacher, &item.IsDeleted, &item.CreatedAt, &deletedAtNull,
+		)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan history item", "details": err.Error()})
+			return
+		}
+		if deletedAtNull.Valid {
+			item.DeletedAt = &deletedAtNull.Time
+		}
+		list = append(list, item)
+	}
+
+	c.JSON(http.StatusOK, list)
+}
+
 func ensureSubjectColumns(db *sql.DB) {
 	_, _ = db.Exec(`ALTER TABLE subjects ADD COLUMN IF NOT EXISTS target_levels INT[];`)
 }
