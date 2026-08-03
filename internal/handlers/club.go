@@ -545,3 +545,141 @@ func (h *ClubHandler) DeleteClubSchedule(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "Jadval muvaffaqiyatli o'chirildi"})
 }
+
+// UpdateClub handler
+func (h *ClubHandler) UpdateClub(c *gin.Context) {
+	tenantDBVal, _ := c.Get("tenantDB")
+	db := tenantDBVal.(*sql.DB)
+
+	userIDVal, _ := c.Get("userID")
+	userID, _ := strconv.Atoi(userIDVal.(string))
+
+	roleVal, _ := c.Get("role")
+	role := roleVal.(string)
+
+	clubID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid club ID"})
+		return
+	}
+
+	var req models.UpdateClubRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Verify permission: Admin or teacher owner
+	var teacherID int
+	var oldClub models.Club
+	err = db.QueryRow(`
+		SELECT id, name, subject_id, teacher_id
+		FROM clubs WHERE id = $1 AND is_deleted = false
+	`, clubID).Scan(&oldClub.ID, &oldClub.Name, &oldClub.SubjectID, &teacherID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "To'garak topilmadi"})
+		return
+	}
+
+	if role != "ADMIN" && teacherID != userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Ushbu to'garakni tahrirlashga ruxsatingiz yo'q"})
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Tranzaksiya boshlashda xatolik"})
+		return
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`
+		UPDATE clubs
+		SET name = $1, subject_id = $2, allowed_class_levels = $3, updated_at = NOW()
+		WHERE id = $4 AND is_deleted = false
+	`, req.Name, req.SubjectID, pq.Int64Array(req.AllowedClassLevels), clubID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "To'garakni yangilashda xatolik: " + err.Error()})
+		return
+	}
+
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "UPDATE",
+		TableName: "clubs",
+		RecordID:  strconv.Itoa(clubID),
+		OldValues: oldClub,
+		NewValues: req,
+	})
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Commit xatoligi"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "To'garak muvaffaqiyatli yangilandi"})
+}
+
+// DeleteClub handler
+func (h *ClubHandler) DeleteClub(c *gin.Context) {
+	tenantDBVal, _ := c.Get("tenantDB")
+	db := tenantDBVal.(*sql.DB)
+
+	userIDVal, _ := c.Get("userID")
+	userID, _ := strconv.Atoi(userIDVal.(string))
+
+	roleVal, _ := c.Get("role")
+	role := roleVal.(string)
+
+	clubID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid club ID"})
+		return
+	}
+
+	var teacherID int
+	var oldClub models.Club
+	err = db.QueryRow(`
+		SELECT id, name, subject_id, teacher_id
+		FROM clubs WHERE id = $1 AND is_deleted = false
+	`, clubID).Scan(&oldClub.ID, &oldClub.Name, &oldClub.SubjectID, &teacherID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "To'garak topilmadi"})
+		return
+	}
+
+	if role != "ADMIN" && teacherID != userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Ushbu to'garakni o'chirishga ruxsatingiz yo'q"})
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Tranzaksiya boshlashda xatolik"})
+		return
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`
+		UPDATE clubs
+		SET is_deleted = true, deleted_at = NOW()
+		WHERE id = $1
+	`, clubID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "To'garakni o'chirishda xatolik"})
+		return
+	}
+
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "DELETE",
+		TableName: "clubs",
+		RecordID:  strconv.Itoa(clubID),
+		OldValues: oldClub,
+	})
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Commit xatoligi"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "To'garak muvaffaqiyatli o'chirildi"})
+}

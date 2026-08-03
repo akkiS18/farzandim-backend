@@ -30,14 +30,17 @@ type CreateTransactionRequest struct {
 }
 
 type CreateChargePlanRequest struct {
-	Name      string `json:"name" binding:"required"`
-	Amount    float64 `json:"amount" binding:"required,gt=0"`
-	StartDate string `json:"start_date" binding:"required"` // "YYYY-MM-DD"
-	EndDate   string `json:"end_date" binding:"required"`   // "YYYY-MM-DD"
-	ChargeDay int    `json:"charge_day" binding:"required,min=1,max=31"`
-	Levels    []int  `json:"levels"`
-	Classes   []int  `json:"classes"`
-	Students  []int  `json:"students"`
+	Name           string  `json:"name" binding:"required"`
+	Amount         float64 `json:"amount" binding:"required,gt=0"`
+	StartDate      string  `json:"start_date" binding:"required"` // "YYYY-MM-DD"
+	EndDate        string  `json:"end_date" binding:"required"`   // "YYYY-MM-DD"
+	ChargeDay      int     `json:"charge_day" binding:"required,min=1,max=31"`
+	Levels         []int   `json:"levels"`
+	Classes        []int   `json:"classes"`
+	Students       []int   `json:"students"`
+	TargetLevels   []int   `json:"target_levels"`
+	TargetClasses  []int   `json:"target_classes"`
+	TargetStudents []int   `json:"target_students"`
 }
 
 // AddTransaction updates student balance and records the ledger transaction
@@ -370,7 +373,20 @@ func (h *BalanceHandler) SaveChargePlan(c *gin.Context) {
 		return
 	}
 
-	for _, lvl := range req.Levels {
+	levels := req.Levels
+	if len(levels) == 0 {
+		levels = req.TargetLevels
+	}
+	classes := req.Classes
+	if len(classes) == 0 {
+		classes = req.TargetClasses
+	}
+	students := req.Students
+	if len(students) == 0 {
+		students = req.TargetStudents
+	}
+
+	for _, lvl := range levels {
 		_, err = tx.Exec("INSERT INTO charge_plan_levels (charge_plan_id, level) VALUES ($1, $2)", planID, lvl)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to map level", "details": err.Error()})
@@ -378,7 +394,7 @@ func (h *BalanceHandler) SaveChargePlan(c *gin.Context) {
 		}
 	}
 
-	for _, classID := range req.Classes {
+	for _, classID := range classes {
 		_, err = tx.Exec("INSERT INTO charge_plan_classes (charge_plan_id, class_id) VALUES ($1, $2)", planID, classID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to map class", "details": err.Error()})
@@ -386,7 +402,7 @@ func (h *BalanceHandler) SaveChargePlan(c *gin.Context) {
 		}
 	}
 
-	for _, studentID := range req.Students {
+	for _, studentID := range students {
 		_, err = tx.Exec("INSERT INTO charge_plan_students (charge_plan_id, student_id) VALUES ($1, $2)", planID, studentID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to map student", "details": err.Error()})
@@ -661,13 +677,26 @@ func (h *BalanceHandler) UpdateChargePlan(c *gin.Context) {
 	_, _ = tx.Exec("DELETE FROM charge_plan_classes WHERE charge_plan_id = $1", planID)
 	_, _ = tx.Exec("DELETE FROM charge_plan_students WHERE charge_plan_id = $1", planID)
 
-	for _, lvl := range req.Levels {
+	updateLevels := req.Levels
+	if len(updateLevels) == 0 {
+		updateLevels = req.TargetLevels
+	}
+	updateClasses := req.Classes
+	if len(updateClasses) == 0 {
+		updateClasses = req.TargetClasses
+	}
+	updateStudents := req.Students
+	if len(updateStudents) == 0 {
+		updateStudents = req.TargetStudents
+	}
+
+	for _, lvl := range updateLevels {
 		_, _ = tx.Exec("INSERT INTO charge_plan_levels (charge_plan_id, level) VALUES ($1, $2)", planID, lvl)
 	}
-	for _, classID := range req.Classes {
+	for _, classID := range updateClasses {
 		_, _ = tx.Exec("INSERT INTO charge_plan_classes (charge_plan_id, class_id) VALUES ($1, $2)", planID, classID)
 	}
-	for _, studentID := range req.Students {
+	for _, studentID := range updateStudents {
 		_, _ = tx.Exec("INSERT INTO charge_plan_students (charge_plan_id, student_id) VALUES ($1, $2)", planID, studentID)
 	}
 
@@ -884,7 +913,7 @@ func (h *BalanceHandler) executePlanSweep(dbConn *sql.DB, plan models.ChargePlan
 				chargeDay = lastDay
 			}
 
-			scheduledChargeDate := time.Date(currentMonth.Year(), currentMonth.Month(), chargeDay, 23, 59, 59, 0, time.UTC)
+			scheduledChargeDate := time.Date(currentMonth.Year(), currentMonth.Month(), chargeDay, 0, 0, 0, 0, time.UTC)
 
 			// Only process if the scheduled charge day is reached, and fits within plan boundaries
 			if !scheduledChargeDate.After(now) && !scheduledChargeDate.Before(plan.StartDate) && !scheduledChargeDate.After(plan.EndDate) {
@@ -1014,7 +1043,7 @@ func (h *BalanceHandler) GetNextCharge(c *gin.Context) {
 			if chargeDay > lastDay {
 				chargeDay = lastDay
 			}
-			scheduledDate := time.Date(currentMonth.Year(), currentMonth.Month(), chargeDay, 23, 59, 59, 0, time.UTC)
+			scheduledDate := time.Date(currentMonth.Year(), currentMonth.Month(), chargeDay, 0, 0, 0, 0, time.UTC)
 
 			if !scheduledDate.Before(p.StartDate) && !scheduledDate.After(p.EndDate) {
 				var alreadyCharged bool

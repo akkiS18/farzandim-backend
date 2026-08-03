@@ -182,7 +182,9 @@ func main() {
 		authTenantGroup.PUT("/teachers/:id", middleware.RequireRole("ADMIN"), tenantUserHandler.UpdateTeacher)
 		authTenantGroup.DELETE("/teachers/:id", middleware.RequireRole("ADMIN"), tenantUserHandler.DeleteTeacher)
 		authTenantGroup.GET("/classes/:id/teachers", tenantUserHandler.ListClassTeachers)
+		authTenantGroup.GET("/classes/:id/teachers/history", tenantUserHandler.GetClassTeacherHistory)
 		authTenantGroup.POST("/classes/:id/teachers", tenantUserHandler.AssignClassTeacher)
+		authTenantGroup.PUT("/classes/:id/teachers/:class_teacher_id", tenantUserHandler.UpdateClassTeacher)
 		authTenantGroup.DELETE("/classes/:id/teachers/:class_teacher_id", tenantUserHandler.UnassignClassTeacher)
 		authTenantGroup.GET("/subjects", tenantUserHandler.ListSubjects)
 		authTenantGroup.POST("/subjects", tenantUserHandler.CreateSubject)
@@ -251,6 +253,8 @@ func main() {
 
 		// Extracurricular Clubs
 		authTenantGroup.POST("/clubs", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.CreateClub)
+		authTenantGroup.PUT("/clubs/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.UpdateClub)
+		authTenantGroup.DELETE("/clubs/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.DeleteClub)
 		authTenantGroup.GET("/clubs", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER", "PARENT"), clubHandler.GetClubs)
 		authTenantGroup.POST("/clubs/:id/request", middleware.RequireRole("PARENT"), clubHandler.RequestJoinClub)
 		authTenantGroup.POST("/clubs/:id/cancel-request", middleware.RequireRole("PARENT"), clubHandler.CancelClubRequest)

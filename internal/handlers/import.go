@@ -130,34 +130,27 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 			WHERE %s AND u.id = $1`, sDeletedCond, uDeletedCond)
 		args = append(args, studentUserID)
 		argCount++
-	} else if roleFilter == "PARENT" && classFilter != "" {
-		classID, err := strconv.Atoi(classFilter)
-		if err == nil {
-			query = fmt.Sprintf(`
-				SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
-				       $1::int as class_id, cl.name as class_name,
-				       s.id as student_id, (su.first_name || ' ' || su.last_name || COALESCE(' ' || su.middle_name, '')) as student_name,
-				       u.passport, NULL::text as address, NULL::date as birthdate, NULL::text as ina, NULL::numeric as balance
-				FROM users u
-				JOIN roles r ON u.role_id = r.id
-				JOIN student_parents sp ON sp.parent_id = u.id
-				JOIN students s ON sp.student_id = s.id AND %s
-				JOIN users su ON s.user_id = su.id AND %s
-				JOIN classes cl ON s.class_id = cl.id AND cl.is_deleted = false
-				WHERE %s AND s.class_id = $1`, sDeletedCond, suDeletedCond, uDeletedCond)
-			args = append(args, classID)
-			argCount++
-		} else {
-			query = fmt.Sprintf(`
-				SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
-				       s.class_id, cl.name as class_name,
-				       NULL::int as student_id, NULL::text as student_name,
-				       u.passport, s.address, s.birthdate, s.ina, s.balance
-				FROM users u
-				JOIN roles r ON u.role_id = r.id
-				LEFT JOIN students s ON u.id = s.user_id AND %s
-				LEFT JOIN classes cl ON s.class_id = cl.id AND cl.is_deleted = false
-				WHERE %s`, sDeletedCond, uDeletedCond)
+	} else if roleFilter == "PARENT" {
+		query = fmt.Sprintf(`
+			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
+			       s.class_id, cl.name as class_name,
+			       s.id as student_id, (su.first_name || ' ' || su.last_name || COALESCE(' ' || su.middle_name, '')) as student_name,
+			       u.passport, NULL::text as address, NULL::date as birthdate, NULL::text as ina, NULL::numeric as balance
+			FROM users u
+			JOIN roles r ON u.role_id = r.id
+			LEFT JOIN student_parents sp ON sp.parent_id = u.id
+			LEFT JOIN students s ON sp.student_id = s.id AND %s
+			LEFT JOIN users su ON s.user_id = su.id AND %s
+			LEFT JOIN classes cl ON s.class_id = cl.id AND cl.is_deleted = false
+			WHERE %s AND r.name = 'PARENT'`, sDeletedCond, suDeletedCond, uDeletedCond)
+
+		if classFilter != "" {
+			classID, err := strconv.Atoi(classFilter)
+			if err == nil {
+				query += fmt.Sprintf(" AND s.class_id = $%d", argCount)
+				args = append(args, classID)
+				argCount++
+			}
 		}
 	} else {
 		query = fmt.Sprintf(`
@@ -172,13 +165,13 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 			WHERE %s`, sDeletedCond, uDeletedCond)
 	}
 
-	if roleFilter != "" && !(roleFilter == "PARENT" && classFilter != "") {
+	if roleFilter != "" && roleFilter != "PARENT" {
 		query += fmt.Sprintf(" AND r.name = $%d", argCount)
 		args = append(args, roleFilter)
 		argCount++
 	}
 
-	if classFilter != "" && !(roleFilter == "PARENT" && classFilter != "") {
+	if classFilter != "" && roleFilter != "PARENT" {
 		classID, err := strconv.Atoi(classFilter)
 		if err == nil {
 			query += fmt.Sprintf(" AND s.class_id = $%d", argCount)
