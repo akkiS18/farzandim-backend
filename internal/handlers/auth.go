@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"net/http"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -14,6 +15,18 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
+
+var bcryptSemaphore chan struct{}
+
+func init() {
+	// Limit bcrypt operations to half of the CPU cores (minimum 2)
+	cores := runtime.GOMAXPROCS(0)
+	limit := cores / 2
+	if limit < 2 {
+		limit = 2
+	}
+	bcryptSemaphore = make(chan struct{}, limit)
+}
 
 type AuthHandler struct {
 	jwtSecret string
@@ -216,7 +229,11 @@ func (h *AuthHandler) LoginSuperAdmin(c *gin.Context) {
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+	bcryptSemaphore <- struct{}{}
+	err = bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password))
+	<-bcryptSemaphore
+
+	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid phone number or password"})
 		return
 	}
@@ -277,7 +294,11 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+	bcryptSemaphore <- struct{}{}
+	err = bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password))
+	<-bcryptSemaphore
+
+	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid phone or password"})
 		return
 	}
