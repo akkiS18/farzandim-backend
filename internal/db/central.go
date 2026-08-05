@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"log"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
@@ -17,6 +18,11 @@ func InitCentralDB(connStr string) {
 	if err != nil {
 		log.Fatalf("Error opening Central DB: %v", err)
 	}
+
+	// Tune connection pool settings for high concurrency
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(25)
+	db.SetConnMaxLifetime(5 * time.Minute)
 
 	err = db.Ping()
 	if err != nil {
