@@ -68,6 +68,8 @@ func main() {
 	clubHandler := handlers.NewClubHandler()
 	telegramHandler := handlers.NewTelegramHandler()
 	dashboardHandler := handlers.NewDashboardHandler()
+	dateRangePresetHandler := handlers.NewDateRangePresetHandler()
+	targetPresetHandler := handlers.NewTargetPresetHandler()
 
 	// 4. Initialize web server router
 	r := gin.Default()
@@ -155,6 +157,16 @@ func main() {
 		authTenantGroup.GET("/classes/:id/schedule-exceptions", scheduleHandler.ListScheduleExceptions)
 		authTenantGroup.POST("/classes/:id/schedule-exceptions", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), scheduleHandler.SaveScheduleException)
 		authTenantGroup.DELETE("/classes/:id/schedule-exceptions/:exception_id", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), scheduleHandler.DeleteScheduleException)
+
+		// Date Range Presets (To'plamlar) APIs
+		authTenantGroup.GET("/date-range-presets", dateRangePresetHandler.List)
+		authTenantGroup.POST("/date-range-presets", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), dateRangePresetHandler.Create)
+		authTenantGroup.DELETE("/date-range-presets/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), dateRangePresetHandler.Delete)
+
+		// Target Presets (O'quvchilar To'plamlari) APIs
+		authTenantGroup.GET("/target-presets", targetPresetHandler.List)
+		authTenantGroup.POST("/target-presets", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), targetPresetHandler.Create)
+		authTenantGroup.DELETE("/target-presets/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), targetPresetHandler.Delete)
 
 		// Dashboard Statistics API
 		authTenantGroup.GET("/dashboard/stats", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), dashboardHandler.GetStats)

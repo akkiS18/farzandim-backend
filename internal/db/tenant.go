@@ -35,6 +35,32 @@ func (tm *TenantManager) GetTenantDB(schoolID string) (*sql.DB, error) {
 	tm.mu.RUnlock()
 
 	if exists {
+		_, _ = db.Exec(`
+			CREATE TABLE IF NOT EXISTS date_range_presets (
+				id SERIAL PRIMARY KEY,
+				name VARCHAR(255) NOT NULL,
+				start_date DATE NOT NULL,
+				end_date DATE NOT NULL,
+				category VARCHAR(100) NOT NULL DEFAULT 'schedule',
+				created_by INT NULL REFERENCES users(id) ON DELETE SET NULL,
+				is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+				deleted_at TIMESTAMP NULL,
+				created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+				updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+			);
+			CREATE TABLE IF NOT EXISTS target_presets (
+				id SERIAL PRIMARY KEY,
+				name VARCHAR(255) NOT NULL,
+				target_levels INT[] DEFAULT '{}',
+				target_classes INT[] DEFAULT '{}',
+				target_students INT[] DEFAULT '{}',
+				created_by INT NULL REFERENCES users(id) ON DELETE SET NULL,
+				is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+				deleted_at TIMESTAMP NULL,
+				created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+				updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+			);
+		`)
 		return db, nil
 	}
 
@@ -43,6 +69,32 @@ func (tm *TenantManager) GetTenantDB(schoolID string) (*sql.DB, error) {
 
 	// Double-checked locking
 	if db, exists = tm.connections[schoolID]; exists {
+		_, _ = db.Exec(`
+			CREATE TABLE IF NOT EXISTS date_range_presets (
+				id SERIAL PRIMARY KEY,
+				name VARCHAR(255) NOT NULL,
+				start_date DATE NOT NULL,
+				end_date DATE NOT NULL,
+				category VARCHAR(100) NOT NULL DEFAULT 'schedule',
+				created_by INT NULL REFERENCES users(id) ON DELETE SET NULL,
+				is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+				deleted_at TIMESTAMP NULL,
+				created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+				updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+			);
+			CREATE TABLE IF NOT EXISTS target_presets (
+				id SERIAL PRIMARY KEY,
+				name VARCHAR(255) NOT NULL,
+				target_levels INT[] DEFAULT '{}',
+				target_classes INT[] DEFAULT '{}',
+				target_students INT[] DEFAULT '{}',
+				created_by INT NULL REFERENCES users(id) ON DELETE SET NULL,
+				is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+				deleted_at TIMESTAMP NULL,
+				created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+				updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+			);
+		`)
 		return db, nil
 	}
 
@@ -89,6 +141,32 @@ func (tm *TenantManager) GetTenantDB(schoolID string) (*sql.DB, error) {
 			new_state JSONB NOT NULL DEFAULT '{}'::jsonb,
 			change_summary TEXT
 		);
+		CREATE TABLE IF NOT EXISTS date_range_presets (
+			id SERIAL PRIMARY KEY,
+			name VARCHAR(255) NOT NULL,
+			start_date DATE NOT NULL,
+			end_date DATE NOT NULL,
+			category VARCHAR(100) NOT NULL DEFAULT 'schedule',
+			created_by INT NULL REFERENCES users(id) ON DELETE SET NULL,
+			is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+			deleted_at TIMESTAMP NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_date_range_presets_category ON date_range_presets(category) WHERE is_deleted = false;
+		CREATE TABLE IF NOT EXISTS target_presets (
+			id SERIAL PRIMARY KEY,
+			name VARCHAR(255) NOT NULL,
+			target_levels INT[] DEFAULT '{}',
+			target_classes INT[] DEFAULT '{}',
+			target_students INT[] DEFAULT '{}',
+			created_by INT NULL REFERENCES users(id) ON DELETE SET NULL,
+			is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+			deleted_at TIMESTAMP NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_target_presets_is_deleted ON target_presets(is_deleted) WHERE is_deleted = false;
 		CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE is_deleted = false;
 		CREATE INDEX IF NOT EXISTS idx_students_user_id ON students(user_id) WHERE is_deleted = false;
 		CREATE INDEX IF NOT EXISTS idx_students_class_id ON students(class_id) WHERE is_deleted = false;
