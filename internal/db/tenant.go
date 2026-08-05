@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
@@ -64,12 +65,17 @@ func (tm *TenantManager) GetTenantDB(schoolID string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to open tenant DB connection: %w", err)
 	}
 
+	// Tune connection pool settings for high concurrency
+	newDB.SetMaxOpenConns(25)
+	newDB.SetMaxIdleConns(25)
+	newDB.SetConnMaxLifetime(5 * time.Minute)
+
 	if err := newDB.Ping(); err != nil {
 		newDB.Close()
 		return nil, fmt.Errorf("failed to ping tenant DB: %w", err)
 	}
 
-	// Ensure paid_amount and bonus_amount columns exist on payment_transactions, and charge_plan_history table exists
+	// Ensure paid_amount, bonus_amount, charge_plan_history, and high-performance B-tree indexes exist
 	_, _ = newDB.Exec(`
 		ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS paid_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00;
 		ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS bonus_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00;
@@ -83,6 +89,18 @@ func (tm *TenantManager) GetTenantDB(schoolID string) (*sql.DB, error) {
 			new_state JSONB NOT NULL DEFAULT '{}'::jsonb,
 			change_summary TEXT
 		);
+		CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE is_deleted = false;
+		CREATE INDEX IF NOT EXISTS idx_students_user_id ON students(user_id) WHERE is_deleted = false;
+		CREATE INDEX IF NOT EXISTS idx_students_class_id ON students(class_id) WHERE is_deleted = false;
+		CREATE INDEX IF NOT EXISTS idx_student_parents_student ON student_parents(student_id);
+		CREATE INDEX IF NOT EXISTS idx_student_parents_parent ON student_parents(parent_id);
+		CREATE INDEX IF NOT EXISTS idx_grades_student_id ON grades(student_id) WHERE is_deleted = false;
+		CREATE INDEX IF NOT EXISTS idx_grades_class_id ON grades(class_id) WHERE is_deleted = false;
+		CREATE INDEX IF NOT EXISTS idx_grades_created_at ON grades(created_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_grade_comments_grade ON grade_comments(grade_id);
+		CREATE INDEX IF NOT EXISTS idx_grade_comments_parent ON grade_comments(parent_id);
+		CREATE INDEX IF NOT EXISTS idx_announcements_created ON announcements(created_at DESC) WHERE is_deleted = false;
+		CREATE INDEX IF NOT EXISTS idx_class_teachers_class_teacher ON class_teachers(class_id, teacher_id) WHERE is_deleted = false;
 	`)
 
 	tm.connections[schoolID] = newDB
