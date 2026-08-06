@@ -310,10 +310,9 @@ func buildTenantConnStr(rootURL string, dbName string) (string, error) {
 }
 
 func FindSchoolIDBySubdomain(subdomain string) (string, error) {
-	cleanSub := sanitizeSubdomain(subdomain)
-	searchName := "db_f_" + cleanSub
+	searchName := sanitizeSubdomain(subdomain)
 
-	if cleanSub == "localhost" {
+	if subdomain == "localhost" || subdomain == "127.0.0.1" {
 		searchName = "db_f_test_school"
 	}
 
@@ -324,10 +323,16 @@ func FindSchoolIDBySubdomain(subdomain string) (string, error) {
 	defer rows.Close()
 
 	var fallbackID string
+	var firstSchoolID string
+
 	for rows.Next() {
 		var id, connStr string
 		if err := rows.Scan(&id, &connStr); err != nil {
 			continue
+		}
+
+		if firstSchoolID == "" {
+			firstSchoolID = id
 		}
 
 		u, err := url.Parse(connStr)
@@ -340,14 +345,17 @@ func FindSchoolIDBySubdomain(subdomain string) (string, error) {
 			return id, nil
 		}
 
-		// Fallback for previous school setups (maktab-21) on localhost
-		if cleanSub == "localhost" && dbName == "db_f_maktab_21" {
+		if (subdomain == "localhost" || subdomain == "127.0.0.1") && (dbName == "db_f_maktab_21" || dbName == "db_f_test_school") {
 			fallbackID = id
 		}
 	}
 
 	if fallbackID != "" {
 		return fallbackID, nil
+	}
+
+	if firstSchoolID != "" && (subdomain == "localhost" || subdomain == "127.0.0.1") {
+		return firstSchoolID, nil
 	}
 
 	return "", fmt.Errorf("no school found matching subdomain: %s (target database: %s)", subdomain, searchName)

@@ -24,9 +24,7 @@ func TenantMiddleware() gin.HandlerFunc {
 
 		// 2. Fall back to resolving school dynamically by request subdomain
 		if schoolID == "" {
-			origin := c.GetHeader("Origin")
-			referer := c.GetHeader("Referer")
-			subdomain := extractSubdomain(origin, referer)
+			subdomain := extractSubdomain(c)
 			if subdomain != "" {
 				resolvedID, err := db.FindSchoolIDBySubdomain(subdomain)
 				if err == nil {
@@ -62,33 +60,40 @@ func TenantMiddleware() gin.HandlerFunc {
 	}
 }
 
-func extractSubdomain(origin, referer string) string {
-	rawURL := origin
+func extractSubdomain(c *gin.Context) string {
+	rawURL := c.GetHeader("Origin")
 	if rawURL == "" {
-		rawURL = referer
+		rawURL = c.GetHeader("Referer")
 	}
-	if rawURL == "" {
-		return ""
+
+	var host string
+	if rawURL != "" {
+		if u, err := url.Parse(rawURL); err == nil && u.Host != "" {
+			host = u.Host
+		}
 	}
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return ""
+
+	if host == "" {
+		host = c.GetHeader("X-Forwarded-Host")
 	}
-	host := u.Host
+	if host == "" {
+		host = c.Request.Host
+	}
+
 	if idx := strings.Index(host, ":"); idx != -1 {
 		host = host[:idx]
 	}
-	
+
 	if host == "localhost" || host == "127.0.0.1" || strings.HasPrefix(host, "::1") {
 		return "localhost"
 	}
-	
+
 	// Split by "." to find subdomain
 	parts := strings.Split(host, ".")
 	if len(parts) > 2 {
-		// e.g. 10_maktab.farzandim.uz -> 10_maktab
+		// e.g. 10_maktab.farzandim.uz -> 10_maktab, test_school.akademx.uz -> test_school
 		return parts[0]
 	}
-	
+
 	return ""
 }

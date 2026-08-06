@@ -220,7 +220,8 @@ func (h *AuthHandler) LoginSuperAdmin(c *gin.Context) {
 	var passwordHash string
 	var firstName, lastName string
 	err := db.CentralDB.QueryRow(
-		"SELECT id, password_hash, first_name, last_name FROM super_admins WHERE phone = $1 AND is_deleted = false",
+		`SELECT id, password_hash, first_name, last_name FROM super_admins 
+		 WHERE (phone = $1 OR REGEXP_REPLACE(phone, '\D', '', 'g') = REGEXP_REPLACE($1, '\D', '', 'g')) AND is_deleted = false`,
 		req.Phone,
 	).Scan(&id, &passwordHash, &firstName, &lastName)
 
@@ -286,7 +287,7 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 		SELECT u.id, u.password_hash, u.first_name, u.last_name, r.name, u.passport, u.phone 
 		FROM users u 
 		JOIN roles r ON u.role_id = r.id 
-		WHERE u.phone = $1 AND u.is_deleted = false`
+		WHERE (u.phone = $1 OR REGEXP_REPLACE(u.phone, '\D', '', 'g') = REGEXP_REPLACE($1, '\D', '', 'g')) AND u.is_deleted = false`
 	err := tenantDB.QueryRow(query, req.Phone).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull)
 
 	if err != nil {
