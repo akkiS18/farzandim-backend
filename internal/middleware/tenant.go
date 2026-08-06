@@ -25,13 +25,11 @@ func TenantMiddleware() gin.HandlerFunc {
 		// 2. Fall back to resolving school dynamically by request subdomain
 		if schoolID == "" {
 			subdomain := extractSubdomain(c)
-			if subdomain != "" {
-				resolvedID, err := db.FindSchoolIDBySubdomain(subdomain)
-				if err == nil {
-					schoolID = resolvedID
-				} else {
-					log.Printf("[TENANT RESOLUTION WARNING] %v", err)
-				}
+			resolvedID, err := db.FindSchoolIDBySubdomain(subdomain)
+			if err == nil && resolvedID != "" {
+				schoolID = resolvedID
+			} else {
+				log.Printf("[TENANT RESOLUTION WARNING] Subdomain '%s' resolution error: %v", subdomain, err)
 			}
 		}
 
@@ -88,12 +86,11 @@ func extractSubdomain(c *gin.Context) string {
 		return "localhost"
 	}
 
-	// Split by "." to find subdomain
 	parts := strings.Split(host, ".")
-	if len(parts) > 2 {
-		// e.g. 10_maktab.farzandim.uz -> 10_maktab, test_school.akademx.uz -> test_school
+	if len(parts) >= 3 {
+		// e.g. test_school.akademx.uz -> test_school
 		return parts[0]
 	}
 
-	return ""
+	return host
 }
