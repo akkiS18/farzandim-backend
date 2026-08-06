@@ -70,9 +70,11 @@ func main() {
 	dashboardHandler := handlers.NewDashboardHandler()
 	dateRangePresetHandler := handlers.NewDateRangePresetHandler()
 	targetPresetHandler := handlers.NewTargetPresetHandler()
+	bookHandler := handlers.NewBookHandler()
 
 	// 4. Initialize web server router
 	r := gin.Default()
+	r.Static("/uploads", "./uploads")
 
 	// --- FIXED CORS MIDDLEWARE ---
 	r.Use(func(c *gin.Context) {
@@ -167,6 +169,13 @@ func main() {
 		authTenantGroup.GET("/target-presets", targetPresetHandler.List)
 		authTenantGroup.POST("/target-presets", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), targetPresetHandler.Create)
 		authTenantGroup.DELETE("/target-presets/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), targetPresetHandler.Delete)
+
+		// Kitobxonlik (Books / Library) APIs
+		authTenantGroup.GET("/books", bookHandler.List)
+		authTenantGroup.POST("/books", middleware.RequireRole("ADMIN"), bookHandler.Create)
+		authTenantGroup.PUT("/books/:id", middleware.RequireRole("ADMIN"), bookHandler.Update)
+		authTenantGroup.DELETE("/books/:id", middleware.RequireRole("ADMIN"), bookHandler.Delete)
+		authTenantGroup.POST("/upload/book", middleware.RequireRole("ADMIN"), bookHandler.UploadFile)
 
 		// Dashboard Statistics API
 		authTenantGroup.GET("/dashboard/stats", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), dashboardHandler.GetStats)
