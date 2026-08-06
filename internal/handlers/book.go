@@ -11,6 +11,7 @@ import (
 
 	"github.com/farzandim/backend/internal/audit"
 	"github.com/farzandim/backend/internal/models"
+	"github.com/farzandim/backend/internal/storage"
 	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
 )
@@ -113,6 +114,13 @@ func (h *BookHandler) Create(c *gin.Context) {
 		return
 	}
 
+	if input.TargetLevels == nil {
+		input.TargetLevels = []int64{}
+	}
+	if input.ClassIDs == nil {
+		input.ClassIDs = []int64{}
+	}
+
 	tx, err := dbConn.BeginTx(c.Request.Context(), nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction", "details": err.Error()})
@@ -153,7 +161,8 @@ func (h *BookHandler) Create(c *gin.Context) {
 	)
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create book", "details": err.Error()})
+		fmt.Printf("CreateBook DB Error: %v\n", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Kitobni saqlashda xatolik yuz berdi", "details": err.Error()})
 		return
 	}
 
@@ -195,6 +204,13 @@ func (h *BookHandler) Update(c *gin.Context) {
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input", "details": err.Error()})
 		return
+	}
+
+	if input.TargetLevels == nil {
+		input.TargetLevels = []int64{}
+	}
+	if input.ClassIDs == nil {
+		input.ClassIDs = []int64{}
 	}
 
 	tx, err := dbConn.BeginTx(c.Request.Context(), nil)
@@ -323,6 +339,27 @@ func (h *BookHandler) UploadFile(c *gin.Context) {
 		return
 	}
 
+	fileSizeStr := fmt.Sprintf("%.2f MB", float64(file.Size)/(1024*1024))
+	if file.Size < 1024*1024 {
+		fileSizeStr = fmt.Sprintf("%.1f KB", float64(file.Size)/1024)
+	}
+
+	// Try Cloudflare R2 upload first if configured
+	if storage.IsR2Enabled() {
+		urlPath, err := storage.UploadToR2(c.Request.Context(), file, "books")
+		if err == nil {
+			c.JSON(http.StatusOK, gin.H{
+				"url":       urlPath,
+				"file_name": file.Filename,
+				"file_size": fileSizeStr,
+				"provider":  "cloudflare_r2",
+			})
+			return
+		}
+		fmt.Printf("Cloudflare R2 Upload error, using local storage fallback: %v\n", err)
+	}
+
+	// Local Storage Fallback
 	uploadDir := "./uploads/books"
 	if err := os.MkdirAll(uploadDir, 0755); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Fayl papkasini yaratib bo'lmadi", "details": err.Error()})
@@ -337,16 +374,12 @@ func (h *BookHandler) UploadFile(c *gin.Context) {
 		return
 	}
 
-	fileSizeStr := fmt.Sprintf("%.2f MB", float64(file.Size)/(1024*1024))
-	if file.Size < 1024*1024 {
-		fileSizeStr = fmt.Sprintf("%.1f KB", float64(file.Size)/1024)
-	}
-
 	urlPath := fmt.Sprintf("/uploads/books/%s", filename)
 
 	c.JSON(http.StatusOK, gin.H{
 		"url":       urlPath,
 		"file_name": file.Filename,
 		"file_size": fileSizeStr,
+		"provider":  "local",
 	})
 }
