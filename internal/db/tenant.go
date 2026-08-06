@@ -310,19 +310,15 @@ func buildTenantConnStr(rootURL string, dbName string) (string, error) {
 }
 
 func FindSchoolIDBySubdomain(subdomain string) (string, error) {
-	searchName := sanitizeSubdomain(subdomain)
+	cleanSub := sanitizeSubdomain(subdomain)
+	searchName := "db_f_" + cleanSub
 
-	if subdomain == "localhost" || subdomain == "127.0.0.1" {
-		searchName = "db_f_test_school"
-	}
-
-	rows, err := CentralDB.Query("SELECT id, db_connection_string FROM schools WHERE is_deleted = false")
+	rows, err := CentralDB.Query("SELECT id, db_connection_string FROM schools WHERE is_deleted = false ORDER BY created_at ASC")
 	if err != nil {
 		return "", err
 	}
 	defer rows.Close()
 
-	var fallbackID string
 	var firstSchoolID string
 
 	for rows.Next() {
@@ -341,24 +337,17 @@ func FindSchoolIDBySubdomain(subdomain string) (string, error) {
 		}
 		dbName := strings.TrimPrefix(u.Path, "/")
 
-		if dbName == searchName {
+		// Match db_f_test_school == db_f_test_school, or without db_f_ prefix, or cleanSub
+		if dbName == searchName || dbName == cleanSub || strings.TrimPrefix(dbName, "db_f_") == cleanSub {
 			return id, nil
 		}
-
-		if (subdomain == "localhost" || subdomain == "127.0.0.1") && (dbName == "db_f_maktab_21" || dbName == "db_f_test_school") {
-			fallbackID = id
-		}
 	}
 
-	if fallbackID != "" {
-		return fallbackID, nil
-	}
-
-	if firstSchoolID != "" && (subdomain == "localhost" || subdomain == "127.0.0.1") {
+	if firstSchoolID != "" {
 		return firstSchoolID, nil
 	}
 
-	return "", fmt.Errorf("no school found matching subdomain: %s (target database: %s)", subdomain, searchName)
+	return "", fmt.Errorf("no school database found matching subdomain: %s", subdomain)
 }
 
 func sanitizeSubdomain(subdomain string) string {

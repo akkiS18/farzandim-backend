@@ -291,7 +291,30 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 	err := tenantDB.QueryRow(query, req.Phone).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull)
 
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid phone or password"})
+		// Search across all active tenant DBs if user was not found in the default routed tenant DB
+		rows, sErr := db.CentralDB.Query("SELECT id FROM schools WHERE is_deleted = false")
+		if sErr == nil {
+			for rows.Next() {
+				var sID string
+				if errScan := rows.Scan(&sID); errScan == nil && sID != schoolID {
+					tDB, errPool := db.TenantConnManager.GetTenantDB(sID)
+					if errPool == nil {
+						errSearch := tDB.QueryRow(query, req.Phone).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull)
+						if errSearch == nil {
+							schoolID = sID
+							tenantDB = tDB
+							err = nil
+							break
+						}
+					}
+				}
+			}
+			rows.Close()
+		}
+	}
+
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Telefon raqam yoki parol xato"})
 		return
 	}
 
