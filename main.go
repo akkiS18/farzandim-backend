@@ -12,12 +12,16 @@ import (
 	"github.com/farzandim/backend/internal/handlers"
 	"github.com/farzandim/backend/internal/middleware"
 	"github.com/farzandim/backend/internal/services"
+	"github.com/farzandim/backend/internal/storage"
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
 	// 1. Load configurations from environment or .env
 	cfg := config.LoadConfig()
+
+	// Initialize Cloudflare R2 Storage (if credentials provided in .env)
+	storage.InitR2Storage()
 
 	// 2. Initialize Central DB pool and Tenant DB Connection manager
 	db.InitCentralDB(cfg.CentralDBURL)
