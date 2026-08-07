@@ -239,15 +239,21 @@ func (h *AuthHandler) LoginSuperAdmin(c *gin.Context) {
 		return
 	}
 
-	// Generate superadmin JWT
-	token, err := h.generateJWT(id.String(), "SUPER_ADMIN", "")
+	// Generate superadmin JWT tokens (Access: 24h, Refresh: 365d)
+	token, err := h.generateJWT(id.String(), "SUPER_ADMIN", "", "access", 24*time.Hour)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to issue auth token"})
 		return
 	}
+	refreshToken, err := h.generateJWT(id.String(), "SUPER_ADMIN", "", "refresh", 365*24*time.Hour)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to issue refresh token"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"token": token,
+		"token":         token,
+		"refresh_token": refreshToken,
 		"user": gin.H{
 			"id":         id,
 			"first_name": firstName,
@@ -291,29 +297,6 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 	err := tenantDB.QueryRow(query, req.Phone).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull)
 
 	if err != nil {
-		// Search across all active tenant DBs if user was not found in the default routed tenant DB
-		rows, sErr := db.CentralDB.Query("SELECT id FROM schools WHERE is_deleted = false")
-		if sErr == nil {
-			for rows.Next() {
-				var sID string
-				if errScan := rows.Scan(&sID); errScan == nil && sID != schoolID {
-					tDB, errPool := db.TenantConnManager.GetTenantDB(sID)
-					if errPool == nil {
-						errSearch := tDB.QueryRow(query, req.Phone).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull)
-						if errSearch == nil {
-							schoolID = sID
-							tenantDB = tDB
-							err = nil
-							break
-						}
-					}
-				}
-			}
-			rows.Close()
-		}
-	}
-
-	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Telefon raqam yoki parol xato"})
 		return
 	}
@@ -323,14 +306,19 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 	<-bcryptSemaphore
 
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid phone or password"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Telefon raqam yoki parol xato"})
 		return
 	}
 
-	// Generate tenant user JWT
-	token, err := h.generateJWT(strconv.Itoa(userID), roleName, schoolID)
+	// Generate tenant user JWT tokens (Access: 24h, Refresh: 365d)
+	token, err := h.generateJWT(strconv.Itoa(userID), roleName, schoolID, "access", 24*time.Hour)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to issue auth token"})
+		return
+	}
+	refreshToken, err := h.generateJWT(strconv.Itoa(userID), roleName, schoolID, "refresh", 365*24*time.Hour)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to issue refresh token"})
 		return
 	}
 
@@ -344,7 +332,8 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"token": token,
+		"token":         token,
+		"refresh_token": refreshToken,
 		"user": gin.H{
 			"id":         userID,
 			"first_name": firstName,
@@ -357,12 +346,108 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 	})
 }
 
-func (h *AuthHandler) generateJWT(userID, role, schoolID string) (string, error) {
-	expirationTime := time.Now().Add(24 * time.Hour)
+type RefreshTokenRequest struct {
+	RefreshToken string `json:"refresh_token" binding:"required"`
+}
+
+func (h *AuthHandler) RefreshToken(c *gin.Context) {
+	var req RefreshTokenRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Refresh token is required"})
+		return
+	}
+
+	claims := &middleware.Claims{}
+	token, err := jwt.ParseWithClaims(req.RefreshToken, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(h.jwtSecret), nil
+	})
+
+	if err != nil || !token.Valid {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired refresh token"})
+		return
+	}
+
+	if claims.TokenType != "refresh" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Token is not a valid refresh token"})
+		return
+	}
+
+	// Super Admin refresh
+	if claims.Role == "SUPER_ADMIN" {
+		var exists bool
+		err := db.CentralDB.QueryRow("SELECT EXISTS(SELECT 1 FROM super_admins WHERE id = $1 AND is_deleted = false)", claims.UserID).Scan(&exists)
+		if err != nil || !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Super admin account inactive or deleted"})
+			return
+		}
+
+		newAccessToken, err := h.generateJWT(claims.UserID, claims.Role, claims.SchoolID, "access", 24*time.Hour)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to issue access token"})
+			return
+		}
+		newRefreshToken, err := h.generateJWT(claims.UserID, claims.Role, claims.SchoolID, "refresh", 365*24*time.Hour)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to issue refresh token"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"token":         newAccessToken,
+			"refresh_token": newRefreshToken,
+		})
+		return
+	}
+
+	// Tenant User refresh
+	if claims.SchoolID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "School context missing in refresh token"})
+		return
+	}
+
+	tDB, err := db.TenantConnManager.GetTenantDB(claims.SchoolID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to connect to school database"})
+		return
+	}
+
+	userID, err := strconv.Atoi(claims.UserID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID in token"})
+		return
+	}
+
+	var userActive bool
+	err = tDB.QueryRow("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND is_deleted = false)", userID).Scan(&userActive)
+	if err != nil || !userActive {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Foydalanuvchi hisobi o'chirilgan yoki faol emas"})
+		return
+	}
+
+	newAccessToken, err := h.generateJWT(claims.UserID, claims.Role, claims.SchoolID, "access", 24*time.Hour)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to issue access token"})
+		return
+	}
+	newRefreshToken, err := h.generateJWT(claims.UserID, claims.Role, claims.SchoolID, "refresh", 365*24*time.Hour)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to issue refresh token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"token":         newAccessToken,
+		"refresh_token": newRefreshToken,
+	})
+}
+
+func (h *AuthHandler) generateJWT(userID, role, schoolID, tokenType string, duration time.Duration) (string, error) {
+	expirationTime := time.Now().Add(duration)
 	claims := &middleware.Claims{
-		UserID:   userID,
-		Role:     role,
-		SchoolID: schoolID,
+		UserID:    userID,
+		Role:      role,
+		SchoolID:  schoolID,
+		TokenType: tokenType,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
 		},

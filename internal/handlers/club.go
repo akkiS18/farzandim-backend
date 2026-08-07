@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/farzandim/backend/internal/audit"
 	"github.com/farzandim/backend/internal/models"
@@ -682,4 +683,226 @@ func (h *ClubHandler) DeleteClub(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "To'garak muvaffaqiyatli o'chirildi"})
+}
+
+// SaveClubGradesBatch saves/updates attendance & grades for all students in a club session date
+func (h *ClubHandler) SaveClubGradesBatch(c *gin.Context) {
+	tenantDBVal, _ := c.Get("tenantDB")
+	db := tenantDBVal.(*sql.DB)
+
+	userIDVal, _ := c.Get("userID")
+	userID, _ := strconv.Atoi(userIDVal.(string))
+
+	roleVal, _ := c.Get("role")
+	role := roleVal.(string)
+
+	clubID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid club ID"})
+		return
+	}
+
+	var req models.BatchSaveClubGradesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload", "details": err.Error()})
+		return
+	}
+
+	// Verify permission: Admin or teacher owner
+	if role != "ADMIN" {
+		var teacherID int
+		err := db.QueryRow("SELECT teacher_id FROM clubs WHERE id = $1 AND is_deleted = false", clubID).Scan(&teacherID)
+		if err != nil || teacherID != userID {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Ushbu to'garakka mas'ul emassiz"})
+			return
+		}
+	}
+
+	tx, err := db.BeginTx(c.Request.Context(), nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Tranzaksiya boshlashda xatolik"})
+		return
+	}
+	defer tx.Rollback()
+
+	query := `
+		INSERT INTO club_grades (club_id, student_id, lesson_date, attendance, score_value, feedback, graded_by, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+		ON CONFLICT (club_id, student_id, lesson_date) DO UPDATE SET
+			attendance = EXCLUDED.attendance,
+			score_value = EXCLUDED.score_value,
+			feedback = EXCLUDED.feedback,
+			graded_by = EXCLUDED.graded_by,
+			updated_at = NOW()
+	`
+
+	for _, g := range req.Grades {
+		att := g.Attendance
+		if att == "" {
+			att = "PRESENT"
+		}
+		_, err := tx.Exec(query, clubID, g.StudentID, req.LessonDate, att, g.ScoreValue, g.Feedback, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Baholarni saqlashda xatolik: " + err.Error()})
+			return
+		}
+	}
+
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "SAVE_CLUB_GRADES",
+		TableName: "club_grades",
+		RecordID:  strconv.Itoa(clubID),
+		NewValues: map[string]interface{}{
+			"lesson_date": req.LessonDate,
+			"grade_count": len(req.Grades),
+		},
+	})
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Commit xatoligi"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "To'garak mashg'uloti baholari va davomati muvaffaqiyatli saqlandi"})
+}
+
+// GetClubGradesByDate returns student grades & attendance for a specific club date
+func (h *ClubHandler) GetClubGradesByDate(c *gin.Context) {
+	tenantDBVal, _ := c.Get("tenantDB")
+	db := tenantDBVal.(*sql.DB)
+
+	clubID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid club ID"})
+		return
+	}
+
+	dateParam := c.Query("date")
+	if dateParam == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "date parameter is required (YYYY-MM-DD)"})
+		return
+	}
+
+	rows, err := db.Query(`
+		SELECT cg.id, cg.club_id, cg.student_id,
+		       stu_u.first_name || ' ' || stu_u.last_name as student_name,
+		       cls.name as class_name,
+		       cg.lesson_date, cg.attendance, cg.score_value, cg.feedback, cg.graded_by, cg.created_at, cg.updated_at
+		FROM club_grades cg
+		JOIN students s ON cg.student_id = s.id
+		JOIN users stu_u ON s.user_id = stu_u.id
+		JOIN classes cls ON s.class_id = cls.id
+		WHERE cg.club_id = $1 AND cg.lesson_date = $2
+		ORDER BY cls.name ASC, stu_u.last_name ASC
+	`, clubID, dateParam)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Baholarni yuklashda xatolik: " + err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var grades []models.ClubGrade
+	for rows.Next() {
+		var g models.ClubGrade
+		var lDate time.Time
+		var gradedBy sql.NullInt64
+
+		err := rows.Scan(
+			&g.ID, &g.ClubID, &g.StudentID, &g.StudentName, &g.ClassName,
+			&lDate, &g.Attendance, &g.ScoreValue, &g.Feedback, &gradedBy, &g.CreatedAt, &g.UpdatedAt,
+		)
+		if err == nil {
+			g.LessonDate = lDate.Format("2006-01-02")
+			if gradedBy.Valid {
+				gb := int(gradedBy.Int64)
+				g.GradedBy = &gb
+			}
+			grades = append(grades, g)
+		}
+	}
+
+	c.JSON(http.StatusOK, grades)
+}
+
+// GetStudentClubGrades returns club grades & attendance history for student/parent view
+func (h *ClubHandler) GetStudentClubGrades(c *gin.Context) {
+	tenantDBVal, _ := c.Get("tenantDB")
+	db := tenantDBVal.(*sql.DB)
+
+	userRoleVal, _ := c.Get("role")
+	userRole := userRoleVal.(string)
+	userIDVal, _ := c.Get("userID")
+	currentUserID, _ := strconv.Atoi(userIDVal.(string))
+
+	var studentIDs []int
+
+	if userRole == "STUDENT" {
+		var sid int
+		err := db.QueryRow("SELECT id FROM students WHERE user_id = $1 AND is_deleted = false", currentUserID).Scan(&sid)
+		if err == nil {
+			studentIDs = append(studentIDs, sid)
+		}
+	} else if userRole == "PARENT" {
+		rows, err := db.Query(`
+			SELECT sp.student_id FROM student_parents sp
+			JOIN students s ON sp.student_id = s.id
+			WHERE sp.parent_id = $1 AND s.is_deleted = false`, currentUserID)
+		if err == nil {
+			for rows.Next() {
+				var sid int
+				if err := rows.Scan(&sid); err == nil {
+					studentIDs = append(studentIDs, sid)
+				}
+			}
+			rows.Close()
+		}
+	}
+
+	if len(studentIDs) == 0 {
+		c.JSON(http.StatusOK, []models.ClubGrade{})
+		return
+	}
+
+	rows, err := db.Query(`
+		SELECT cg.id, cg.club_id, clb.name as club_name, cg.student_id,
+		       stu_u.first_name || ' ' || stu_u.last_name as student_name,
+		       cls.name as class_name,
+		       cg.lesson_date, cg.attendance, cg.score_value, cg.feedback, cg.graded_by, cg.created_at, cg.updated_at
+		FROM club_grades cg
+		JOIN clubs clb ON cg.club_id = clb.id
+		JOIN students s ON cg.student_id = s.id
+		JOIN users stu_u ON s.user_id = stu_u.id
+		JOIN classes cls ON s.class_id = cls.id
+		WHERE cg.student_id = ANY($1) AND clb.is_deleted = false
+		ORDER BY cg.lesson_date DESC, clb.name ASC
+	`, pq.Array(studentIDs))
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "To'garak baholarini yuklashda xatolik: " + err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var grades []models.ClubGrade
+	for rows.Next() {
+		var g models.ClubGrade
+		var lDate time.Time
+		var gradedBy sql.NullInt64
+
+		err := rows.Scan(
+			&g.ID, &g.ClubID, &g.ClubName, &g.StudentID, &g.StudentName, &g.ClassName,
+			&lDate, &g.Attendance, &g.ScoreValue, &g.Feedback, &gradedBy, &g.CreatedAt, &g.UpdatedAt,
+		)
+		if err == nil {
+			g.LessonDate = lDate.Format("2006-01-02")
+			if gradedBy.Valid {
+				gb := int(gradedBy.Int64)
+				g.GradedBy = &gb
+			}
+			grades = append(grades, g)
+		}
+	}
+
+	c.JSON(http.StatusOK, grades)
 }

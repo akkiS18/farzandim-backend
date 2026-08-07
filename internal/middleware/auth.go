@@ -9,9 +9,10 @@ import (
 )
 
 type Claims struct {
-	UserID   string `json:"user_id"`
-	Role     string `json:"role"`
-	SchoolID string `json:"school_id,omitempty"`
+	UserID    string `json:"user_id"`
+	Role      string `json:"role"`
+	SchoolID  string `json:"school_id,omitempty"`
+	TokenType string `json:"token_type,omitempty"` // "access" or "refresh"
 	jwt.RegisteredClaims
 }
 
@@ -48,6 +49,12 @@ func AuthMiddleware(jwtSecret string) gin.HandlerFunc {
 
 		if err != nil || !token.Valid {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
+			c.Abort()
+			return
+		}
+
+		if claims.TokenType == "refresh" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Cannot use refresh token as authorization header"})
 			c.Abort()
 			return
 		}
