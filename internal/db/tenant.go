@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
@@ -15,15 +16,17 @@ import (
 )
 
 type TenantManager struct {
-	connections map[string]*sql.DB
-	mu          sync.RWMutex
+	connections    map[string]*sql.DB
+	subdomainToID  map[string]string
+	mu             sync.RWMutex
 }
 
 var TenantConnManager *TenantManager
 
 func InitTenantManager() {
 	TenantConnManager = &TenantManager{
-		connections: make(map[string]*sql.DB),
+		connections:   make(map[string]*sql.DB),
+		subdomainToID: make(map[string]string),
 	}
 }
 
@@ -64,6 +67,10 @@ func (tm *TenantManager) GetTenantDB(schoolID string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to open tenant DB connection: %w", err)
 	}
 
+	newDB.SetMaxOpenConns(20)
+	newDB.SetMaxIdleConns(2)
+	newDB.SetConnMaxLifetime(time.Hour)
+
 	if err := newDB.Ping(); err != nil {
 		newDB.Close()
 		return nil, fmt.Errorf("failed to ping tenant DB: %w", err)
@@ -73,6 +80,13 @@ func (tm *TenantManager) GetTenantDB(schoolID string) (*sql.DB, error) {
 	log.Printf("Successfully established connection to Tenant DB for School ID: %s", schoolID)
 
 	return newDB, nil
+}
+
+// ClearSubdomainCache clears the subdomain to SchoolID cache map
+func (tm *TenantManager) ClearSubdomainCache() {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.subdomainToID = make(map[string]string)
 }
 
 // CreateAndMigrateTenantDB provisions a new database and executes golang-migrate
@@ -205,11 +219,22 @@ func FindSchoolIDBySubdomain(subdomain string) (string, error) {
 		searchName = "db_f_test_school"
 	}
 
+	// Check cache first
+	TenantConnManager.mu.RLock()
+	id, cached := TenantConnManager.subdomainToID[searchName]
+	TenantConnManager.mu.RUnlock()
+	if cached {
+		return id, nil
+	}
+
 	rows, err := CentralDB.Query("SELECT id, db_connection_string FROM schools WHERE is_deleted = false")
 	if err != nil {
 		return "", err
 	}
 	defer rows.Close()
+
+	TenantConnManager.mu.Lock()
+	defer TenantConnManager.mu.Unlock()
 
 	var fallbackID string
 	for rows.Next() {
@@ -223,6 +248,9 @@ func FindSchoolIDBySubdomain(subdomain string) (string, error) {
 			continue
 		}
 		dbName := strings.TrimPrefix(u.Path, "/")
+
+		// Populate cache
+		TenantConnManager.subdomainToID[dbName] = id
 
 		if dbName == searchName {
 			return id, nil

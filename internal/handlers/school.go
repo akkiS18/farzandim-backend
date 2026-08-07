@@ -58,6 +58,9 @@ func (h *SchoolHandler) CreateSchool(c *gin.Context) {
 		return
 	}
 
+	// Invalidate subdomain cache to allow immediate routing
+	db.TenantConnManager.ClearSubdomainCache()
+
 	school := models.School{
 		ID:                 schoolUUID,
 		Name:               req.Name,

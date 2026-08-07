@@ -331,6 +331,21 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 		return ""
 	}
 
+	// Cache for bcrypt hashed passwords to avoid expensive calculations on duplicate passwords
+	hashedPasswordCache := make(map[string]string)
+	getHashedPassword := func(pwd string) (string, error) {
+		if hash, cached := hashedPasswordCache[pwd]; cached {
+			return hash, nil
+		}
+		hashBytes, err := bcrypt.GenerateFromPassword([]byte(pwd), bcrypt.DefaultCost)
+		if err != nil {
+			return "", err
+		}
+		hashStr := string(hashBytes)
+		hashedPasswordCache[pwd] = hashStr
+		return hashStr, nil
+	}
+
 	// Process each student row in its own database transaction for isolation
 	for rIdx := 1; rIdx < len(rows); rIdx++ {
 		row := rows[rIdx]
@@ -394,8 +409,8 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 			}
 		}
 
-		// 2. Hash Password
-		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(parol), bcrypt.DefaultCost)
+		// 2. Hash Password (leveraging request-scoped cache)
+		hashedPassword, err := getHashedPassword(parol)
 		if err != nil {
 			tx.Rollback()
 			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Parolni shifrlashda xatolik"})
@@ -571,12 +586,28 @@ func (h *ImportHandler) ImportTeachers(c *gin.Context) {
 	successCount := 0
 	failedCount := 0
 
+	// Helper function to safely read cell
 	getCell := func(row []string, key string) string {
 		idx := colIndices[key]
 		if idx >= 0 && idx < len(row) {
 			return strings.TrimSpace(row[idx])
 		}
 		return ""
+	}
+
+	// Cache for bcrypt hashed passwords to avoid expensive calculations on duplicate passwords
+	hashedPasswordCache := make(map[string]string)
+	getHashedPassword := func(pwd string) (string, error) {
+		if hash, cached := hashedPasswordCache[pwd]; cached {
+			return hash, nil
+		}
+		hashBytes, err := bcrypt.GenerateFromPassword([]byte(pwd), bcrypt.DefaultCost)
+		if err != nil {
+			return "", err
+		}
+		hashStr := string(hashBytes)
+		hashedPasswordCache[pwd] = hashStr
+		return hashStr, nil
 	}
 
 	// Process each teacher row in its own database transaction for isolation
@@ -629,8 +660,8 @@ func (h *ImportHandler) ImportTeachers(c *gin.Context) {
 			continue
 		}
 
-		// Hash Password
-		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(parol), bcrypt.DefaultCost)
+		// Hash Password (leveraging request-scoped cache)
+		hashedPassword, err := getHashedPassword(parol)
 		if err != nil {
 			tx.Rollback()
 			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Parolni shifrlashda xatolik"})
@@ -922,12 +953,28 @@ func (h *ImportHandler) ImportParents(c *gin.Context) {
 	successCount := 0
 	failedCount := 0
 
+	// Helper function to safely read cell
 	getCell := func(row []string, key string) string {
 		idx := colIndices[key]
 		if idx >= 0 && idx < len(row) {
 			return strings.TrimSpace(row[idx])
 		}
 		return ""
+	}
+
+	// Cache for bcrypt hashed passwords to avoid expensive calculations on duplicate passwords
+	hashedPasswordCache := make(map[string]string)
+	getHashedPassword := func(pwd string) (string, error) {
+		if hash, cached := hashedPasswordCache[pwd]; cached {
+			return hash, nil
+		}
+		hashBytes, err := bcrypt.GenerateFromPassword([]byte(pwd), bcrypt.DefaultCost)
+		if err != nil {
+			return "", err
+		}
+		hashStr := string(hashBytes)
+		hashedPasswordCache[pwd] = hashStr
+		return hashStr, nil
 	}
 
 	for rIdx := 1; rIdx < len(rows); rIdx++ {
@@ -1035,8 +1082,8 @@ func (h *ImportHandler) ImportParents(c *gin.Context) {
 		}
 
 		if err == sql.ErrNoRows {
-			// Create new parent user
-			hashedPassword, err := bcrypt.GenerateFromPassword([]byte(parol), bcrypt.DefaultCost)
+			// Create new parent user (leveraging request-scoped cache)
+			hashedPassword, err := getHashedPassword(parol)
 			if err != nil {
 				tx.Rollback()
 				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Parolni shifrlashda xatolik"})

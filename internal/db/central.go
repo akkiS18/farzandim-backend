@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"log"
+	"time"
 
 	_ "github.com/lib/pq"
 )
@@ -19,6 +20,10 @@ func InitCentralDB(connStr string) {
 	if err != nil {
 		log.Fatalf("Error pinging Central DB: %v", err)
 	}
+
+	db.SetMaxOpenConns(50)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(time.Hour)
 
 	CentralDB = db
 	log.Println("Successfully connected to Central Database")
