@@ -438,12 +438,207 @@ func (h *TenantUserHandler) UpdateTeacher(c *gin.Context) {
 	})
 
 	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit teacher update", "details": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit student update", "details": err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, newUser)
 }
+
+type BatchTransferStudentsRequest struct {
+	UserIDs    []int `json:"user_ids"`
+	StudentIDs []int `json:"student_ids"`
+}
+
+// TransferStudentsClass handles batch transfer of students to a target class
+func (h *TenantUserHandler) TransferStudentsClass(c *gin.Context) {
+	classIDStr := c.Param("id")
+	targetClassID, err := strconv.Atoi(classIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid target class ID"})
+		return
+	}
+
+	var req BatchTransferStudentsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request fields", "details": err.Error()})
+		return
+	}
+
+	// Merge UserIDs and StudentIDs to support both input formats
+	idMap := make(map[int]bool)
+	for _, id := range req.UserIDs {
+		if id > 0 {
+			idMap[id] = true
+		}
+	}
+	for _, id := range req.StudentIDs {
+		if id > 0 {
+			idMap[id] = true
+		}
+	}
+
+	if len(idMap) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "O'tkazish uchun kamida bitta user_id yoki student_id kiritilishi shart"})
+		return
+	}
+
+	var targetIDs []int
+	for id := range idMap {
+		targetIDs = append(targetIDs, id)
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	userRoleVal, _ := c.Get("role")
+	userRole := userRoleVal.(string)
+	userIDVal, _ := c.Get("userID")
+	userIDStr := userIDVal.(string)
+	currentUserID, _ := strconv.Atoi(userIDStr)
+
+	// 1. Verify target class exists and is not deleted
+	var targetClassExists bool
+	err = dbConn.QueryRow("SELECT EXISTS(SELECT 1 FROM classes WHERE id = $1 AND is_deleted = false)", targetClassID).Scan(&targetClassExists)
+	if err != nil || !targetClassExists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Manzil sinf topilmadi yoki o'chirilgan"})
+		return
+	}
+
+	// 2. Fetch and validate all requested users/students
+	queryUsers := `
+		SELECT u.id as user_id, u.first_name, u.last_name, r.name as role_name, s.id as student_id, COALESCE(s.class_id, 0) as source_class_id
+		FROM users u
+		JOIN roles r ON u.role_id = r.id
+		LEFT JOIN students s ON s.user_id = u.id AND s.is_deleted = false
+		WHERE (u.id = ANY($1) OR s.id = ANY($1)) AND u.is_deleted = false`
+
+	rows, err := dbConn.Query(queryUsers, pq.Array(targetIDs))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query students for validation", "details": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	type StudentTransferMeta struct {
+		StudentID     int
+		UserID        int
+		FirstName     string
+		LastName      string
+		SourceClassID int
+	}
+
+	var validStudents []StudentTransferMeta
+	sourceClassIDsMap := make(map[int]bool)
+	sourceClassIDsMap[targetClassID] = true
+
+	for rows.Next() {
+		var uID, sID, scID int
+		var fname, lname, rname string
+		var sIDNull, scIDNull sql.NullInt64
+
+		err := rows.Scan(&uID, &fname, &lname, &rname, &sIDNull, &scIDNull)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse student data", "details": err.Error()})
+			return
+		}
+
+		if rname != "STUDENT" || !sIDNull.Valid {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Foydalanuvchi '%s %s' (ID %d) o'quvchi rolida emas", fname, lname, uID)})
+			return
+		}
+
+		sID = int(sIDNull.Int64)
+		if scIDNull.Valid {
+			scID = int(scIDNull.Int64)
+		}
+
+		validStudents = append(validStudents, StudentTransferMeta{
+			StudentID:     sID,
+			UserID:        uID,
+			FirstName:     fname,
+			LastName:      lname,
+			SourceClassID: scID,
+		})
+
+		if scID > 0 {
+			sourceClassIDsMap[scID] = true
+		}
+	}
+
+	if len(validStudents) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Birorta ham mos keladigan faol o'quvchi topilmadi"})
+		return
+	}
+
+	// 3. Authorization Check: Admin OR Sinb Rahbari of target class / source classes
+	if userRole != "ADMIN" {
+		if userRole != "MAIN_TEACHER" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: faqat admin va tegishli sinf rahbari o'quvchilarni o'tkaza oladi"})
+			return
+		}
+
+		var checkClasses []int
+		for cid := range sourceClassIDsMap {
+			checkClasses = append(checkClasses, cid)
+		}
+
+		var isMainTeacher bool
+		err = dbConn.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM class_teachers 
+				WHERE class_id = ANY($1) AND teacher_id = $2 AND is_main_teacher = true AND is_deleted = false
+			)
+		`, pq.Array(checkClasses), currentUserID).Scan(&isMainTeacher)
+
+		if err != nil || !isMainTeacher {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: siz o'quvchilarning manba yoki manzil sinf rahbari emassiz"})
+			return
+		}
+	}
+
+	// 4. Perform atomic bulk transfer in database transaction
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to begin transaction", "details": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	var updatedStudentIDs []int
+	for _, st := range validStudents {
+		updatedStudentIDs = append(updatedStudentIDs, st.StudentID)
+	}
+
+	_, err = tx.Exec("UPDATE students SET class_id = $1 WHERE id = ANY($2) AND is_deleted = false", targetClassID, pq.Array(updatedStudentIDs))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to transfer students in database", "details": err.Error()})
+		return
+	}
+
+	// 5. Audit Log per transferred student
+	for _, st := range validStudents {
+		audit.LogChange(c, tx, audit.LogData{
+			Action:    "CLASS_TRANSFER",
+			TableName: "students",
+			RecordID:  strconv.Itoa(st.StudentID),
+			OldValues: map[string]interface{}{"class_id": st.SourceClassID},
+			NewValues: map[string]interface{}{"class_id": targetClassID, "student_name": fmt.Sprintf("%s %s", st.FirstName, st.LastName)},
+		})
+	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":          fmt.Sprintf("%d ta o'quvchi yangi sinfga muvaffaqiyatli o'tkazildi", len(validStudents)),
+		"transferred_count": len(validStudents),
+		"target_class_id":  targetClassID,
+	})
+}
+
 
 // DeleteTeacher soft-deletes a teacher user and unassigns from class subjects
 func (h *TenantUserHandler) DeleteTeacher(c *gin.Context) {

@@ -133,11 +133,15 @@ func main() {
 		superAdminGroup.POST("/settings/change-password", authHandler.ChangePassword)
 	}
 
+	// Public refresh token endpoint
+	r.POST("/api/schools/refresh", authHandler.RefreshToken)
+
 	// Tenant APIs (Public endpoints like login, routed by X-School-ID header)
 	tenantGroup := r.Group("/api/schools")
 	tenantGroup.Use(middleware.TenantMiddleware())
 	{
 		tenantGroup.POST("/login", authHandler.LoginTenantUser)
+		tenantGroup.POST("/refresh", authHandler.RefreshToken)
 
 		tenantGroup.GET("/ping", func(c *gin.Context) {
 			c.JSON(200, gin.H{
@@ -200,6 +204,7 @@ func main() {
 		authTenantGroup.GET("/import/template/menu/exception", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), menuHandler.ExportMenuExceptionTemplate)
 
 		authTenantGroup.POST("/classes/:id/students", tenantUserHandler.CreateClassStudent)
+		authTenantGroup.POST("/classes/:id/transfer-students", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), tenantUserHandler.TransferStudentsClass)
 		authTenantGroup.PUT("/students/:id", tenantUserHandler.UpdateStudent)
 		authTenantGroup.DELETE("/students/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), tenantUserHandler.DeleteStudent)
 		authTenantGroup.POST("/teachers", middleware.RequireRole("ADMIN"), tenantUserHandler.CreateTeacher)
