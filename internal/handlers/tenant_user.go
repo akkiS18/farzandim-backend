@@ -573,7 +573,7 @@ func (h *TenantUserHandler) TransferStudentsClass(c *gin.Context) {
 
 	// 3. Authorization Check: Admin OR Sinb Rahbari of target class / source classes
 	if userRole != "ADMIN" {
-		if userRole != "MAIN_TEACHER" {
+		if userRole != "MAIN_TEACHER" && userRole != "SUBJECT_TEACHER" {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: faqat admin va tegishli sinf rahbari o'quvchilarni o'tkaza oladi"})
 			return
 		}

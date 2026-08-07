@@ -63,3 +63,32 @@ type CreateScheduleRequest struct {
 	StartTime string `json:"start_time" binding:"required"`
 	EndTime   string `json:"end_time" binding:"required"`
 }
+
+type ClubGrade struct {
+	ID          int        `json:"id"`
+	ClubID      int        `json:"club_id"`
+	ClubName    string     `json:"club_name,omitempty"`
+	StudentID   int        `json:"student_id"`
+	StudentName string     `json:"student_name,omitempty"`
+	ClassName   string     `json:"class_name,omitempty"`
+	LessonDate  string     `json:"lesson_date"`
+	Attendance  string     `json:"attendance"` // 'PRESENT', 'ABSENT', 'EXCUSED'
+	ScoreValue  string     `json:"score_value"`
+	Feedback    string     `json:"feedback"`
+	GradedBy    *int       `json:"graded_by,omitempty"`
+	GradedAt    *time.Time `json:"graded_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+type GradeClubStudentInput struct {
+	StudentID  int    `json:"student_id" binding:"required"`
+	Attendance string `json:"attendance"` // 'PRESENT', 'ABSENT', 'EXCUSED'
+	ScoreValue string `json:"score_value"`
+	Feedback   string `json:"feedback"`
+}
+
+type BatchSaveClubGradesRequest struct {
+	LessonDate string                  `json:"lesson_date" binding:"required"`
+	Grades     []GradeClubStudentInput `json:"grades" binding:"required"`
+}

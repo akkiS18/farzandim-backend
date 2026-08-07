@@ -75,6 +75,7 @@ func main() {
 	dateRangePresetHandler := handlers.NewDateRangePresetHandler()
 	targetPresetHandler := handlers.NewTargetPresetHandler()
 	bookHandler := handlers.NewBookHandler()
+	readingAssignmentHandler := handlers.NewReadingAssignmentHandler()
 
 	// 4. Initialize web server router
 	r := gin.Default()
@@ -141,7 +142,6 @@ func main() {
 	tenantGroup.Use(middleware.TenantMiddleware())
 	{
 		tenantGroup.POST("/login", authHandler.LoginTenantUser)
-		tenantGroup.POST("/refresh", authHandler.RefreshToken)
 
 		tenantGroup.GET("/ping", func(c *gin.Context) {
 			c.JSON(200, gin.H{
@@ -178,12 +178,24 @@ func main() {
 		authTenantGroup.POST("/target-presets", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), targetPresetHandler.Create)
 		authTenantGroup.DELETE("/target-presets/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), targetPresetHandler.Delete)
 
-		// Kitobxonlik (Books / Library) APIs
+		// Kitobxonlik (Books / Library / Reading Assignments) APIs
+		authTenantGroup.GET("/book-categories", bookHandler.ListCategories)
+		authTenantGroup.POST("/book-categories", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), bookHandler.CreateCategory)
+		authTenantGroup.DELETE("/book-categories/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), bookHandler.DeleteCategory)
+
 		authTenantGroup.GET("/books", bookHandler.List)
-		authTenantGroup.POST("/books", middleware.RequireRole("ADMIN"), bookHandler.Create)
-		authTenantGroup.PUT("/books/:id", middleware.RequireRole("ADMIN"), bookHandler.Update)
-		authTenantGroup.DELETE("/books/:id", middleware.RequireRole("ADMIN"), bookHandler.Delete)
-		authTenantGroup.POST("/upload/book", middleware.RequireRole("ADMIN"), bookHandler.UploadFile)
+		authTenantGroup.POST("/books", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), bookHandler.Create)
+		authTenantGroup.PUT("/books/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), bookHandler.Update)
+		authTenantGroup.DELETE("/books/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), bookHandler.Delete)
+		authTenantGroup.POST("/upload/book", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), bookHandler.UploadFile)
+
+		authTenantGroup.GET("/reading-assignments", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), readingAssignmentHandler.ListAssignments)
+		authTenantGroup.POST("/reading-assignments", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), readingAssignmentHandler.CreateAssignment)
+		authTenantGroup.GET("/reading-assignments/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), readingAssignmentHandler.GetAssignmentDetails)
+		authTenantGroup.POST("/reading-assignments/:id/grade", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), readingAssignmentHandler.GradeStudentBook)
+		authTenantGroup.DELETE("/reading-assignments/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), readingAssignmentHandler.DeleteAssignment)
+
+		authTenantGroup.GET("/student/reading-assignments", readingAssignmentHandler.GetStudentAssignments)
 
 		// Dashboard Statistics API
 		authTenantGroup.GET("/dashboard/stats", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), dashboardHandler.GetStats)
@@ -204,7 +216,7 @@ func main() {
 		authTenantGroup.GET("/import/template/menu/exception", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), menuHandler.ExportMenuExceptionTemplate)
 
 		authTenantGroup.POST("/classes/:id/students", tenantUserHandler.CreateClassStudent)
-		authTenantGroup.POST("/classes/:id/transfer-students", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), tenantUserHandler.TransferStudentsClass)
+		authTenantGroup.POST("/classes/:id/transfer-students", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), tenantUserHandler.TransferStudentsClass)
 		authTenantGroup.PUT("/students/:id", tenantUserHandler.UpdateStudent)
 		authTenantGroup.DELETE("/students/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), tenantUserHandler.DeleteStudent)
 		authTenantGroup.POST("/teachers", middleware.RequireRole("ADMIN"), tenantUserHandler.CreateTeacher)
@@ -294,6 +306,9 @@ func main() {
 		authTenantGroup.DELETE("/clubs/:id/remove-student", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.RemoveClubStudent)
 		authTenantGroup.POST("/clubs/:id/schedules", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.CreateClubSchedule)
 		authTenantGroup.DELETE("/clubs/schedules/:schedule_id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.DeleteClubSchedule)
+		authTenantGroup.GET("/clubs/:id/grades", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER", "PARENT"), clubHandler.GetClubGradesByDate)
+		authTenantGroup.POST("/clubs/:id/grades", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.SaveClubGradesBatch)
+		authTenantGroup.GET("/student/club-grades", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER", "PARENT", "STUDENT"), clubHandler.GetStudentClubGrades)
 
 		// Telegram Bot Settings
 		authTenantGroup.GET("/telegram/config", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER", "PARENT"), telegramHandler.GetTelegramConfig)

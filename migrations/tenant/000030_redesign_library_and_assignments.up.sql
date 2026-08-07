@@ -13,6 +13,7 @@ CREATE INDEX IF NOT EXISTS idx_book_categories_is_deleted ON book_categories(is_
 ALTER TABLE books ADD COLUMN IF NOT EXISTS category_id INT REFERENCES book_categories(id) ON DELETE SET NULL;
 ALTER TABLE books ADD COLUMN IF NOT EXISTS download_link VARCHAR(1000) DEFAULT '';
 ALTER TABLE books ADD COLUMN IF NOT EXISTS created_by INT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE books ADD COLUMN IF NOT EXISTS location_in_school VARCHAR(255) DEFAULT '';
 ALTER TABLE books ALTER COLUMN file_url DROP NOT NULL;
 
 CREATE TABLE IF NOT EXISTS reading_assignments (
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS student_reading_progress (
     grade_value VARCHAR(50) DEFAULT '',
     numeric_value NUMERIC(5, 2) DEFAULT NULL,
     grading_system_id INT REFERENCES grading_systems(id) ON DELETE SET NULL,
+    teacher_feedback TEXT DEFAULT '',
     graded_by INT REFERENCES users(id) ON DELETE SET NULL,
     graded_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,

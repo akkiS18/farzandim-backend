@@ -41,7 +41,11 @@ func (h *ClassHandler) ListClasses(c *gin.Context) {
 	var rows *sql.Rows
 	var err error
 
-	if role == "PARENT" {
+	allParam := c.Query("all")
+
+	if allParam == "true" {
+		rows, err = dbConn.Query("SELECT id, name, level, is_deleted, deleted_at FROM classes WHERE is_deleted = false ORDER BY name ASC")
+	} else if role == "PARENT" {
 		parentID, errConv := strconv.Atoi(userIDStr)
 		if errConv != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid parent user ID"})
@@ -95,7 +99,7 @@ func (h *ClassHandler) ListClasses(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	if role == "MAIN_TEACHER" || role == "SUBJECT_TEACHER" {
+	if allParam != "true" && (role == "MAIN_TEACHER" || role == "SUBJECT_TEACHER") {
 		type TeacherClass struct {
 			ID            int    `json:"id"`
 			Name          string `json:"name"`
