@@ -24,6 +24,9 @@ func ensureAITable(db *sql.DB) {
 	if db == nil {
 		return
 	}
+	// Try enabling pgcrypto extension for gen_random_uuid support
+	_, _ = db.Exec(`CREATE EXTENSION IF NOT EXISTS "pgcrypto";`)
+
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS ai_weekly_reports (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -40,7 +43,25 @@ func ensureAITable(db *sql.DB) {
 		);
 	`)
 	if err != nil {
-		log.Printf("[ensureAITable Error] Table creation: %v", err)
+		log.Printf("[ensureAITable Warning] Primary attempt failed: %v. Retrying with TEXT ID fallback...", err)
+		_, err2 := db.Exec(`
+			CREATE TABLE IF NOT EXISTS ai_weekly_reports (
+				id TEXT PRIMARY KEY DEFAULT md5(random()::text || clock_timestamp()::text),
+				student_id INT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+				year INT NOT NULL,
+				week_number INT NOT NULL,
+				start_date DATE NOT NULL,
+				end_date DATE NOT NULL,
+				report_text TEXT NOT NULL,
+				summary_json JSONB DEFAULT '{}'::jsonb,
+				created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+				updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+				CONSTRAINT uk_ai_report_student_year_week UNIQUE (student_id, year, week_number)
+			);
+		`)
+		if err2 != nil {
+			log.Printf("[ensureAITable Critical Error] Fallback attempt also failed: %v", err2)
+		}
 	}
 
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_ai_weekly_reports_student ON ai_weekly_reports(student_id);`)
