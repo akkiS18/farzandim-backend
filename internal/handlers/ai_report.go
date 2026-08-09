@@ -24,7 +24,7 @@ func ensureAITable(db *sql.DB) {
 	if db == nil {
 		return
 	}
-	_, _ = db.Exec(`
+	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS ai_weekly_reports (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			student_id INT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
@@ -38,9 +38,13 @@ func ensureAITable(db *sql.DB) {
 			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
 			CONSTRAINT uk_ai_report_student_year_week UNIQUE (student_id, year, week_number)
 		);
-		CREATE INDEX IF NOT EXISTS idx_ai_weekly_reports_student ON ai_weekly_reports(student_id);
-		CREATE INDEX IF NOT EXISTS idx_ai_weekly_reports_year_week ON ai_weekly_reports(year, week_number);
 	`)
+	if err != nil {
+		log.Printf("[ensureAITable Error] Table creation: %v", err)
+	}
+
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_ai_weekly_reports_student ON ai_weekly_reports(student_id);`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_ai_weekly_reports_year_week ON ai_weekly_reports(year, week_number);`)
 }
 
 func getTenantDB(c *gin.Context) (*sql.DB, error) {
@@ -459,6 +463,7 @@ func GenerateReportForStudentExported(dbConn *sql.DB, studentID int, targetTime 
 }
 
 func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Time) (*models.AIWeeklyReport, error) {
+	ensureAITable(dbConn)
 	year, weekNum := targetTime.ISOWeek()
 
 	monday := targetTime.AddDate(0, 0, -int(targetTime.Weekday()-time.Monday))
