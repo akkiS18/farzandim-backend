@@ -20,6 +20,29 @@ func NewAIReportHandler() *AIReportHandler {
 	return &AIReportHandler{}
 }
 
+func ensureAITable(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS ai_weekly_reports (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			student_id INT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+			year INT NOT NULL,
+			week_number INT NOT NULL,
+			start_date DATE NOT NULL,
+			end_date DATE NOT NULL,
+			report_text TEXT NOT NULL,
+			summary_json JSONB DEFAULT '{}'::jsonb,
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			CONSTRAINT uk_ai_report_student_year_week UNIQUE (student_id, year, week_number)
+		);
+		CREATE INDEX IF NOT EXISTS idx_ai_weekly_reports_student ON ai_weekly_reports(student_id);
+		CREATE INDEX IF NOT EXISTS idx_ai_weekly_reports_year_week ON ai_weekly_reports(year, week_number);
+	`)
+}
+
 func getTenantDB(c *gin.Context) (*sql.DB, error) {
 	tenantDBVal, exists := c.Get("tenantDB")
 	if !exists || tenantDBVal == nil {
@@ -31,6 +54,7 @@ func getTenantDB(c *gin.Context) (*sql.DB, error) {
 		return nil, fmt.Errorf("invalid tenant database instance")
 	}
 
+	ensureAITable(tenantDB)
 	return tenantDB, nil
 }
 
@@ -202,8 +226,23 @@ func (h *AIReportHandler) AdminBatchGenerateAIReports(c *gin.Context) {
 		}
 	}
 
+	if generatedCount == 0 && errorCount > 0 {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":           fmt.Sprintf("AI hisobot yaratishda xatolik yuz berdi (%d ta o'quvchi xatoga uchradi)", errorCount),
+			"generated_count": 0,
+			"error_count":     errorCount,
+			"total_requested": len(targetStudentIDs),
+		})
+		return
+	}
+
+	msg := fmt.Sprintf("%d ta o'quvchi uchun AI hisobot muvaffaqiyatli yaratildi", generatedCount)
+	if errorCount > 0 {
+		msg += fmt.Sprintf(" (%d ta o'quvchida xatolik)", errorCount)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message":          fmt.Sprintf("%d ta o'quvchi uchun AI hisobot muvaffaqiyatli yaratildi", generatedCount),
+		"message":          msg,
 		"generated_count": generatedCount,
 		"error_count":     errorCount,
 		"total_requested": len(targetStudentIDs),
