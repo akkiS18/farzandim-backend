@@ -169,7 +169,7 @@ func (h *AIReportHandler) AdminBatchGenerateAIReports(c *gin.Context) {
 	}
 
 	var req AdminBatchGenerateRequest
-	if err := json.NewDecoder(c.Request.Body).Decode(&req); err != nil {
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Noto'g'ri so'rov formati: " + err.Error()})
 		return
 	}
@@ -211,6 +211,7 @@ func (h *AIReportHandler) AdminBatchGenerateAIReports(c *gin.Context) {
 
 	generatedCount := 0
 	errorCount := 0
+	var lastError string
 	targetTime := time.Now()
 
 	for _, sID := range targetStudentIDs {
@@ -220,6 +221,7 @@ func (h *AIReportHandler) AdminBatchGenerateAIReports(c *gin.Context) {
 		_, err := generateReportForStudent(dbConn, sID, targetTime)
 		if err != nil {
 			log.Printf("[AI Batch Error] Student %d error: %v", sID, err)
+			lastError = err.Error()
 			errorCount++
 		} else {
 			generatedCount++
@@ -228,7 +230,8 @@ func (h *AIReportHandler) AdminBatchGenerateAIReports(c *gin.Context) {
 
 	if generatedCount == 0 && errorCount > 0 {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":           fmt.Sprintf("AI hisobot yaratishda xatolik yuz berdi (%d ta o'quvchi xatoga uchradi)", errorCount),
+			"error":           fmt.Sprintf("AI hisobot yaratishda xatolik: %s", lastError),
+			"details":         lastError,
 			"generated_count": 0,
 			"error_count":     errorCount,
 			"total_requested": len(targetStudentIDs),
