@@ -76,6 +76,7 @@ func main() {
 	targetPresetHandler := handlers.NewTargetPresetHandler()
 	bookHandler := handlers.NewBookHandler()
 	readingAssignmentHandler := handlers.NewReadingAssignmentHandler()
+	aiReportHandler := handlers.NewAIReportHandler()
 
 	// 4. Initialize web server router
 	r := gin.Default()
@@ -313,6 +314,15 @@ func main() {
 		// Telegram Bot Settings
 		authTenantGroup.GET("/telegram/config", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER", "PARENT"), telegramHandler.GetTelegramConfig)
 		authTenantGroup.POST("/telegram/config", middleware.RequireRole("ADMIN"), telegramHandler.SaveTelegramConfig)
+
+		// AI Reports
+		authTenantGroup.GET("/parent/ai-reports", middleware.RequireRole("PARENT", "ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), aiReportHandler.GetStudentAIReports)
+		authTenantGroup.GET("/parent/ai-reports/latest", middleware.RequireRole("PARENT", "ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), aiReportHandler.GetLatestAIReport)
+		authTenantGroup.POST("/admin/ai-reports/generate", middleware.RequireRole("ADMIN"), aiReportHandler.AdminBatchGenerateAIReports)
+		authTenantGroup.GET("/admin/ai-reports/grouped", middleware.RequireRole("ADMIN"), aiReportHandler.GetGroupedAIReports)
+		authTenantGroup.GET("/admin/ai-reports/by-week", middleware.RequireRole("ADMIN"), aiReportHandler.GetAIReportsByWeek)
+		authTenantGroup.DELETE("/admin/ai-reports/week", middleware.RequireRole("ADMIN"), aiReportHandler.DeleteWeekAIReports)
+		authTenantGroup.DELETE("/admin/ai-reports/:id", middleware.RequireRole("ADMIN"), aiReportHandler.DeleteSingleAIReport)
 	}
 
 	// 5. Initialize background scheduler for automated charge plans
@@ -321,11 +331,12 @@ func main() {
 		ticker := time.NewTicker(6 * time.Hour)
 		defer ticker.Stop()
 
-		// Run once on startup
+		// Run once on startup for charge plans
 		runAllTenantsScheduler(balanceHandler)
 
 		for range ticker.C {
 			runAllTenantsScheduler(balanceHandler)
+			runWeeklyAIReporterScheduler()
 		}
 	}()
 
@@ -364,5 +375,68 @@ func runAllTenantsScheduler(balanceHandler *handlers.BalanceHandler) {
 		if chargedCount > 0 {
 			log.Printf("[Scheduler] Successfully charged %d monthly fees for school %s", chargedCount, name)
 		}
+	}
+}
+
+func runWeeklyAIReporterScheduler() {
+	if db.CentralDB == nil {
+		return
+	}
+
+	// Only run automatic generation sweep on Saturday or Sunday
+	now := time.Now()
+	if now.Weekday() != time.Saturday && now.Weekday() != time.Sunday {
+		log.Printf("[AI Cron Scheduler] Skipping auto sweep today (%s). Auto generation scheduled for Saturdays/Sundays.", now.Weekday())
+		return
+	}
+
+	rows, err := db.CentralDB.Query("SELECT id, name FROM schools WHERE is_deleted = false")
+	if err != nil {
+		log.Printf("[AI Cron Scheduler] Failed to query schools: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	log.Printf("[AI Cron Scheduler] Starting automated weekly AI report generation sweep...")
+
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			continue
+		}
+
+		tenantDB, err := db.TenantConnManager.GetTenantDB(id)
+		if err != nil {
+			log.Printf("[AI Cron Scheduler] Failed to get tenant DB for school %s: %v", name, err)
+			continue
+		}
+
+		sRows, err := tenantDB.Query("SELECT id FROM students WHERE is_deleted = false")
+		if err != nil {
+			continue
+		}
+
+		var studentIDs []int
+		for sRows.Next() {
+			var sid int
+			if err := sRows.Scan(&sid); err == nil {
+				studentIDs = append(studentIDs, sid)
+			}
+		}
+		sRows.Close()
+
+		targetTime := time.Now()
+		generatedCount := 0
+
+		for _, sID := range studentIDs {
+			// Enforce Rate Limit Delay (400ms sleep = ~15 requests/min)
+			time.Sleep(400 * time.Millisecond)
+			_, err := handlers.GenerateReportForStudentExported(tenantDB, sID, targetTime)
+			if err == nil {
+				generatedCount++
+			}
+		}
+
+		log.Printf("[AI Cron Scheduler] School '%s': %d AI weekly reports processed", name, generatedCount)
 	}
 }
