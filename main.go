@@ -77,6 +77,7 @@ func main() {
 	bookHandler := handlers.NewBookHandler()
 	readingAssignmentHandler := handlers.NewReadingAssignmentHandler()
 	aiReportHandler := handlers.NewAIReportHandler()
+	aiInstructionHandler := handlers.NewAIInstructionHandler()
 
 	// 4. Initialize web server router
 	r := gin.Default()
@@ -256,6 +257,8 @@ func main() {
 		authTenantGroup.GET("/holidays", holidayHandler.ListHolidays)
 		authTenantGroup.POST("/holidays", middleware.RequireRole("ADMIN"), holidayHandler.SaveHoliday)
 		authTenantGroup.DELETE("/holidays/:id", middleware.RequireRole("ADMIN"), holidayHandler.DeleteHoliday)
+		authTenantGroup.POST("/import/holidays", middleware.RequireRole("ADMIN"), importHandler.ImportHolidays)
+		authTenantGroup.GET("/import/template/holidays", middleware.RequireRole("ADMIN"), importHandler.ExportHolidayTemplate)
 
 		authTenantGroup.GET("/menu", menuHandler.GetMenu)
 		authTenantGroup.GET("/menu/intervals", menuHandler.ListMenuIntervals)
@@ -323,6 +326,12 @@ func main() {
 		authTenantGroup.GET("/admin/ai-reports/by-week", middleware.RequireRole("ADMIN"), aiReportHandler.GetAIReportsByWeek)
 		authTenantGroup.DELETE("/admin/ai-reports/week", middleware.RequireRole("ADMIN"), aiReportHandler.DeleteWeekAIReports)
 		authTenantGroup.DELETE("/admin/ai-reports/:id", middleware.RequireRole("ADMIN"), aiReportHandler.DeleteSingleAIReport)
+
+		// AI Instructions & Prompt History
+		authTenantGroup.GET("/admin/ai-instructions", middleware.RequireRole("ADMIN"), aiInstructionHandler.GetAIInstruction)
+		authTenantGroup.PUT("/admin/ai-instructions", middleware.RequireRole("ADMIN"), aiInstructionHandler.UpdateAIInstruction)
+		authTenantGroup.GET("/admin/ai-instructions/history", middleware.RequireRole("ADMIN"), aiInstructionHandler.GetAIInstructionHistory)
+		authTenantGroup.POST("/admin/ai-instructions/revert/:log_id", middleware.RequireRole("ADMIN"), aiInstructionHandler.RevertAIInstruction)
 	}
 
 	// 5. Initialize background scheduler for automated charge plans

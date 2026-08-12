@@ -2,6 +2,7 @@ package services
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,8 +20,14 @@ type GeminiPart struct {
 	Text string `json:"text"`
 }
 
+type GeminiGenerationConfig struct {
+	MaxOutputTokens int     `json:"maxOutputTokens,omitempty"`
+	Temperature     float64 `json:"temperature,omitempty"`
+}
+
 type GeminiRequest struct {
-	Contents []GeminiContent `json:"contents"`
+	Contents         []GeminiContent         `json:"contents"`
+	GenerationConfig *GeminiGenerationConfig `json:"generationConfig,omitempty"`
 }
 
 type GeminiResponse struct {
@@ -43,14 +50,32 @@ type StudentWeeklyDataContext struct {
 	CurrentAverageGrade float64
 }
 
-// GenerateAIWeeklyReport calls Google Gemini 2.5 Flash API to generate structured pedagogical weekly report
+// GenerateAIWeeklyReport calls Google Gemini API with fallback DB query
 func GenerateAIWeeklyReport(data StudentWeeklyDataContext) (string, error) {
+	return GenerateAIWeeklyReportWithDB(nil, data)
+}
+
+// GenerateAIWeeklyReportWithDB loads dynamic system instructions and max tokens from DB if available
+func GenerateAIWeeklyReportWithDB(dbConn *sql.DB, data StudentWeeklyDataContext) (string, error) {
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
 		return generateFallbackReport(data), nil
 	}
 
-	prompt := buildGeminiPrompt(data)
+	var customInstruction string
+	var maxTokens int = 1000
+	var temperature float64 = 0.7
+
+	if dbConn != nil {
+		_ = dbConn.QueryRow(`
+			SELECT system_instruction, max_tokens, temperature 
+			FROM ai_instructions 
+			WHERE is_active = true 
+			ORDER BY id DESC LIMIT 1
+		`).Scan(&customInstruction, &maxTokens, &temperature)
+	}
+
+	prompt := buildGeminiPromptDynamic(customInstruction, data)
 
 	reqBody := GeminiRequest{
 		Contents: []GeminiContent{
@@ -59,6 +84,10 @@ func GenerateAIWeeklyReport(data StudentWeeklyDataContext) (string, error) {
 					{Text: prompt},
 				},
 			},
+		},
+		GenerationConfig: &GeminiGenerationConfig{
+			MaxOutputTokens: maxTokens,
+			Temperature:     temperature,
 		},
 	}
 
@@ -92,6 +121,41 @@ func GenerateAIWeeklyReport(data StudentWeeklyDataContext) (string, error) {
 	}
 
 	return generateFallbackReport(data), nil
+}
+
+func buildGeminiPromptDynamic(customInstruction string, data StudentWeeklyDataContext) string {
+	if strings.TrimSpace(customInstruction) == "" {
+		return buildGeminiPrompt(data)
+	}
+
+	gradesStr := "Baholar yo'q"
+	if len(data.Grades) > 0 {
+		gradesStr = strings.Join(data.Grades, ", ")
+	}
+
+	commentsStr := "Izohlar yo'q"
+	if len(data.TeacherComments) > 0 {
+		commentsStr = strings.Join(data.TeacherComments, "; ")
+	}
+
+	booksStr := "Mutolaa qilingan kitoblar yo'q"
+	if len(data.BooksRead) > 0 {
+		booksStr = strings.Join(data.BooksRead, ", ")
+	}
+
+	r := strings.NewReplacer(
+		"{StudentName}", data.StudentName,
+		"{ClassName}", data.ClassName,
+		"{WeekStartDate}", data.WeekStartDate,
+		"{WeekEndDate}", data.WeekEndDate,
+		"{CurrentAverageGrade}", fmt.Sprintf("%.2f", data.CurrentAverageGrade),
+		"{Grades}", gradesStr,
+		"{TeacherComments}", commentsStr,
+		"{BooksRead}", booksStr,
+		"{PrevAverageGrade}", fmt.Sprintf("%.2f", data.PrevAverageGrade),
+	)
+
+	return r.Replace(customInstruction)
 }
 
 func buildGeminiPrompt(data StudentWeeklyDataContext) string {
@@ -139,7 +203,7 @@ MUHIM TASHKILIY QOIDALAR:
 			if hasPrevWeek {
 				return "---SECTION: DINAMIKA TAHLILI---\n(O'tgan hafta ko'rsatkichlari bilan solishtirma tahlil va o'sish dinamikasi.)"
 			}
-			return "" // Omit dinamika completely if no previous week data
+			return ""
 		}(),
 		func() string {
 			if !hasBooks {

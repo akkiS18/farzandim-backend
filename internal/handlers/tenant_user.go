@@ -51,9 +51,9 @@ type UpdateTeacherRequest struct {
 }
 
 type AssignTeacherRequest struct {
-	TeacherID     int  `json:"teacher_id" binding:"required"`
-	SubjectID     int  `json:"subject_id" binding:"required"`
-	IsMainTeacher bool `json:"is_main_teacher"`
+	TeacherID     int   `json:"teacher_id" binding:"required"`
+	SubjectID     *int  `json:"subject_id"`
+	IsMainTeacher bool  `json:"is_main_teacher"`
 }
 
 type SubjectRequest struct {
@@ -716,13 +716,13 @@ func (h *TenantUserHandler) ListClassTeachers(c *gin.Context) {
 	dbConn := tenantDBVal.(*sql.DB)
 
 	query := `
-		SELECT ct.id, ct.class_id, ct.subject_id, s.name as subject_name, ct.teacher_id,
+		SELECT ct.id, ct.class_id, COALESCE(ct.subject_id, 0) as subject_id, COALESCE(s.name, 'Tanlanmagan / Kirmaydi') as subject_name, ct.teacher_id,
 		       u.first_name, u.last_name, u.middle_name, u.phone, ct.is_main_teacher, r.name as role_name
 		FROM class_teachers ct
 		JOIN users u ON ct.teacher_id = u.id
 		JOIN roles r ON u.role_id = r.id
-		JOIN subjects s ON ct.subject_id = s.id
-		WHERE ct.class_id = $1 AND ct.is_deleted = false AND u.is_deleted = false AND s.is_deleted = false
+		LEFT JOIN subjects s ON ct.subject_id = s.id AND s.is_deleted = false
+		WHERE ct.class_id = $1 AND ct.is_deleted = false AND u.is_deleted = false
 		ORDER BY ct.is_main_teacher DESC, u.first_name, u.last_name`
 
 	rows, err := dbConn.Query(query, classID)
@@ -832,12 +832,16 @@ func (h *TenantUserHandler) AssignClassTeacher(c *gin.Context) {
 		return
 	}
 
-	// Verify that the subject exists
-	var subjectExists bool
-	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM subjects WHERE id = $1 AND is_deleted = false)", req.SubjectID).Scan(&subjectExists)
-	if err != nil || !subjectExists {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Tanlangan fan topilmadi yoki o'chirilgan"})
-		return
+	// Verify that the subject exists if provided
+	var subjID interface{} = nil
+	if req.SubjectID != nil && *req.SubjectID > 0 {
+		subjID = *req.SubjectID
+		var subjectExists bool
+		err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM subjects WHERE id = $1 AND is_deleted = false)", *req.SubjectID).Scan(&subjectExists)
+		if err != nil || !subjectExists {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Tanlangan fan topilmadi yoki o'chirilgan"})
+			return
+		}
 	}
 
 	// If this is set as main teacher, turn off is_main_teacher flag for any other teacher in this class
@@ -852,7 +856,7 @@ func (h *TenantUserHandler) AssignClassTeacher(c *gin.Context) {
 	// Check if this mapping already exists (even if soft-deleted)
 	var mappingID int
 	var isDeleted bool
-	err = tx.QueryRow("SELECT id, is_deleted FROM class_teachers WHERE class_id = $1 AND subject_id = $2 AND teacher_id = $3", classID, req.SubjectID, req.TeacherID).Scan(&mappingID, &isDeleted)
+	err = tx.QueryRow("SELECT id, is_deleted FROM class_teachers WHERE class_id = $1 AND COALESCE(subject_id, 0) = COALESCE($2, 0) AND teacher_id = $3", classID, subjID, req.TeacherID).Scan(&mappingID, &isDeleted)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -861,7 +865,7 @@ func (h *TenantUserHandler) AssignClassTeacher(c *gin.Context) {
 				INSERT INTO class_teachers (class_id, subject_id, teacher_id, is_main_teacher)
 				VALUES ($1, $2, $3, $4)
 				RETURNING id`
-			err = tx.QueryRow(insertQuery, classID, req.SubjectID, req.TeacherID, req.IsMainTeacher).Scan(&mappingID)
+			err = tx.QueryRow(insertQuery, classID, subjID, req.TeacherID, req.IsMainTeacher).Scan(&mappingID)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to map class teacher link", "details": err.Error()})
 				return
@@ -886,12 +890,12 @@ func (h *TenantUserHandler) AssignClassTeacher(c *gin.Context) {
 	// Fetch mapping details to return
 	var res ClassTeacherResponse
 	query := `
-		SELECT ct.id, ct.class_id, ct.subject_id, s.name as subject_name, ct.teacher_id,
+		SELECT ct.id, ct.class_id, COALESCE(ct.subject_id, 0) as subject_id, COALESCE(s.name, 'Tanlanmagan / Kirmaydi') as subject_name, ct.teacher_id,
 		       u.first_name, u.last_name, u.phone, ct.is_main_teacher, r.name as role_name
 		FROM class_teachers ct
 		JOIN users u ON ct.teacher_id = u.id
 		JOIN roles r ON u.role_id = r.id
-		JOIN subjects s ON ct.subject_id = s.id
+		LEFT JOIN subjects s ON ct.subject_id = s.id AND s.is_deleted = false
 		WHERE ct.id = $1`
 	err = tx.QueryRow(query, mappingID).Scan(&res.ID, &res.ClassID, &res.SubjectID, &res.SubjectName, &res.TeacherID, &res.FirstName, &res.LastName, &res.Phone, &res.IsMainTeacher, &res.RoleName)
 	if err != nil {
@@ -899,6 +903,10 @@ func (h *TenantUserHandler) AssignClassTeacher(c *gin.Context) {
 		return
 	}
 
+	auditSubjectID := 0
+	if req.SubjectID != nil {
+		auditSubjectID = *req.SubjectID
+	}
 	audit.LogChange(c, tx, audit.LogData{
 		Action:    "CREATE",
 		TableName: "class_teachers",
@@ -906,7 +914,7 @@ func (h *TenantUserHandler) AssignClassTeacher(c *gin.Context) {
 		NewValues: models.ClassTeacher{
 			ID:            mappingID,
 			ClassID:       classID,
-			SubjectID:     req.SubjectID,
+			SubjectID:     auditSubjectID,
 			TeacherID:     req.TeacherID,
 			IsMainTeacher: req.IsMainTeacher,
 			IsDeleted:     false,
@@ -1040,8 +1048,9 @@ func (h *TenantUserHandler) UpdateClassTeacher(c *gin.Context) {
 	defer tx.Rollback()
 
 	var oldMapping models.ClassTeacher
+	var oldSubjNull sql.NullInt64
 	err = tx.QueryRow("SELECT id, class_id, subject_id, teacher_id, is_main_teacher, is_deleted FROM class_teachers WHERE id = $1 AND is_deleted = false", classTeacherID).
-		Scan(&oldMapping.ID, &oldMapping.ClassID, &oldMapping.SubjectID, &oldMapping.TeacherID, &oldMapping.IsMainTeacher, &oldMapping.IsDeleted)
+		Scan(&oldMapping.ID, &oldMapping.ClassID, &oldSubjNull, &oldMapping.TeacherID, &oldMapping.IsMainTeacher, &oldMapping.IsDeleted)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "O'qituvchi biriktiruvi topilmadi"})
@@ -1051,9 +1060,11 @@ func (h *TenantUserHandler) UpdateClassTeacher(c *gin.Context) {
 		return
 	}
 
-	subjectID := oldMapping.SubjectID
+	var finalSubjectID interface{} = nil
 	if req.SubjectID != nil && *req.SubjectID > 0 {
-		subjectID = *req.SubjectID
+		finalSubjectID = *req.SubjectID
+	} else if req.SubjectID == nil && oldSubjNull.Valid && oldSubjNull.Int64 > 0 {
+		finalSubjectID = oldSubjNull.Int64
 	}
 
 	teacherID := oldMapping.TeacherID
@@ -1070,7 +1081,7 @@ func (h *TenantUserHandler) UpdateClassTeacher(c *gin.Context) {
 		_, _ = tx.Exec("UPDATE class_teachers SET is_main_teacher = false WHERE class_id = $1 AND id != $2", oldMapping.ClassID, classTeacherID)
 	}
 
-	_, err = tx.Exec("UPDATE class_teachers SET subject_id = $1, teacher_id = $2, is_main_teacher = $3, updated_at = NOW() WHERE id = $4", subjectID, teacherID, isMainTeacher, classTeacherID)
+	_, err = tx.Exec("UPDATE class_teachers SET subject_id = $1, teacher_id = $2, is_main_teacher = $3 WHERE id = $4", finalSubjectID, teacherID, isMainTeacher, classTeacherID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update assignment", "details": err.Error()})
 		return
@@ -1082,7 +1093,7 @@ func (h *TenantUserHandler) UpdateClassTeacher(c *gin.Context) {
 		RecordID:  strconv.Itoa(classTeacherID),
 		OldValues: oldMapping,
 		NewValues: map[string]interface{}{
-			"subject_id":      subjectID,
+			"subject_id":      finalSubjectID,
 			"teacher_id":      teacherID,
 			"is_main_teacher": isMainTeacher,
 		},

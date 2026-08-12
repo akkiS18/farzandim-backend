@@ -1576,3 +1576,156 @@ func (h *ImportHandler) ImportGrades(c *gin.Context) {
 		Errors:        []RowError{},
 	})
 }
+
+// ExportHolidayTemplate generates an Excel template for holiday import
+func (h *ImportHandler) ExportHolidayTemplate(c *gin.Context) {
+	f := excelize.NewFile()
+	sheet := "Bayramlar"
+	f.NewSheet(sheet)
+	f.DeleteSheet("Sheet1")
+
+	headers := []string{"Sana (YYYY-MM-DD)", "Bayram Nomi"}
+	for i, h := range headers {
+		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
+		f.SetCellValue(sheet, cell, h)
+	}
+
+	// Example row
+	f.SetCellValue(sheet, "A2", "2026-09-01")
+	f.SetCellValue(sheet, "B2", "O'qituvchilar kuni")
+
+	style, _ := f.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true},
+		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#D4F562"}, Pattern: 1},
+		Alignment: &excelize.Alignment{Horizontal: "center"},
+	})
+	f.SetCellStyle(sheet, "A1", "B1", style)
+	f.SetColWidth(sheet, "A", "A", 20)
+	f.SetColWidth(sheet, "B", "B", 30)
+
+	c.Header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	c.Header("Content-Disposition", `attachment; filename="bayramlar_template.xlsx"`)
+	if err := f.Write(c.Writer); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write template", "details": err.Error()})
+	}
+}
+
+// ImportHolidays bulk-imports holidays from an Excel file
+func (h *ImportHandler) ImportHolidays(c *gin.Context) {
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Excel fayl yuklanmadi", "details": err.Error()})
+		return
+	}
+
+	file, err := fileHeader.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Faylni ochib bo'lmadi"})
+		return
+	}
+	defer file.Close()
+
+	f, err := excelize.OpenReader(file)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Excel formatini o'qib bo'lmadi", "details": err.Error()})
+		return
+	}
+
+	sheetName := f.GetSheetName(0)
+	rows, err := f.GetRows(sheetName)
+	if err != nil || len(rows) < 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Excel fayl bo'sh yoki noto'g'ri formatda"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	ensureHolidayColumns(dbConn)
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failure", "details": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	var rowErrors []RowError
+	importedCount := 0
+
+	for idx, row := range rows[1:] { // skip header
+		rowNum := idx + 2
+		if len(row) < 2 {
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Sana va bayram nomi kerak"})
+			continue
+		}
+
+		dateStr := strings.TrimSpace(row[0])
+		name := strings.TrimSpace(row[1])
+
+		if dateStr == "" || name == "" {
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Sana yoki bayram nomi bo'sh"})
+			continue
+		}
+
+		holidayDate, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			// also try Excel numeric date
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Sana formati noto'g'ri: '%s', YYYY-MM-DD bo'lishi kerak", dateStr)})
+			continue
+		}
+
+		// Upsert: insert or update if already exists
+		var holidayID int
+		var isDeleted bool
+		err = tx.QueryRow("SELECT id, is_deleted FROM school_holidays WHERE holiday_date = $1", holidayDate).Scan(&holidayID, &isDeleted)
+		if err != nil && err != sql.ErrNoRows {
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Bazada tekshirishda xatolik: " + err.Error()})
+			continue
+		}
+
+		if err == sql.ErrNoRows {
+			err = tx.QueryRow(
+				`INSERT INTO school_holidays (holiday_date, name, target_levels, target_classes) VALUES ($1, $2, '{}', '{}') RETURNING id`,
+				holidayDate, name,
+			).Scan(&holidayID)
+			if err != nil {
+				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Qo'shishda xatolik: " + err.Error()})
+				continue
+			}
+		} else {
+			_, err = tx.Exec(
+				`UPDATE school_holidays SET name=$1, is_deleted=false, deleted_at=NULL, updated_at=NOW() WHERE id=$2`,
+				name, holidayID,
+			)
+			if err != nil {
+				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Yangilashda xatolik: " + err.Error()})
+				continue
+			}
+		}
+
+		importedCount++
+	}
+
+	if len(rowErrors) > 0 && importedCount == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success":        false,
+			"imported_count": 0,
+			"failed_count":   len(rowErrors),
+			"errors":         rowErrors,
+		})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, ImportResult{
+		Success:       true,
+		ImportedCount: importedCount,
+		FailedCount:   len(rowErrors),
+		Errors:        rowErrors,
+	})
+}

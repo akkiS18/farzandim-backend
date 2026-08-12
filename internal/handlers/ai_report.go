@@ -181,8 +181,9 @@ func (h *AIReportHandler) GetLatestAIReport(c *gin.Context) {
 }
 
 type AdminBatchGenerateRequest struct {
-	StudentIDs []int `json:"student_ids"`
-	ClassID    *int  `json:"class_id"`
+	StudentIDs []int  `json:"student_ids"`
+	ClassID    *int   `json:"class_id"`
+	TargetDate string `json:"target_date"`
 }
 
 // AdminBatchGenerateAIReports allows Admin to manually generate AI reports for selected students or classes
@@ -238,6 +239,11 @@ func (h *AIReportHandler) AdminBatchGenerateAIReports(c *gin.Context) {
 	errorCount := 0
 	var lastError string
 	targetTime := time.Now()
+	if req.TargetDate != "" {
+		if parsedTime, err := time.Parse("2006-01-02", req.TargetDate); err == nil {
+			targetTime = parsedTime
+		}
+	}
 
 	for _, sID := range targetStudentIDs {
 		// Enforce Rate Limiting delay (400ms sleep = max ~15 requests per minute for Gemini Free Tier)
@@ -286,9 +292,9 @@ func (h *AIReportHandler) GetGroupedAIReports(c *gin.Context) {
 	}
 
 	rows, err := dbConn.Query(`
-		SELECT year, week_number, start_date::text, end_date::text, COUNT(id) as report_count
+		SELECT year, week_number, MIN(start_date)::text, MAX(end_date)::text, COUNT(id) as report_count
 		FROM ai_weekly_reports
-		GROUP BY year, week_number, start_date, end_date
+		GROUP BY year, week_number
 		ORDER BY year DESC, week_number DESC`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Guruhlangan hisobotlarni olishda xatolik: " + err.Error()})
@@ -487,7 +493,11 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 	ensureAITable(dbConn)
 	year, weekNum := targetTime.ISOWeek()
 
-	monday := targetTime.AddDate(0, 0, -int(targetTime.Weekday()-time.Monday))
+	wd := targetTime.Weekday()
+	if wd == time.Sunday {
+		wd = 7
+	}
+	monday := targetTime.AddDate(0, 0, -int(wd-time.Monday))
 	sunday := monday.AddDate(0, 0, 6)
 
 	startStr := monday.Format("2006-01-02")
@@ -623,7 +633,7 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 		CurrentAverageGrade: currentAvg,
 	}
 
-	reportMarkdown, genErr := services.GenerateAIWeeklyReport(promptContext)
+	reportMarkdown, genErr := services.GenerateAIWeeklyReportWithDB(dbConn, promptContext)
 	if genErr != nil {
 		return nil, genErr
 	}

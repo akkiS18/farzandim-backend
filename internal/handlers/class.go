@@ -79,14 +79,15 @@ func (h *ClassHandler) ListClasses(c *gin.Context) {
 			return
 		}
 		query := `
-			SELECT c.id, c.name, c.level, s.id as subject_id, s.name as subject_name,
-			       (ct.is_main_teacher OR r.name = 'MAIN_TEACHER') as is_main_teacher
+			SELECT c.id, c.name, c.level,
+			       COALESCE(MAX(ct.subject_id), 0) as subject_id,
+			       COALESCE(MAX(s.name), '') as subject_name,
+			       BOOL_OR(ct.is_main_teacher) as is_main_teacher
 			FROM classes c
-			JOIN class_teachers ct ON ct.class_id = c.id
-			JOIN users u ON ct.teacher_id = u.id
-			JOIN roles r ON u.role_id = r.id
-			JOIN subjects s ON ct.subject_id = s.id
-			WHERE c.is_deleted = false AND ct.is_deleted = false AND s.is_deleted = false AND ct.teacher_id = $1
+			JOIN class_teachers ct ON ct.class_id = c.id AND ct.is_deleted = false
+			LEFT JOIN subjects s ON ct.subject_id = s.id AND s.is_deleted = false
+			WHERE c.is_deleted = false AND ct.teacher_id = $1
+			GROUP BY c.id, c.name, c.level
 			ORDER BY c.name ASC`
 		rows, err = dbConn.Query(query, teacherID)
 	} else {

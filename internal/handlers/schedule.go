@@ -27,175 +27,170 @@ func (h *ScheduleHandler) GetSchedule(c *gin.Context) {
 	}
 
 	dateParam := c.Query("date")
-	if dateParam == "" {
-		dateParam = time.Now().Format("2006-01-02")
-	}
-
-	parsedQueryDate, err := time.Parse("2006-01-02", dateParam)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid date format. Use YYYY-MM-DD"})
-		return
-	}
-
 	tenantDBVal, _ := c.Get("tenantDB")
 	dbConn := tenantDBVal.(*sql.DB)
 
-	// Check if this date is a holiday for this class
-	var classLevel int
-	_ = dbConn.QueryRow("SELECT level FROM classes WHERE id = $1 AND is_deleted = false", classID).Scan(&classLevel)
+	var list []models.ClassScheduleResponse
 
-	var isHoliday bool
-	err = dbConn.QueryRow(`
-		SELECT EXISTS(
-			SELECT 1 FROM school_holidays 
-			WHERE holiday_date = $1 AND is_deleted = false
-			  AND (
-				(cardinality(target_levels) IS NULL OR cardinality(target_levels) = 0)
-				AND (cardinality(target_classes) IS NULL OR cardinality(target_classes) = 0)
-				OR $2 = ANY(target_levels)
-				OR $3 = ANY(target_classes)
-			  )
-		)`, parsedQueryDate, classLevel, classID).Scan(&isHoliday)
-	if err == nil && isHoliday {
-		c.JSON(http.StatusOK, []models.ClassScheduleResponse{})
-		return
-	}
-
-	// 1. Fetch recurring weekly schedule
-	query := `
-		SELECT cs.id, cs.class_id, cs.day_of_week, cs.lesson_number, cs.subject_id, s.name as subject_name, cs.start_date, cs.end_date
-		FROM class_schedules cs
-		JOIN subjects s ON cs.subject_id = s.id
-		WHERE cs.class_id = $1 AND cs.is_deleted = false AND s.is_deleted = false
-		  AND $2::date BETWEEN cs.start_date AND cs.end_date
-		ORDER BY cs.day_of_week, cs.lesson_number`
-
-	rows, err := dbConn.Query(query, classID, parsedQueryDate)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query class schedule", "details": err.Error()})
-		return
-	}
-	defer rows.Close()
-
-	list := []models.ClassScheduleResponse{}
-	for rows.Next() {
-		var item models.ClassScheduleResponse
-		var startDate, endDate time.Time
-		err := rows.Scan(&item.ID, &item.ClassID, &item.DayOfWeek, &item.LessonNumber, &item.SubjectID, &item.SubjectName, &startDate, &endDate)
+	if dateParam != "" {
+		parsedQueryDate, err := time.Parse("2006-01-02", dateParam)
 		if err != nil {
-			rows.Close()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse schedule row", "details": err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid date format. Use YYYY-MM-DD"})
 			return
 		}
-		item.StartDate = startDate.Format("2006-01-02")
-		item.EndDate = endDate.Format("2006-01-02")
-		list = append(list, item)
-	}
-	rows.Close()
 
-	// If no schedule matches the specific date, fallback to the latest active schedule period for this class
-	if len(list) == 0 {
-		fallbackQuery := `
+		// Check if this date is a holiday for this class
+		var classLevel int
+		_ = dbConn.QueryRow("SELECT level FROM classes WHERE id = $1 AND is_deleted = false", classID).Scan(&classLevel)
+
+		var isHoliday bool
+		err = dbConn.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM school_holidays 
+				WHERE holiday_date = $1 AND is_deleted = false
+				  AND (
+					(cardinality(target_levels) IS NULL OR cardinality(target_levels) = 0)
+					AND (cardinality(target_classes) IS NULL OR cardinality(target_classes) = 0)
+					OR $2 = ANY(target_levels)
+					OR $3 = ANY(target_classes)
+				  )
+			)`, parsedQueryDate, classLevel, classID).Scan(&isHoliday)
+		if err == nil && isHoliday {
+			c.JSON(http.StatusOK, []models.ClassScheduleResponse{})
+			return
+		}
+
+		query := `
 			SELECT cs.id, cs.class_id, cs.day_of_week, cs.lesson_number, cs.subject_id, s.name as subject_name, cs.start_date, cs.end_date
 			FROM class_schedules cs
 			JOIN subjects s ON cs.subject_id = s.id
 			WHERE cs.class_id = $1 AND cs.is_deleted = false AND s.is_deleted = false
+			  AND $2::date BETWEEN cs.start_date AND cs.end_date
 			  AND cs.start_date = (
-				SELECT start_date FROM class_schedules 
-				WHERE class_id = $1 AND is_deleted = false 
-				ORDER BY start_date DESC LIMIT 1
+				SELECT MAX(cs2.start_date)
+				FROM class_schedules cs2
+				WHERE cs2.class_id = $1 AND cs2.is_deleted = false
+				  AND $2::date BETWEEN cs2.start_date AND cs2.end_date
 			  )
 			ORDER BY cs.day_of_week, cs.lesson_number`
+		rows, err := dbConn.Query(query, classID, parsedQueryDate)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query class schedule", "details": err.Error()})
+			return
+		}
+		defer rows.Close()
 
-		fbRows, fbErr := dbConn.Query(fallbackQuery, classID)
-		if fbErr == nil {
-			for fbRows.Next() {
-				var item models.ClassScheduleResponse
-				var startDate, endDate time.Time
-				if scanErr := fbRows.Scan(&item.ID, &item.ClassID, &item.DayOfWeek, &item.LessonNumber, &item.SubjectID, &item.SubjectName, &startDate, &endDate); scanErr == nil {
-					item.StartDate = startDate.Format("2006-01-02")
-					item.EndDate = endDate.Format("2006-01-02")
-					list = append(list, item)
+		for rows.Next() {
+			var item models.ClassScheduleResponse
+			var startDate, endDate time.Time
+			err := rows.Scan(&item.ID, &item.ClassID, &item.DayOfWeek, &item.LessonNumber, &item.SubjectID, &item.SubjectName, &startDate, &endDate)
+			if err != nil {
+				rows.Close()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse schedule row", "details": err.Error()})
+				return
+			}
+			item.StartDate = startDate.Format("2006-01-02")
+			item.EndDate = endDate.Format("2006-01-02")
+			list = append(list, item)
+		}
+		rows.Close()
+
+		// Fetch exceptions for this specific date
+		excRows, err := dbConn.Query(`
+			SELECT ce.id, ce.lesson_number, ce.subject_id, s.name as subject_name
+			FROM class_schedule_exceptions ce
+			LEFT JOIN subjects s ON ce.subject_id = s.id
+			WHERE ce.class_id = $1 AND ce.date = $2 AND ce.is_deleted = false
+		`, classID, parsedQueryDate)
+		if err == nil {
+			type excData struct {
+				ID          int
+				SubjectID   *int
+				SubjectName *string
+			}
+			exceptions := make(map[int]excData)
+			for excRows.Next() {
+				var id, lessonNum int
+				var subID *int
+				var subName *string
+				if errScan := excRows.Scan(&id, &lessonNum, &subID, &subName); errScan == nil {
+					exceptions[lessonNum] = excData{ID: id, SubjectID: subID, SubjectName: subName}
 				}
 			}
-			fbRows.Close()
-		}
-	}
+			excRows.Close()
 
-	// 2. Fetch exceptions for this specific date
-	excRows, err := dbConn.Query(`
-		SELECT ce.id, ce.lesson_number, ce.subject_id, s.name as subject_name
-		FROM class_schedule_exceptions ce
-		LEFT JOIN subjects s ON ce.subject_id = s.id
-		WHERE ce.class_id = $1 AND ce.date = $2 AND ce.is_deleted = false
-	`, classID, parsedQueryDate)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query schedule exceptions", "details": err.Error()})
-		return
-	}
-	defer excRows.Close()
+			targetDayOfWeek := int(parsedQueryDate.Weekday())
+			if targetDayOfWeek == 0 {
+				targetDayOfWeek = 7
+			}
 
-	// Map of exception by lesson number
-	type excData struct {
-		ID          int
-		SubjectID   *int
-		SubjectName *string
-	}
-	exceptions := make(map[int]excData)
-	for excRows.Next() {
-		var id, lessonNum int
-		var subID *int
-		var subName *string
-		if errScan := excRows.Scan(&id, &lessonNum, &subID, &subName); errScan == nil {
-			exceptions[lessonNum] = excData{ID: id, SubjectID: subID, SubjectName: subName}
-		}
-	}
-
-	targetDayOfWeek := int(parsedQueryDate.Weekday())
-	if targetDayOfWeek == 0 {
-		targetDayOfWeek = 7
-	}
-
-	// 3. Merge exceptions into the schedule list
-	// Replace or cancel existing slots in the list
-	for i, item := range list {
-		if item.DayOfWeek == targetDayOfWeek {
-			if exc, found := exceptions[item.LessonNumber]; found {
-				if exc.SubjectID == nil {
-					list[i].SubjectID = 0
-					list[i].SubjectName = "Bekor qilingan"
-				} else {
-					list[i].SubjectID = *exc.SubjectID
-					if exc.SubjectName != nil {
-						list[i].SubjectName = *exc.SubjectName
+			for i, item := range list {
+				if item.DayOfWeek == targetDayOfWeek {
+					if exc, found := exceptions[item.LessonNumber]; found {
+						if exc.SubjectID == nil {
+							list[i].SubjectID = 0
+							list[i].SubjectName = "Bekor qilingan"
+						} else {
+							list[i].SubjectID = *exc.SubjectID
+							if exc.SubjectName != nil {
+								list[i].SubjectName = *exc.SubjectName
+							}
+						}
+						delete(exceptions, item.LessonNumber)
 					}
 				}
-				delete(exceptions, item.LessonNumber)
+			}
+
+			for lessonNum, exc := range exceptions {
+				if exc.SubjectID != nil {
+					weekday := int(parsedQueryDate.Weekday())
+					if weekday == 0 {
+						weekday = 7
+					}
+					var subName string
+					if exc.SubjectName != nil {
+						subName = *exc.SubjectName
+					}
+					list = append(list, models.ClassScheduleResponse{
+						ID:           exc.ID,
+						ClassID:      classID,
+						DayOfWeek:    weekday,
+						LessonNumber: lessonNum,
+						SubjectID:    *exc.SubjectID,
+						SubjectName:  subName,
+						StartDate:    dateParam,
+						EndDate:      dateParam,
+					})
+				}
 			}
 		}
-	}
+	} else {
+		// When no date parameter is passed, return ALL non-deleted schedule records for this class across all periods
+		query := `
+			SELECT cs.id, cs.class_id, cs.day_of_week, cs.lesson_number, cs.subject_id, s.name as subject_name, cs.start_date, cs.end_date
+			FROM class_schedules cs
+			JOIN subjects s ON cs.subject_id = s.id
+			WHERE cs.class_id = $1 AND cs.is_deleted = false AND s.is_deleted = false
+			ORDER BY cs.start_date ASC, cs.day_of_week, cs.lesson_number`
+		rows, err := dbConn.Query(query, classID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query class schedule", "details": err.Error()})
+			return
+		}
+		defer rows.Close()
 
-	// Add any extra lessons that were not in the recurring template
-	for lessonNum, exc := range exceptions {
-		if exc.SubjectID != nil {
-			weekday := int(parsedQueryDate.Weekday())
-			if weekday == 0 {
-				weekday = 7 // Map Sunday to 7
+		for rows.Next() {
+			var item models.ClassScheduleResponse
+			var startDate, endDate time.Time
+			err := rows.Scan(&item.ID, &item.ClassID, &item.DayOfWeek, &item.LessonNumber, &item.SubjectID, &item.SubjectName, &startDate, &endDate)
+			if err != nil {
+				rows.Close()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse schedule row", "details": err.Error()})
+				return
 			}
-			var subName string
-			if exc.SubjectName != nil {
-				subName = *exc.SubjectName
-			}
-			list = append(list, models.ClassScheduleResponse{
-				ID:           exc.ID,
-				ClassID:      classID,
-				DayOfWeek:    weekday,
-				LessonNumber: lessonNum,
-				SubjectID:    *exc.SubjectID,
-				SubjectName:  subName,
-				StartDate:    dateParam,
-				EndDate:      dateParam,
-			})
+			item.StartDate = startDate.Format("2006-01-02")
+			item.EndDate = endDate.Format("2006-01-02")
+			list = append(list, item)
 		}
 	}
 
@@ -649,7 +644,7 @@ func (h *ScheduleHandler) GetSchedulePeriods(c *gin.Context) {
 		SELECT DISTINCT start_date, end_date 
 		FROM class_schedules 
 		WHERE class_id = $1 AND is_deleted = false 
-		ORDER BY start_date DESC
+		ORDER BY start_date ASC
 	`, classID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query schedule periods", "details": err.Error()})

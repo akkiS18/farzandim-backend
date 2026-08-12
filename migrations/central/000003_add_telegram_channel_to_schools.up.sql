@@ -1,0 +1,1 @@
+ALTER TABLE schools ADD COLUMN IF NOT EXISTS telegram_channel_id VARCHAR(255);

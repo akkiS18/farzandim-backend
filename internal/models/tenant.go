@@ -278,3 +278,29 @@ type FeedbackComment struct {
 	MenuDate    *time.Time `json:"menu_date,omitempty" db:"menu_date"`
 }
 
+type AIInstruction struct {
+	ID                int       `json:"id" db:"id"`
+	Title             string    `json:"title" db:"title"`
+	SystemInstruction string    `json:"system_instruction" db:"system_instruction"`
+	MaxTokens         int       `json:"max_tokens" db:"max_tokens"`
+	Temperature       float64   `json:"temperature" db:"temperature"`
+	IsActive          bool      `json:"is_active" db:"is_active"`
+	UpdatedByUserID   *int      `json:"updated_by_user_id,omitempty" db:"updated_by_user_id"`
+	UpdatedByName     string    `json:"updated_by_name,omitempty"`
+	CreatedAt         time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at" db:"updated_at"`
+}
+
+type AIInstructionLog struct {
+	ID                int       `json:"id" db:"id"`
+	InstructionID     int       `json:"instruction_id" db:"instruction_id"`
+	SystemInstruction string    `json:"system_instruction" db:"system_instruction"`
+	MaxTokens         int       `json:"max_tokens" db:"max_tokens"`
+	Temperature       float64   `json:"temperature" db:"temperature"`
+	ChangedByUserID   *int      `json:"changed_by_user_id,omitempty" db:"changed_by_user_id"`
+	ChangedByName     string    `json:"changed_by_user_name,omitempty" db:"changed_by_user_name"`
+	ChangeReason      string    `json:"change_reason,omitempty" db:"change_reason"`
+	CreatedAt         time.Time `json:"created_at" db:"created_at"`
+}
+
+
