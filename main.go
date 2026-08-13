@@ -259,6 +259,7 @@ func main() {
 		authTenantGroup.DELETE("/holidays/:id", middleware.RequireRole("ADMIN"), holidayHandler.DeleteHoliday)
 		authTenantGroup.POST("/import/holidays", middleware.RequireRole("ADMIN"), importHandler.ImportHolidays)
 		authTenantGroup.GET("/import/template/holidays", middleware.RequireRole("ADMIN"), importHandler.ExportHolidayTemplate)
+		authTenantGroup.POST("/import/students-smart", middleware.RequireRole("ADMIN"), importHandler.BatchImportStudentsSmart)
 
 		authTenantGroup.GET("/menu", menuHandler.GetMenu)
 		authTenantGroup.GET("/menu/intervals", menuHandler.ListMenuIntervals)

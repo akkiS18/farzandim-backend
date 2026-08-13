@@ -254,7 +254,7 @@ func (h *ParentHandler) ListStudentParents(c *gin.Context) {
 
 	// 3. Retrieve parents
 	query := `
-		SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.created_at
+		SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.passport, sp.relation_type, u.created_at
 		FROM student_parents sp
 		JOIN users u ON sp.parent_id = u.id
 		WHERE sp.student_id = $1 AND u.is_deleted = false
@@ -268,29 +268,40 @@ func (h *ParentHandler) ListStudentParents(c *gin.Context) {
 	defer rows.Close()
 
 	type ParentResponse struct {
-		ID         int       `json:"id"`
-		FirstName  string    `json:"first_name"`
-		LastName   string    `json:"last_name"`
-		MiddleName *string   `json:"middle_name,omitempty"`
-		Phone      string    `json:"phone"`
-		Email      *string   `json:"email,omitempty"`
-		CreatedAt  time.Time `json:"created_at"`
+		ID           int       `json:"id"`
+		FirstName    string    `json:"first_name"`
+		LastName     string    `json:"last_name"`
+		MiddleName   *string   `json:"middle_name,omitempty"`
+		Phone        string    `json:"phone"`
+		Passport     *string   `json:"passport,omitempty"`
+		Email        *string   `json:"email,omitempty"`
+		RelationType string    `json:"relation_type"`
+		CreatedAt    time.Time `json:"created_at"`
 	}
 
 	list := []ParentResponse{}
 	for rows.Next() {
 		var p ParentResponse
-		var emailNull, middleNameNull sql.NullString
-		err := rows.Scan(&p.ID, &emailNull, &p.Phone, &p.FirstName, &p.LastName, &middleNameNull, &p.CreatedAt)
+		var phoneNull, emailNull, middleNameNull, passportNull, relNull sql.NullString
+		err := rows.Scan(&p.ID, &emailNull, &phoneNull, &p.FirstName, &p.LastName, &middleNameNull, &passportNull, &relNull, &p.CreatedAt)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan parent record", "details": err.Error()})
 			return
+		}
+		if phoneNull.Valid {
+			p.Phone = phoneNull.String
 		}
 		if emailNull.Valid {
 			p.Email = &emailNull.String
 		}
 		if middleNameNull.Valid {
 			p.MiddleName = &middleNameNull.String
+		}
+		if passportNull.Valid {
+			p.Passport = &passportNull.String
+		}
+		if relNull.Valid {
+			p.RelationType = relNull.String
 		}
 		list = append(list, p)
 	}
