@@ -2,8 +2,10 @@ package handlers
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/farzandim/backend/internal/audit"
@@ -154,13 +156,29 @@ func (h *ClassHandler) CreateClass(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	// Insert Class record
+	// 1. Check if an active class already exists with this name
+	var activeExists bool
+	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM classes WHERE LOWER(name) = LOWER($1) AND is_deleted = false)", strings.TrimSpace(req.Name)).Scan(&activeExists)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing class record", "details": err.Error()})
+		return
+	}
+	if activeExists {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Ushbu nomdagi faol sinf allaqachon mavjud"})
+		return
+	}
+
+	// 2. If an old soft-deleted class exists with this exact name, rename it to free up unique name constraint
+	_, _ = tx.Exec("UPDATE classes SET name = name || '__deleted_' || id WHERE LOWER(name) = LOWER($1) AND is_deleted = true", strings.TrimSpace(req.Name))
+
+	// 3. Create fresh new Class record
 	var classID int
 	lvlVal := 1
 	if req.Level != nil {
 		lvlVal = *req.Level
 	}
-	err = tx.QueryRow("INSERT INTO classes (name, level) VALUES ($1, $2) RETURNING id", req.Name, lvlVal).Scan(&classID)
+
+	err = tx.QueryRow("INSERT INTO classes (name, level) VALUES ($1, $2) RETURNING id", strings.TrimSpace(req.Name), lvlVal).Scan(&classID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write class record", "details": err.Error()})
 		return
@@ -296,9 +314,10 @@ func (h *ClassHandler) DeleteClass(c *gin.Context) {
 		return
 	}
 
-	// Perform Soft Delete (flag changes instead of physical deletion)
+	// Perform Soft Delete: append __deleted_<id> suffix to class name to free unique name constraint
 	now := time.Now()
-	_, err = tx.Exec("UPDATE classes SET is_deleted = true, deleted_at = $1 WHERE id = $2", now, classID)
+	deletedName := fmt.Sprintf("%s__deleted_%d", oldClass.Name, classID)
+	_, err = tx.Exec("UPDATE classes SET name = $1, is_deleted = true, deleted_at = $2 WHERE id = $3", deletedName, now, classID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to execute soft delete database operation", "details": err.Error()})
 		return
