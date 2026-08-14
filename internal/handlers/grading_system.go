@@ -35,6 +35,15 @@ func (h *GradingSystemHandler) ListGradingSystems(c *gin.Context) {
 	tenantDBVal, _ := c.Get("tenantDB")
 	db := tenantDBVal.(*sql.DB)
 
+	// Ensure default seeded grading systems exist
+	_, _ = db.Exec(`
+		INSERT INTO grading_systems (name, type, min_value, max_value, options, is_active) VALUES
+		('5 ballik sistema', 'NUMERIC', 1.00, 5.00, NULL, TRUE),
+		('100 ballik sistema', 'NUMERIC', 0.00, 100.00, NULL, FALSE),
+		('Xulq tizimi', 'NUMERIC', -5.00, 0.00, NULL, FALSE)
+		ON CONFLICT (name) DO NOTHING;
+	`)
+
 	rows, err := db.Query("SELECT id, name, type, min_value, max_value, options, is_active, created_at, updated_at FROM grading_systems ORDER BY created_at ASC")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query grading systems", "details": err.Error()})
@@ -299,7 +308,7 @@ func (h *GradingSystemHandler) DeleteGradingSystem(c *gin.Context) {
 	}
 
 	// We cannot delete default seeded systems to prevent breaking initial setup
-	if name == "5 ballik sistema" || name == "100 ballik sistema" {
+	if name == "5 ballik sistema" || name == "100 ballik sistema" || name == "Xulq tizimi" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot delete default seeded grading systems"})
 		return
 	}

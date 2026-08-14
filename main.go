@@ -221,9 +221,11 @@ func main() {
 		authTenantGroup.POST("/classes/:id/transfer-students", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), tenantUserHandler.TransferStudentsClass)
 		authTenantGroup.PUT("/students/:id", tenantUserHandler.UpdateStudent)
 		authTenantGroup.DELETE("/students/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), tenantUserHandler.DeleteStudent)
+		authTenantGroup.POST("/students/check-documents", tenantUserHandler.CheckStudentDocuments)
+		authTenantGroup.POST("/students/transfer-by-doc", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), tenantUserHandler.TransferStudentByDocument)
 		authTenantGroup.POST("/teachers", middleware.RequireRole("ADMIN"), tenantUserHandler.CreateTeacher)
 		authTenantGroup.GET("/teachers", tenantUserHandler.ListTeachers)
-		authTenantGroup.PUT("/teachers/:id", middleware.RequireRole("ADMIN"), tenantUserHandler.UpdateTeacher)
+		authTenantGroup.PUT("/teachers/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), tenantUserHandler.UpdateTeacher)
 		authTenantGroup.DELETE("/teachers/:id", middleware.RequireRole("ADMIN"), tenantUserHandler.DeleteTeacher)
 		authTenantGroup.GET("/classes/:id/teachers", tenantUserHandler.ListClassTeachers)
 		authTenantGroup.GET("/classes/:id/teachers/history", tenantUserHandler.GetClassTeacherHistory)
@@ -239,6 +241,8 @@ func main() {
 		authTenantGroup.DELETE("/students/:id/parents/:parent_id", parentHandler.UnlinkParent)
 		authTenantGroup.GET("/parents/:parent_id", parentHandler.GetParent)
 		authTenantGroup.PUT("/parents/:parent_id", parentHandler.UpdateParent)
+		authTenantGroup.POST("/parents/check-passports", parentHandler.CheckParentPassports)
+		authTenantGroup.POST("/parents/resolve-conflict", parentHandler.ResolveParentConflict)
 
 		authTenantGroup.GET("/grading-systems", gradingSystemHandler.ListGradingSystems)
 		authTenantGroup.GET("/grading-systems/active", gradingSystemHandler.GetActiveGradingSystem)
@@ -260,6 +264,8 @@ func main() {
 		authTenantGroup.POST("/import/holidays", middleware.RequireRole("ADMIN"), importHandler.ImportHolidays)
 		authTenantGroup.GET("/import/template/holidays", middleware.RequireRole("ADMIN"), importHandler.ExportHolidayTemplate)
 		authTenantGroup.POST("/import/students-smart", middleware.RequireRole("ADMIN"), importHandler.BatchImportStudentsSmart)
+		authTenantGroup.POST("/import/schedules-smart", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), scheduleHandler.BatchImportSchedulesSmart)
+		authTenantGroup.GET("/import/template/schedule", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), scheduleHandler.ExportScheduleTemplate)
 
 		authTenantGroup.GET("/menu", menuHandler.GetMenu)
 		authTenantGroup.GET("/menu/intervals", menuHandler.ListMenuIntervals)
@@ -284,6 +290,7 @@ func main() {
 		authTenantGroup.GET("/balance/import-template/payments", middleware.RequireRole("ADMIN"), balanceHandler.ExportPaymentTemplate)
 		authTenantGroup.GET("/students/:id/next-charge", balanceHandler.GetNextCharge)
 
+		authTenantGroup.POST("/change-password", authHandler.ChangePassword)
 		authTenantGroup.POST("/settings/change-password", authHandler.ChangePassword)
 
 		authTenantGroup.GET("/announcements", announcementHandler.ListAnnouncements)

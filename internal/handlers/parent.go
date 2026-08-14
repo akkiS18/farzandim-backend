@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/farzandim/backend/internal/audit"
 	"github.com/farzandim/backend/internal/models"
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -641,4 +643,152 @@ func (h *ParentHandler) GetParent(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, user)
+}
+
+type CheckParentPassportsRequest struct {
+	Passports []string `json:"passports"`
+}
+
+type ParentChildInfo struct {
+	StudentID int    `json:"student_id"`
+	FullName  string `json:"full_name"`
+	ClassName string `json:"class_name"`
+}
+
+type ExistingParentPassportInfo struct {
+	ParentID   int               `json:"parent_id"`
+	FirstName  string            `json:"first_name"`
+	LastName   string            `json:"last_name"`
+	MiddleName string            `json:"middle_name"`
+	Phone      string            `json:"phone"`
+	Passport   string            `json:"passport"`
+	Children   []ParentChildInfo `json:"children"`
+}
+
+// CheckParentPassports returns existing PARENT users for a list of passport numbers along with their children
+func (h *ParentHandler) CheckParentPassports(c *gin.Context) {
+	var req CheckParentPassportsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	cleanPassports := []string{}
+	reg, _ := regexp.Compile("[^a-z0-9]")
+	for _, p := range req.Passports {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" && trimmed != "-" && !strings.EqualFold(trimmed, "yo'q") {
+			norm := reg.ReplaceAllString(strings.ToLower(trimmed), "")
+			if norm != "" {
+				cleanPassports = append(cleanPassports, norm)
+				cleanPassports = append(cleanPassports, strings.ToLower(trimmed))
+			}
+		}
+	}
+
+	if len(cleanPassports) == 0 {
+		c.JSON(http.StatusOK, gin.H{})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	rows, err := dbConn.Query(`
+		SELECT u.id, u.first_name, u.last_name, COALESCE(u.middle_name, ''), COALESCE(u.phone, ''), COALESCE(u.passport, '')
+		FROM users u
+		JOIN roles r ON u.role_id = r.id
+		WHERE r.name = 'PARENT' AND u.is_deleted = false
+		  AND (LOWER(TRIM(u.passport)) = ANY($1) OR REGEXP_REPLACE(LOWER(u.passport), '[^a-z0-9]', '', 'g') = ANY($1))
+	`, pq.Array(cleanPassports))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check parent passports", "details": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	result := make(map[string]ExistingParentPassportInfo)
+	for rows.Next() {
+		var p ExistingParentPassportInfo
+		if err := rows.Scan(&p.ParentID, &p.FirstName, &p.LastName, &p.MiddleName, &p.Phone, &p.Passport); err == nil {
+			p.Children = []ParentChildInfo{}
+			// Query children for this parent
+			childRows, cErr := dbConn.Query(`
+				SELECT s.id, u.first_name || ' ' || u.last_name as full_name, COALESCE(c.name, 'Sinfatsiz')
+				FROM student_parents sp
+				JOIN students s ON sp.student_id = s.id AND s.is_deleted = false
+				JOIN users u ON s.user_id = u.id AND u.is_deleted = false
+				LEFT JOIN classes c ON s.class_id = c.id
+				WHERE sp.parent_id = $1
+			`, p.ParentID)
+			if cErr == nil {
+				for childRows.Next() {
+					var child ParentChildInfo
+					if scanErr := childRows.Scan(&child.StudentID, &child.FullName, &child.ClassName); scanErr == nil {
+						p.Children = append(p.Children, child)
+					}
+				}
+				childRows.Close()
+			}
+
+			normP := reg.ReplaceAllString(strings.ToLower(p.Passport), "")
+			result[normP] = p
+			result[strings.ToLower(strings.TrimSpace(p.Passport))] = p
+		}
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+type ResolveParentConflictRequest struct {
+	ParentID   int    `json:"parent_id" binding:"required"`
+	FirstName  string `json:"first_name"`
+	LastName   string `json:"last_name"`
+	MiddleName string `json:"middle_name"`
+	Phone      string `json:"phone"`
+}
+
+// ResolveParentConflict updates an existing parent's details in DB with Excel data
+func (h *ParentHandler) ResolveParentConflict(c *gin.Context) {
+	var req ResolveParentConflictRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failure"})
+		return
+	}
+	defer tx.Rollback()
+
+	// Update parent user in DB
+	_, err = tx.Exec(`
+		UPDATE users 
+		SET first_name = $1, last_name = $2, middle_name = $3, phone = $4, updated_at = NOW()
+		WHERE id = $5 AND is_deleted = false
+	`, strings.TrimSpace(req.FirstName), strings.TrimSpace(req.LastName), strings.TrimSpace(req.MiddleName), strings.TrimSpace(req.Phone), req.ParentID)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Ota-ona ma'lumotlarini yangilashda xatolik", "details": err.Error()})
+		return
+	}
+
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "UPDATE",
+		TableName: "users",
+		RecordID:  strconv.Itoa(req.ParentID),
+		NewValues: map[string]interface{}{"first_name": req.FirstName, "last_name": req.LastName, "middle_name": req.MiddleName, "phone": req.Phone},
+	})
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit conflict resolution"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Ota-ona ma'lumotlari muvaffaqiyatli yangilandi!"})
 }

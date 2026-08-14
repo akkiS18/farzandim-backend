@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -2041,21 +2042,14 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 			continue
 		}
 
-		// 1. Resolve or create Class safely
+		// 1. Resolve Class — Return error if class does not exist
 		var classID int
 		err = tx.QueryRow("SELECT id FROM classes WHERE LOWER(name) = LOWER($1) AND is_deleted = false", sinfName).Scan(&classID)
 		if err != nil {
-			err = tx.QueryRow(`
-				INSERT INTO classes (name, is_deleted) 
-				VALUES ($1, false) 
-				ON CONFLICT (name) DO UPDATE SET is_deleted = false, deleted_at = NULL 
-				RETURNING id`, sinfName).Scan(&classID)
-			if err != nil {
-				tx.Rollback()
-				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Sinf yaratib bo'lmadi: %v", err)})
-				failedCount++
-				continue
-			}
+			tx.Rollback()
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Sinf '%s' topilmadi", sinfName)})
+			failedCount++
+			continue
 		}
 
 		// 2. Create Student User
@@ -2109,7 +2103,7 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 
 		var inaPtr *string
 		if strings.TrimSpace(st.StudentDocumentNo) != "" && st.StudentDocumentNo != "-" {
-			d := strings.TrimSpace(st.StudentDocumentNo)
+			d := NormalizeDocumentNo(st.StudentDocumentNo)
 			inaPtr = &d
 		}
 
@@ -2130,7 +2124,7 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 		createOrGetParent := func(fullName, passport, phone, relType string) error {
 			cleanName := strings.TrimSpace(fullName)
 			cleanPhone := strings.TrimSpace(phone)
-			cleanDoc := strings.TrimSpace(passport)
+			cleanDoc := NormalizeDocumentNo(passport)
 
 			if cleanName == "" || cleanName == "-" {
 				return nil // Skip if parent not provided
@@ -2171,6 +2165,21 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 			var pDocPtr *string
 			if cleanDoc != "" && cleanDoc != "-" && !strings.Contains(strings.ToLower(cleanDoc), "vafot") {
 				pDocPtr = &cleanDoc
+			}
+
+			if !found && pDocPtr != nil {
+				var existingPassID int
+				err := tx.QueryRow(`
+					SELECT u.id FROM users u
+					JOIN roles r ON u.role_id = r.id
+					WHERE r.name = 'PARENT' AND (LOWER(TRIM(u.passport)) = LOWER($1) OR REGEXP_REPLACE(LOWER(u.passport), '[^a-z0-9]', '', 'g') = REGEXP_REPLACE(LOWER($1), '[^a-z0-9]', '', 'g'))
+					  AND u.is_deleted = false
+					LIMIT 1
+				`, *pDocPtr).Scan(&existingPassID)
+				if err == nil {
+					parentUserID = existingPassID
+					found = true
+				}
 			}
 
 			var pMiddlePtr *string
@@ -2234,5 +2243,30 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 		FailedCount:   failedCount,
 		Errors:        rowErrors,
 	})
+}
+
+func NormalizeDocumentNo(doc string) string {
+	clean := strings.TrimSpace(doc)
+	if clean == "" || clean == "-" || strings.EqualFold(clean, "yo'q") {
+		return clean
+	}
+
+	// 1. Birth certificate (e.g. I-NA. 086354 or I-NA.086354 or i-na 086354 -> I-NA 086354)
+	reBirth := regexp.MustCompile(`(?i)^([I|V|X]+-[A-Z]{2})[\s\.]*(\d+)$`)
+	if matches := reBirth.FindStringSubmatch(clean); len(matches) == 3 {
+		return fmt.Sprintf("%s %s", strings.ToUpper(matches[1]), matches[2])
+	}
+
+	// Remove dots after I-NA prefix
+	reDotsPrefix := regexp.MustCompile(`(?i)([I|V|X]+-[A-Z]{2})\s*\.\s*`)
+	clean = reDotsPrefix.ReplaceAllString(clean, "$1 ")
+
+	// 2. Passport series + number (e.g. AB 1234567 or AB. 1234567 -> AB1234567)
+	rePass := regexp.MustCompile(`(?i)^([A-Z]{2})[\s\.]*(\d+)$`)
+	if matches := rePass.FindStringSubmatch(clean); len(matches) == 3 {
+		return fmt.Sprintf("%s%s", strings.ToUpper(matches[1]), matches[2])
+	}
+
+	return clean
 }
 
