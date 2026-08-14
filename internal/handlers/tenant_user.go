@@ -1742,7 +1742,13 @@ func (h *TenantUserHandler) TransferStudentByDocument(c *gin.Context) {
 
 	// 1. Resolve Target Class ID
 	var targetClassID int
-	err = tx.QueryRow("SELECT id FROM classes WHERE LOWER(name) = LOWER($1) AND is_deleted = false", targetClassName).Scan(&targetClassID)
+	classQuery := `
+		SELECT id FROM classes 
+		WHERE (
+			LOWER(name) = LOWER($1) 
+			OR REGEXP_REPLACE(UPPER(TRIM(name)), '\s*-\s*', '-', 'g') = REGEXP_REPLACE(UPPER(TRIM($1)), '\s*-\s*', '-', 'g')
+		) AND is_deleted = false`
+	err = tx.QueryRow(classQuery, targetClassName).Scan(&targetClassID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Sinf '%s' topilmadi. Avval sinf yaratilishi kerak.", targetClassName)})
 		return

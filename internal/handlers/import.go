@@ -2044,7 +2044,13 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 
 		// 1. Resolve Class — Return error if class does not exist
 		var classID int
-		err = tx.QueryRow("SELECT id FROM classes WHERE LOWER(name) = LOWER($1) AND is_deleted = false", sinfName).Scan(&classID)
+		classQuery := `
+			SELECT id FROM classes 
+			WHERE (
+				LOWER(name) = LOWER($1) 
+				OR REGEXP_REPLACE(UPPER(TRIM(name)), '\s*-\s*', '-', 'g') = REGEXP_REPLACE(UPPER(TRIM($1)), '\s*-\s*', '-', 'g')
+			) AND is_deleted = false`
+		err = tx.QueryRow(classQuery, sinfName).Scan(&classID)
 		if err != nil {
 			tx.Rollback()
 			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Sinf '%s' topilmadi", sinfName)})

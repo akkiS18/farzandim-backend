@@ -10,6 +10,7 @@ import (
 
 	"github.com/farzandim/backend/internal/audit"
 	"github.com/farzandim/backend/internal/models"
+	"github.com/farzandim/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/xuri/excelize/v2"
 )
@@ -757,7 +758,7 @@ func (h *ScheduleHandler) BatchImportSchedulesSmart(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	// 1. Cache classes map (lowercased class name -> id)
+	// 1. Cache classes map (normalized class name -> id)
 	classMap := make(map[string]int)
 	cRows, err := tx.Query("SELECT id, name FROM classes WHERE is_deleted = false")
 	if err == nil {
@@ -765,7 +766,7 @@ func (h *ScheduleHandler) BatchImportSchedulesSmart(c *gin.Context) {
 			var cid int
 			var cname string
 			if err := cRows.Scan(&cid, &cname); err == nil {
-				classMap[strings.ToLower(strings.TrimSpace(cname))] = cid
+				classMap[utils.NormalizeClassName(cname)] = cid
 			}
 		}
 		cRows.Close()
@@ -822,7 +823,7 @@ func (h *ScheduleHandler) BatchImportSchedulesSmart(c *gin.Context) {
 			continue
 		}
 
-		classID, exists := classMap[strings.ToLower(cleanClass)]
+		classID, exists := classMap[utils.NormalizeClassName(cleanClass)]
 		if !exists {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": fmt.Sprintf("%d-qatorda kiritilgan '%s' sinfi bazada topilmadi!", idx+1, cleanClass),
