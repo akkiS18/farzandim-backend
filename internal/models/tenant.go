@@ -19,6 +19,7 @@ type User struct {
 	LastName     string     `json:"last_name" db:"last_name"`
 	MiddleName   *string    `json:"middle_name,omitempty" db:"middle_name"`
 	Passport     *string    `json:"passport,omitempty" db:"passport"`
+	DocumentNo   *string    `json:"document_no,omitempty" db:"document_no"`
 	TelegramID   *string    `json:"telegram_id,omitempty" db:"telegram_id"`
 	RoleID       int        `json:"role_id" db:"role_id"`
 	IsDeleted    bool       `json:"is_deleted" db:"is_deleted"`

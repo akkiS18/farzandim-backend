@@ -1882,7 +1882,7 @@ func (h *ImportHandler) ImportStudentsSmart(c *gin.Context) {
 					pFirst = parts[1]
 				}
 
-				pPass := "P" + sRow.ParentPhone
+				pPass := "123"
 				pHashed, _ := bcrypt.GenerateFromPassword([]byte(pPass), bcrypt.DefaultCost)
 				
 				err = tx.QueryRow("INSERT INTO users (first_name, last_name, phone, password_hash, role_id) VALUES ($1, $2, $3, $4, $5) RETURNING id",
@@ -2194,19 +2194,19 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 			}
 
 			if !found {
-				pPass := "P" + fmt.Sprintf("%d", time.Now().UnixNano()%1000000)
+				pPass := "123"
 				pHashed, _ := bcrypt.GenerateFromPassword([]byte(pPass), bcrypt.DefaultCost)
 
 				err := tx.QueryRow(`
-					INSERT INTO users (first_name, last_name, middle_name, phone, passport, password_hash, role_id)
-					VALUES ($1, $2, $3, $4, $5, $6, $7)
+					INSERT INTO users (first_name, last_name, middle_name, phone, passport, document_no, password_hash, role_id)
+					VALUES ($1, $2, $3, $4, $5, $5, $6, $7)
 					RETURNING id`, pFirst, pLast, pMiddlePtr, pPhonePtr, pDocPtr, string(pHashed), parentRoleID).Scan(&parentUserID)
 
 				if err != nil {
 					return fmt.Errorf("Vasiy accountida xatolik: %v", err)
 				}
 			} else if pDocPtr != nil {
-				_, _ = tx.Exec("UPDATE users SET passport = $1 WHERE id = $2 AND (passport IS NULL OR passport = '')", *pDocPtr, parentUserID)
+				_, _ = tx.Exec("UPDATE users SET passport = $1, document_no = $1 WHERE id = $2 AND (document_no IS NULL OR document_no = '')", *pDocPtr, parentUserID)
 			}
 
 			_, err = tx.Exec(`

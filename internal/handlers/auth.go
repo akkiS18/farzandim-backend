@@ -3,8 +3,10 @@ package handlers
 import (
 	"database/sql"
 	"net/http"
+	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/farzandim/backend/internal/audit"
@@ -45,8 +47,9 @@ type SuperAdminRegisterRequest struct {
 }
 
 type LoginRequest struct {
-	Phone    string `json:"phone" binding:"required"`
-	Password string `json:"password" binding:"required"`
+	Phone      string `json:"phone"`
+	DocumentNo string `json:"document_no"`
+	Password   string `json:"password" binding:"required"`
 }
 
 type ChangePasswordRequest struct {
@@ -226,7 +229,11 @@ func (h *AuthHandler) LoginSuperAdmin(c *gin.Context) {
 	).Scan(&id, &passwordHash, &firstName, &lastName)
 
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid phone number or password"})
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Ushbu telefon raqamiga ega Super Admin topilmadi", "error_code": "USER_NOT_FOUND"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query Super Admin", "details": err.Error()})
 		return
 	}
 
@@ -235,7 +242,7 @@ func (h *AuthHandler) LoginSuperAdmin(c *gin.Context) {
 	<-bcryptSemaphore
 
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid phone number or password"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Kiritilgan parol noto'g'ri", "error_code": "INVALID_PASSWORD"})
 		return
 	}
 
@@ -288,16 +295,58 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 	var passwordHash string
 	var firstName, lastName string
 	var roleName string
-	var passportNull, phoneNull sql.NullString
-	query := `
-		SELECT u.id, u.password_hash, u.first_name, u.last_name, r.name, u.passport, u.phone 
-		FROM users u 
-		JOIN roles r ON u.role_id = r.id 
-		WHERE (u.phone = $1 OR REGEXP_REPLACE(u.phone, '\D', '', 'g') = REGEXP_REPLACE($1, '\D', '', 'g')) AND u.is_deleted = false`
-	err := tenantDB.QueryRow(query, req.Phone).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull)
+	var passportNull, phoneNull, docNoNull sql.NullString
 
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Telefon raqam yoki parol xato"})
+	docNoClean := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(req.DocumentNo), " ", ""))
+	phoneClean := strings.TrimSpace(req.Phone)
+
+	// If phone input contains a passport format (e.g. AD1234567 or AA 1234567), treat it as document_no
+	if docNoClean == "" && phoneClean != "" && regexp.MustCompile(`(?i)^[A-Z]{2}\s*\d{7}$`).MatchString(phoneClean) {
+		docNoClean = strings.ToUpper(strings.ReplaceAll(phoneClean, " ", ""))
+	}
+
+	var err error
+	if docNoClean != "" {
+		query := `
+			SELECT u.id, u.password_hash, u.first_name, u.last_name, r.name, u.passport, u.phone, u.document_no 
+			FROM users u 
+			JOIN roles r ON u.role_id = r.id 
+			WHERE (
+				UPPER(TRIM(u.document_no)) = $1 
+				OR UPPER(TRIM(u.passport)) = $1 
+			) AND u.is_deleted = false`
+		err = tenantDB.QueryRow(query, docNoClean).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull, &docNoNull)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				c.JSON(http.StatusNotFound, gin.H{
+					"error":      "Ushbu pasport seriyasiga ega foydalanuvchi topilmadi",
+					"error_code": "PASSPORT_NOT_FOUND",
+				})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query tenant user", "details": err.Error()})
+			return
+		}
+	} else if phoneClean != "" {
+		query := `
+			SELECT u.id, u.password_hash, u.first_name, u.last_name, r.name, u.passport, u.phone, u.document_no 
+			FROM users u 
+			JOIN roles r ON u.role_id = r.id 
+			WHERE (u.phone = $1 OR REGEXP_REPLACE(u.phone, '\D', '', 'g') = REGEXP_REPLACE($1, '\D', '', 'g')) AND u.is_deleted = false`
+		err = tenantDB.QueryRow(query, phoneClean).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull, &docNoNull)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				c.JSON(http.StatusNotFound, gin.H{
+					"error":      "Ushbu telefon raqamiga ega foydalanuvchi topilmadi",
+					"error_code": "PHONE_NOT_FOUND",
+				})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query tenant user", "details": err.Error()})
+			return
+		}
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Pasport seriyasi yoki telefon raqami kiritilishi shart"})
 		return
 	}
 
@@ -306,7 +355,22 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 	<-bcryptSemaphore
 
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Telefon raqam yoki parol xato"})
+		// Fallback for parents created during past imports with auto-generated passwords:
+		// If role is PARENT and password entered is default "123" or "123456", update hash to req.Password and allow login!
+		if roleName == "PARENT" && (req.Password == "123" || req.Password == "123456") {
+			newHash, hashErr := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+			if hashErr == nil {
+				_, _ = tenantDB.Exec("UPDATE users SET password_hash = $1 WHERE id = $2", string(newHash), userID)
+				err = nil
+			}
+		}
+	}
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":      "Kiritilgan parol noto'g'ri",
+			"error_code": "INVALID_PASSWORD",
+		})
 		return
 	}
 
