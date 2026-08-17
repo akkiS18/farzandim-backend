@@ -538,10 +538,10 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 	var totalGradeCount int
 
 	gRows, err := dbConn.Query(`
-		SELECT sub.name, g.grade_value
+		SELECT sub.name, COALESCE(g.numeric_value, 0.0)
 		FROM grades g
 		JOIN subjects sub ON g.subject_id = sub.id
-		WHERE g.student_id = $1 AND g.date >= $2 AND g.date <= $3 AND g.is_deleted = false`, studentID, startStr, endStr)
+		WHERE g.student_id = $1 AND g.grade_date >= $2 AND g.grade_date <= $3 AND g.is_deleted = false`, studentID, startStr, endStr)
 	if err == nil {
 		for gRows.Next() {
 			var subName string
@@ -563,8 +563,15 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 	// 4. Fetch Teacher Comments
 	var comments []string
 	cRows, err := dbConn.Query(`
-		SELECT comment_text FROM comments
-		WHERE student_id = $1 AND created_at >= $2 AND created_at <= $3`, studentID, startStr, endStr)
+		SELECT gc.content
+		FROM grade_comments gc
+		JOIN grades g ON gc.grade_id = g.id
+		JOIN users u ON gc.author_id = u.id
+		JOIN roles r ON u.role_id = r.id
+		WHERE g.student_id = $1
+		  AND gc.created_at >= $2
+		  AND gc.created_at <= $3
+		  AND r.name IN ('ADMIN', 'MAIN_TEACHER', 'SUBJECT_TEACHER')`, studentID, startStr, endStr)
 	if err == nil {
 		for cRows.Next() {
 			var comm string
