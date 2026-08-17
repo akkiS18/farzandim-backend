@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS grading_systems (
 -- Seed default grading systems
 INSERT INTO grading_systems (name, type, min_value, max_value, options, is_active) VALUES
 ('5 ballik sistema', 'NUMERIC', 1.00, 5.00, NULL, TRUE),
-('100 ballik sistema', 'NUMERIC', 0.00, 100.00, NULL, FALSE)
+('100 ballik sistema', 'NUMERIC', 0.00, 100.00, NULL, FALSE),
+('Xulq tizimi', 'NUMERIC', -5.00, 0.00, NULL, FALSE)
 ON CONFLICT (name) DO NOTHING;
 
 -- Modify grades table

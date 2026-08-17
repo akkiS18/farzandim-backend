@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -298,31 +299,70 @@ func (bm *BotManager) sendTextMessage(token string, chatID int64, text string) {
 	defer resp.Body.Close()
 }
 
-func (bm *BotManager) sendTextMessageWithButton(token string, chatID int64, text string, buttonText string, buttonURL string) {
+func isValidTelegramButtonURL(urlStr string) bool {
+	if urlStr == "" {
+		return false
+	}
+	lower := strings.ToLower(urlStr)
+	if strings.Contains(lower, "localhost") || strings.Contains(lower, "127.0.0.1") {
+		return false
+	}
+	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "tg://")
+}
+
+func (bm *BotManager) sendTextMessageWithButton(token string, chatID interface{}, text string, buttonText string, buttonURL string) {
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
 	payload := map[string]interface{}{
 		"chat_id":    chatID,
 		"text":       text,
 		"parse_mode": "HTML",
-		"reply_markup": map[string]interface{}{
+	}
+
+	if isValidTelegramButtonURL(buttonURL) {
+		payload["reply_markup"] = map[string]interface{}{
 			"inline_keyboard": [][]map[string]interface{}{
 				{
 					{"text": buttonText, "url": buttonURL},
 				},
 			},
-		},
+		}
 	}
 
 	jsonBytes, _ := json.Marshal(payload)
 	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
 	if err != nil {
-		log.Printf("Failed to send telegram message with button: %v", err)
+		log.Printf("Failed to send telegram message: %v", err)
 		return
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBytes, _ := io.ReadAll(resp.Body)
+		log.Printf("[Telegram API Error] chatID %v Status %d: %s. Retrying with safe plain text payload...", chatID, resp.StatusCode, string(respBytes))
+
+		// Fallback retry without parse_mode and without reply_markup
+		plainPayload := map[string]interface{}{
+			"chat_id": chatID,
+			"text":    text,
+		}
+		if isValidTelegramButtonURL(buttonURL) {
+			plainPayload["reply_markup"] = map[string]interface{}{
+				"inline_keyboard": [][]map[string]interface{}{
+					{
+						{"text": buttonText, "url": buttonURL},
+					},
+				},
+			}
+		}
+		pBytes, _ := json.Marshal(plainPayload)
+		respFallback, errF := http.Post(url, "application/json", bytes.NewBuffer(pBytes))
+		if errF == nil {
+			respFallback.Body.Close()
+		}
+	}
 }
 
-func (bm *BotManager) sendPollMessage(token string, chatID int64, question string, options []string) string {
+func (bm *BotManager) sendPollMessage(token string, chatID interface{}, question string, options []string) string {
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendPoll", token)
 
 	if len(question) > 290 {
@@ -430,11 +470,12 @@ func (bm *BotManager) handlePollAnswer(schoolID string, pollID string, telegramU
 	}
 }
 
-// SendAnnouncementNotification sends the announcement to all configured parents
+// SendAnnouncementNotification sends the announcement to configured channel and all parents
 func SendAnnouncementNotification(schoolID string, ann *models.Announcement) {
 	var token string
 	var schoolName string
-	err := db.CentralDB.QueryRow("SELECT bot_token, name FROM schools WHERE id = $1 AND is_deleted = false", schoolID).Scan(&token, &schoolName)
+	var telegramChannelID string
+	err := db.CentralDB.QueryRow("SELECT bot_token, name, COALESCE(telegram_channel_id, '') FROM schools WHERE id = $1 AND is_deleted = false", schoolID).Scan(&token, &schoolName, &telegramChannelID)
 	if err != nil || token == "" {
 		return
 	}
@@ -445,6 +486,118 @@ func SendAnnouncementNotification(schoolID string, ann *models.Announcement) {
 		return
 	}
 
+	// Build target details text
+	var targetParts []string
+	if len(ann.ClassIDs) > 0 {
+		placeholders := make([]string, len(ann.ClassIDs))
+		args := make([]interface{}, len(ann.ClassIDs))
+		for i, id := range ann.ClassIDs {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+			args[i] = id
+		}
+		cRows, err := tenantDB.Query(fmt.Sprintf("SELECT name FROM classes WHERE id IN (%s) AND is_deleted = false", strings.Join(placeholders, ",")), args...)
+		if err == nil {
+			var cNames []string
+			for cRows.Next() {
+				var name string
+				if err := cRows.Scan(&name); err == nil {
+					cNames = append(cNames, name)
+				}
+			}
+			cRows.Close()
+			if len(cNames) > 0 {
+				targetParts = append(targetParts, fmt.Sprintf("Sinflar: %s", strings.Join(cNames, ", ")))
+			}
+		}
+	}
+	if len(ann.LevelIDs) > 0 {
+		var lStrs []string
+		for _, lvl := range ann.LevelIDs {
+			lStrs = append(lStrs, fmt.Sprintf("%d-sinflar", lvl))
+		}
+		targetParts = append(targetParts, strings.Join(lStrs, ", "))
+	}
+	if len(ann.StudentIDs) > 0 {
+		placeholders := make([]string, len(ann.StudentIDs))
+		args := make([]interface{}, len(ann.StudentIDs))
+		for i, id := range ann.StudentIDs {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+			args[i] = id
+		}
+		sRows, err := tenantDB.Query(fmt.Sprintf(`
+			SELECT u.first_name || ' ' || u.last_name 
+			FROM students s 
+			JOIN users u ON s.user_id = u.id 
+			WHERE s.id IN (%s) AND s.is_deleted = false
+		`, strings.Join(placeholders, ",")), args...)
+		if err == nil {
+			var sNames []string
+			for sRows.Next() {
+				var name string
+				if err := sRows.Scan(&name); err == nil {
+					sNames = append(sNames, name)
+				}
+			}
+			sRows.Close()
+			if len(sNames) > 0 {
+				targetParts = append(targetParts, fmt.Sprintf("O'quvchilar: %s", strings.Join(sNames, ", ")))
+			}
+		}
+	}
+
+	targetGroupText := "Barcha sinflar va ota-onalar"
+	if len(targetParts) > 0 {
+		targetGroupText = strings.Join(targetParts, " | ")
+	}
+
+	var optTexts []string
+	if ann.IsPoll && len(ann.PollOptions) > 0 {
+		for _, opt := range ann.PollOptions {
+			if strings.TrimSpace(opt.OptionText) != "" {
+				optTexts = append(optTexts, strings.TrimSpace(opt.OptionText))
+			}
+		}
+	}
+
+	createdStr := ann.CreatedAt.Format("2006-01-02 15:04")
+	if ann.CreatedAt.IsZero() {
+		createdStr = time.Now().Format("2006-01-02 15:04")
+	}
+
+	frontendURL := os.Getenv("FRONTEND_URL")
+	if frontendURL == "" {
+		frontendURL = "http://localhost:6501"
+	}
+
+	safeSchoolName := html.EscapeString(schoolName)
+	safeTitle := html.EscapeString(ann.Title)
+	safeContent := html.EscapeString(ann.Content)
+	safeTargetGroup := html.EscapeString(targetGroupText)
+
+	var msgText string
+	if ann.IsPoll {
+		var optListStr strings.Builder
+		numberIcons := []string{"1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"}
+		for i, opt := range optTexts {
+			icon := "🔹"
+			if i < len(numberIcons) {
+				icon = numberIcons[i]
+			}
+			optListStr.WriteString(fmt.Sprintf("%s %s\n", icon, html.EscapeString(opt)))
+		}
+
+		msgText = fmt.Sprintf(
+			"📊 <b>Yangi So'rovnoma! (%s)</b>\n\n📌 <b>%s</b>\n\n%s\n\n🗳️ <b>So'rovnoma variantlari:</b>\n%s\n🎯 <b>Maqsadli guruh:</b> %s\n📅 <b>Sana:</b> %s",
+			safeSchoolName, safeTitle, safeContent, optListStr.String(), safeTargetGroup, createdStr,
+		)
+	} else {
+		msgText = fmt.Sprintf(
+			"📢 <b>Yangi e'lon! (%s)</b>\n\n📌 <b>%s</b>\n\n%s\n\n🎯 <b>Maqsadli guruh:</b> %s\n📅 <b>Sana:</b> %s",
+			safeSchoolName, safeTitle, safeContent, safeTargetGroup, createdStr,
+		)
+	}
+
+	// Fetch parent Telegram IDs
 	var rows *sql.Rows
 	var queryParts []string
 	var args []interface{}
@@ -511,57 +664,52 @@ func SendAnnouncementNotification(schoolID string, ann *models.Announcement) {
 		rows, err = tenantDB.Query(fullQuery, args...)
 	}
 
-	if err != nil {
-		log.Printf("Failed to query parent Telegram IDs: %v", err)
-		return
-	}
-	defer rows.Close()
-
 	var telegramIDs []string
-	for rows.Next() {
-		var tid string
-		if err := rows.Scan(&tid); err == nil {
-			telegramIDs = append(telegramIDs, tid)
+	if err == nil {
+		for rows.Next() {
+			var tid string
+			if err := rows.Scan(&tid); err == nil && tid != "" {
+				telegramIDs = append(telegramIDs, tid)
+			}
 		}
-	}
-
-	if len(telegramIDs) == 0 {
-		return
-	}
-
-	frontendURL := os.Getenv("FRONTEND_URL")
-	if frontendURL == "" {
-		frontendURL = "http://localhost:6501"
+		rows.Close()
 	}
 
 	go func() {
+		btnLabel := "🌐 Portalda ko'rish"
+		if ann.IsPoll {
+			btnLabel = "🌐 Portalda ko'rish va ovoz berish"
+		}
+
+		// 1. Send to configured Telegram Channel / Group if present
+		if telegramChannelID != "" {
+			Manager.sendTextMessageWithButton(token, telegramChannelID, msgText, btnLabel, fmt.Sprintf("%s/parents", frontendURL))
+			if ann.IsPoll && len(optTexts) >= 2 {
+				time.Sleep(100 * time.Millisecond)
+				pollQuestion := fmt.Sprintf("📊 %s", ann.Title)
+				tgPollID := Manager.sendPollMessage(token, telegramChannelID, pollQuestion, optTexts)
+				if tgPollID != "" {
+					_, _ = tenantDB.Exec("INSERT INTO telegram_polls (announcement_id, telegram_poll_id, chat_id) VALUES ($1, $2, 0) ON CONFLICT (telegram_poll_id) DO NOTHING", ann.ID, tgPollID)
+					_, _ = tenantDB.Exec("UPDATE announcements SET telegram_poll_id = $1 WHERE id = $2", tgPollID, ann.ID)
+				}
+			}
+		}
+
+		// 2. Send to target parents' private chats
 		for _, tid := range telegramIDs {
 			chatID := int64(0)
 			fmt.Sscanf(tid, "%d", &chatID)
 			if chatID != 0 {
-				if ann.IsPoll && len(ann.PollOptions) >= 2 {
-					var optTexts []string
-					for _, opt := range ann.PollOptions {
-						if strings.TrimSpace(opt.OptionText) != "" {
-							optTexts = append(optTexts, opt.OptionText)
-						}
-					}
+				Manager.sendTextMessageWithButton(token, chatID, msgText, btnLabel, fmt.Sprintf("%s/parents", frontendURL))
 
-					msgText := fmt.Sprintf("📊 <b>Yangi So'rovnoma! (%s)</b>\n\n📌 <b>%s</b>\n\n%s", schoolName, ann.Title, ann.Content)
-					Manager.sendTextMessageWithButton(token, chatID, msgText, "🌐 Portalda ko'rish va ovoz berish", fmt.Sprintf("%s/parents", frontendURL))
-
-					if len(optTexts) >= 2 {
-						time.Sleep(100 * time.Millisecond)
-						pollQuestion := fmt.Sprintf("📊 %s", ann.Title)
-						tgPollID := Manager.sendPollMessage(token, chatID, pollQuestion, optTexts)
-						if tgPollID != "" {
-							_, _ = tenantDB.Exec("INSERT INTO telegram_polls (announcement_id, telegram_poll_id, chat_id) VALUES ($1, $2, $3) ON CONFLICT (telegram_poll_id) DO NOTHING", ann.ID, tgPollID, chatID)
-							_, _ = tenantDB.Exec("UPDATE announcements SET telegram_poll_id = $1 WHERE id = $2", tgPollID, ann.ID)
-						}
+				if ann.IsPoll && len(optTexts) >= 2 {
+					time.Sleep(100 * time.Millisecond)
+					pollQuestion := fmt.Sprintf("📊 %s", ann.Title)
+					tgPollID := Manager.sendPollMessage(token, chatID, pollQuestion, optTexts)
+					if tgPollID != "" {
+						_, _ = tenantDB.Exec("INSERT INTO telegram_polls (announcement_id, telegram_poll_id, chat_id) VALUES ($1, $2, $3) ON CONFLICT (telegram_poll_id) DO NOTHING", ann.ID, tgPollID, chatID)
+						_, _ = tenantDB.Exec("UPDATE announcements SET telegram_poll_id = $1 WHERE id = $2", tgPollID, ann.ID)
 					}
-				} else {
-					msgText := fmt.Sprintf("📢 <b>Yangi e'lon! (%s)</b>\n\n📌 <b>%s</b>\n\n%s", schoolName, ann.Title, ann.Content)
-					Manager.sendTextMessageWithButton(token, chatID, msgText, "🌐 Portalda ko'rish", fmt.Sprintf("%s/parents", frontendURL))
 				}
 				time.Sleep(35 * time.Millisecond)
 			}

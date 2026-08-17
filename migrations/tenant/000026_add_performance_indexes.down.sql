@@ -4,9 +4,9 @@ DROP INDEX IF EXISTS idx_students_class_id;
 DROP INDEX IF EXISTS idx_student_parents_student;
 DROP INDEX IF EXISTS idx_student_parents_parent;
 DROP INDEX IF EXISTS idx_grades_student_id;
-DROP INDEX IF EXISTS idx_grades_class_id;
 DROP INDEX IF EXISTS idx_grades_created_at;
 DROP INDEX IF EXISTS idx_grade_comments_grade;
 DROP INDEX IF EXISTS idx_grade_comments_parent;
 DROP INDEX IF EXISTS idx_announcements_created;
 DROP INDEX IF EXISTS idx_class_teachers_class_teacher;
+

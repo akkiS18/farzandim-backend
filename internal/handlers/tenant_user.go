@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -45,15 +46,15 @@ type UpdateTeacherRequest struct {
 	FirstName  string  `json:"first_name" binding:"required"`
 	LastName   string  `json:"last_name" binding:"required"`
 	MiddleName *string `json:"middle_name"`
-	Phone      string  `json:"phone" binding:"required"`
-	RoleName   string  `json:"role" binding:"required"` // MAIN_TEACHER or SUBJECT_TEACHER
+	Phone      string  `json:"phone"`
+	RoleName   string  `json:"role"`
 	Password   *string `json:"password"`
 }
 
 type AssignTeacherRequest struct {
-	TeacherID     int  `json:"teacher_id" binding:"required"`
-	SubjectID     int  `json:"subject_id" binding:"required"`
-	IsMainTeacher bool `json:"is_main_teacher"`
+	TeacherID     int   `json:"teacher_id" binding:"required"`
+	SubjectID     *int  `json:"subject_id"`
+	IsMainTeacher bool  `json:"is_main_teacher"`
 }
 
 type SubjectRequest struct {
@@ -333,27 +334,21 @@ func (h *TenantUserHandler) UpdateTeacher(c *gin.Context) {
 		return
 	}
 
+	callerRole, _ := c.Get("role")
+	callerUserID, _ := c.Get("userID")
+	if callerRole != "ADMIN" && fmt.Sprintf("%v", callerUserID) != teacherIDStr {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Siz faqat shaxsiy profilingizni o'zgartirishingiz mumkin"})
+		return
+	}
+
 	var req UpdateTeacherRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid fields", "details": err.Error()})
 		return
 	}
 
-	req.RoleName = strings.ToUpper(req.RoleName)
-	if req.RoleName != "MAIN_TEACHER" && req.RoleName != "SUBJECT_TEACHER" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Rol faqat MAIN_TEACHER yoki SUBJECT_TEACHER bo'lishi mumkin"})
-		return
-	}
-
 	tenantDBVal, _ := c.Get("tenantDB")
 	dbConn := tenantDBVal.(*sql.DB)
-
-	var roleID int
-	err = dbConn.QueryRow("SELECT id FROM roles WHERE name = $1", req.RoleName).Scan(&roleID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Role '%s' is not initialized", req.RoleName)})
-		return
-	}
 
 	tx, err := dbConn.Begin()
 	if err != nil {
@@ -368,12 +363,11 @@ func (h *TenantUserHandler) UpdateTeacher(c *gin.Context) {
 	err = tx.QueryRow(`
 		SELECT u.id, u.first_name, u.last_name, u.middle_name, u.phone, u.role_id 
 		FROM users u 
-		JOIN roles r ON u.role_id = r.id
-		WHERE u.id = $1 AND r.name IN ('MAIN_TEACHER', 'SUBJECT_TEACHER') AND u.is_deleted = false
+		WHERE u.id = $1 AND u.is_deleted = false
 	`, teacherID).Scan(&oldUser.ID, &oldUser.FirstName, &oldUser.LastName, &oldMiddleNameNull, &oldPhoneNull, &oldUser.RoleID)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "O'qituvchi topilmadi"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "Foydalanuvchi topilmadi"})
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query teacher details", "details": err.Error()})
 		}
@@ -386,6 +380,35 @@ func (h *TenantUserHandler) UpdateTeacher(c *gin.Context) {
 		oldUser.Phone = &oldPhoneNull.String
 	}
 
+	roleID := oldUser.RoleID
+	if req.RoleName != "" {
+		req.RoleName = strings.ToUpper(req.RoleName)
+		if req.RoleName != "MAIN_TEACHER" && req.RoleName != "SUBJECT_TEACHER" && req.RoleName != "ADMIN" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Rol faqat MAIN_TEACHER, SUBJECT_TEACHER yoki ADMIN bo'lishi mumkin"})
+			return
+		}
+		err = dbConn.QueryRow("SELECT id FROM roles WHERE name = $1", req.RoleName).Scan(&roleID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Role '%s' is not initialized", req.RoleName)})
+			return
+		}
+	}
+
+	var phonePtr *string
+	if strings.TrimSpace(req.Phone) != "" {
+		p := strings.TrimSpace(req.Phone)
+		phonePtr = &p
+	} else {
+		phonePtr = oldUser.Phone
+	}
+
+	var middleNamePtr *string
+	if req.MiddleName != nil {
+		middleNamePtr = req.MiddleName
+	} else {
+		middleNamePtr = oldUser.MiddleName
+	}
+
 	setClauses := []string{
 		"first_name = $1",
 		"last_name = $2",
@@ -394,7 +417,7 @@ func (h *TenantUserHandler) UpdateTeacher(c *gin.Context) {
 		"role_id = $5",
 		"updated_at = NOW()",
 	}
-	args := []interface{}{req.FirstName, req.LastName, req.MiddleName, req.Phone, roleID}
+	args := []interface{}{req.FirstName, req.LastName, middleNamePtr, phonePtr, roleID}
 
 	if req.Password != nil && *req.Password != "" {
 		hashed, hashErr := bcrypt.GenerateFromPassword([]byte(*req.Password), bcrypt.DefaultCost)
@@ -423,8 +446,8 @@ func (h *TenantUserHandler) UpdateTeacher(c *gin.Context) {
 		ID:         teacherID,
 		FirstName:  req.FirstName,
 		LastName:   req.LastName,
-		MiddleName: req.MiddleName,
-		Phone:      &req.Phone,
+		MiddleName: middleNamePtr,
+		Phone:      phonePtr,
 		RoleID:     roleID,
 		IsDeleted:  false,
 	}
@@ -438,7 +461,7 @@ func (h *TenantUserHandler) UpdateTeacher(c *gin.Context) {
 	})
 
 	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit student update", "details": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit profile update", "details": err.Error()})
 		return
 	}
 
@@ -716,13 +739,13 @@ func (h *TenantUserHandler) ListClassTeachers(c *gin.Context) {
 	dbConn := tenantDBVal.(*sql.DB)
 
 	query := `
-		SELECT ct.id, ct.class_id, ct.subject_id, s.name as subject_name, ct.teacher_id,
+		SELECT ct.id, ct.class_id, COALESCE(ct.subject_id, 0) as subject_id, COALESCE(s.name, 'Tanlanmagan / Kirmaydi') as subject_name, ct.teacher_id,
 		       u.first_name, u.last_name, u.middle_name, u.phone, ct.is_main_teacher, r.name as role_name
 		FROM class_teachers ct
 		JOIN users u ON ct.teacher_id = u.id
 		JOIN roles r ON u.role_id = r.id
-		JOIN subjects s ON ct.subject_id = s.id
-		WHERE ct.class_id = $1 AND ct.is_deleted = false AND u.is_deleted = false AND s.is_deleted = false
+		LEFT JOIN subjects s ON ct.subject_id = s.id AND s.is_deleted = false
+		WHERE ct.class_id = $1 AND ct.is_deleted = false AND u.is_deleted = false
 		ORDER BY ct.is_main_teacher DESC, u.first_name, u.last_name`
 
 	rows, err := dbConn.Query(query, classID)
@@ -832,12 +855,18 @@ func (h *TenantUserHandler) AssignClassTeacher(c *gin.Context) {
 		return
 	}
 
-	// Verify that the subject exists
-	var subjectExists bool
-	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM subjects WHERE id = $1 AND is_deleted = false)", req.SubjectID).Scan(&subjectExists)
-	if err != nil || !subjectExists {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Tanlangan fan topilmadi yoki o'chirilgan"})
-		return
+	// Verify that the subject exists if provided
+	var subjID sql.NullInt64
+	if req.SubjectID != nil && *req.SubjectID > 0 {
+		subjID = sql.NullInt64{Int64: int64(*req.SubjectID), Valid: true}
+		var subjectExists bool
+		err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM subjects WHERE id = $1 AND is_deleted = false)", *req.SubjectID).Scan(&subjectExists)
+		if err != nil || !subjectExists {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Tanlangan fan topilmadi yoki o'chirilgan"})
+			return
+		}
+	} else {
+		subjID = sql.NullInt64{Valid: false}
 	}
 
 	// If this is set as main teacher, turn off is_main_teacher flag for any other teacher in this class
@@ -852,7 +881,7 @@ func (h *TenantUserHandler) AssignClassTeacher(c *gin.Context) {
 	// Check if this mapping already exists (even if soft-deleted)
 	var mappingID int
 	var isDeleted bool
-	err = tx.QueryRow("SELECT id, is_deleted FROM class_teachers WHERE class_id = $1 AND subject_id = $2 AND teacher_id = $3", classID, req.SubjectID, req.TeacherID).Scan(&mappingID, &isDeleted)
+	err = tx.QueryRow("SELECT id, is_deleted FROM class_teachers WHERE class_id = $1 AND (($2::integer IS NULL AND subject_id IS NULL) OR subject_id = $2::integer) AND teacher_id = $3", classID, subjID, req.TeacherID).Scan(&mappingID, &isDeleted)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -861,7 +890,7 @@ func (h *TenantUserHandler) AssignClassTeacher(c *gin.Context) {
 				INSERT INTO class_teachers (class_id, subject_id, teacher_id, is_main_teacher)
 				VALUES ($1, $2, $3, $4)
 				RETURNING id`
-			err = tx.QueryRow(insertQuery, classID, req.SubjectID, req.TeacherID, req.IsMainTeacher).Scan(&mappingID)
+			err = tx.QueryRow(insertQuery, classID, subjID, req.TeacherID, req.IsMainTeacher).Scan(&mappingID)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to map class teacher link", "details": err.Error()})
 				return
@@ -886,12 +915,12 @@ func (h *TenantUserHandler) AssignClassTeacher(c *gin.Context) {
 	// Fetch mapping details to return
 	var res ClassTeacherResponse
 	query := `
-		SELECT ct.id, ct.class_id, ct.subject_id, s.name as subject_name, ct.teacher_id,
+		SELECT ct.id, ct.class_id, COALESCE(ct.subject_id, 0) as subject_id, COALESCE(s.name, 'Tanlanmagan / Kirmaydi') as subject_name, ct.teacher_id,
 		       u.first_name, u.last_name, u.phone, ct.is_main_teacher, r.name as role_name
 		FROM class_teachers ct
 		JOIN users u ON ct.teacher_id = u.id
 		JOIN roles r ON u.role_id = r.id
-		JOIN subjects s ON ct.subject_id = s.id
+		LEFT JOIN subjects s ON ct.subject_id = s.id AND s.is_deleted = false
 		WHERE ct.id = $1`
 	err = tx.QueryRow(query, mappingID).Scan(&res.ID, &res.ClassID, &res.SubjectID, &res.SubjectName, &res.TeacherID, &res.FirstName, &res.LastName, &res.Phone, &res.IsMainTeacher, &res.RoleName)
 	if err != nil {
@@ -899,6 +928,10 @@ func (h *TenantUserHandler) AssignClassTeacher(c *gin.Context) {
 		return
 	}
 
+	auditSubjectID := 0
+	if req.SubjectID != nil {
+		auditSubjectID = *req.SubjectID
+	}
 	audit.LogChange(c, tx, audit.LogData{
 		Action:    "CREATE",
 		TableName: "class_teachers",
@@ -906,7 +939,7 @@ func (h *TenantUserHandler) AssignClassTeacher(c *gin.Context) {
 		NewValues: models.ClassTeacher{
 			ID:            mappingID,
 			ClassID:       classID,
-			SubjectID:     req.SubjectID,
+			SubjectID:     auditSubjectID,
 			TeacherID:     req.TeacherID,
 			IsMainTeacher: req.IsMainTeacher,
 			IsDeleted:     false,
@@ -1040,8 +1073,9 @@ func (h *TenantUserHandler) UpdateClassTeacher(c *gin.Context) {
 	defer tx.Rollback()
 
 	var oldMapping models.ClassTeacher
+	var oldSubjNull sql.NullInt64
 	err = tx.QueryRow("SELECT id, class_id, subject_id, teacher_id, is_main_teacher, is_deleted FROM class_teachers WHERE id = $1 AND is_deleted = false", classTeacherID).
-		Scan(&oldMapping.ID, &oldMapping.ClassID, &oldMapping.SubjectID, &oldMapping.TeacherID, &oldMapping.IsMainTeacher, &oldMapping.IsDeleted)
+		Scan(&oldMapping.ID, &oldMapping.ClassID, &oldSubjNull, &oldMapping.TeacherID, &oldMapping.IsMainTeacher, &oldMapping.IsDeleted)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "O'qituvchi biriktiruvi topilmadi"})
@@ -1051,9 +1085,11 @@ func (h *TenantUserHandler) UpdateClassTeacher(c *gin.Context) {
 		return
 	}
 
-	subjectID := oldMapping.SubjectID
+	var finalSubjectID sql.NullInt64
 	if req.SubjectID != nil && *req.SubjectID > 0 {
-		subjectID = *req.SubjectID
+		finalSubjectID = sql.NullInt64{Int64: int64(*req.SubjectID), Valid: true}
+	} else {
+		finalSubjectID = sql.NullInt64{Valid: false}
 	}
 
 	teacherID := oldMapping.TeacherID
@@ -1070,7 +1106,7 @@ func (h *TenantUserHandler) UpdateClassTeacher(c *gin.Context) {
 		_, _ = tx.Exec("UPDATE class_teachers SET is_main_teacher = false WHERE class_id = $1 AND id != $2", oldMapping.ClassID, classTeacherID)
 	}
 
-	_, err = tx.Exec("UPDATE class_teachers SET subject_id = $1, teacher_id = $2, is_main_teacher = $3, updated_at = NOW() WHERE id = $4", subjectID, teacherID, isMainTeacher, classTeacherID)
+	_, err = tx.Exec("UPDATE class_teachers SET subject_id = $1, teacher_id = $2, is_main_teacher = $3 WHERE id = $4", finalSubjectID, teacherID, isMainTeacher, classTeacherID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update assignment", "details": err.Error()})
 		return
@@ -1082,7 +1118,7 @@ func (h *TenantUserHandler) UpdateClassTeacher(c *gin.Context) {
 		RecordID:  strconv.Itoa(classTeacherID),
 		OldValues: oldMapping,
 		NewValues: map[string]interface{}{
-			"subject_id":      subjectID,
+			"subject_id":      finalSubjectID,
 			"teacher_id":      teacherID,
 			"is_main_teacher": isMainTeacher,
 		},
@@ -1601,4 +1637,164 @@ func (h *TenantUserHandler) DeleteStudent(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "O'quvchi muvaffaqiyatli o'chirildi"})
+}
+
+type CheckStudentDocumentsRequest struct {
+	Documents []string `json:"documents"`
+}
+
+type ExistingStudentDocInfo struct {
+	StudentID  int    `json:"student_id"`
+	UserID     int    `json:"user_id"`
+	FirstName  string `json:"first_name"`
+	LastName   string `json:"last_name"`
+	MiddleName string `json:"middle_name"`
+	ClassID    int    `json:"class_id"`
+	ClassName  string `json:"class_name"`
+	INA        string `json:"ina"`
+}
+
+// CheckStudentDocuments checks if any document numbers (INA) already exist in tenant database
+func (h *TenantUserHandler) CheckStudentDocuments(c *gin.Context) {
+	var req CheckStudentDocumentsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body", "details": err.Error()})
+		return
+	}
+
+	cleanDocs := []string{}
+	reg, _ := regexp.Compile("[^a-z0-9]")
+	for _, d := range req.Documents {
+		trimmed := strings.TrimSpace(d)
+		if trimmed != "" && trimmed != "-" && !strings.EqualFold(trimmed, "yo'q") {
+			norm := reg.ReplaceAllString(strings.ToLower(trimmed), "")
+			if norm != "" {
+				cleanDocs = append(cleanDocs, norm)
+				cleanDocs = append(cleanDocs, strings.ToLower(trimmed))
+			}
+		}
+	}
+
+	if len(cleanDocs) == 0 {
+		c.JSON(http.StatusOK, gin.H{})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	rows, err := dbConn.Query(`
+		SELECT s.id, s.user_id, u.first_name, u.last_name, COALESCE(u.middle_name, ''), COALESCE(s.class_id, 0), COALESCE(c.name, 'Sinfatsiz'), COALESCE(s.ina, '')
+		FROM students s
+		JOIN users u ON s.user_id = u.id
+		LEFT JOIN classes c ON s.class_id = c.id
+		WHERE (LOWER(TRIM(s.ina)) = ANY($1) OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = ANY($1)) AND s.is_deleted = false AND u.is_deleted = false
+	`, pq.Array(cleanDocs))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check student documents", "details": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	result := make(map[string]ExistingStudentDocInfo)
+	for rows.Next() {
+		var info ExistingStudentDocInfo
+		if err := rows.Scan(&info.StudentID, &info.UserID, &info.FirstName, &info.LastName, &info.MiddleName, &info.ClassID, &info.ClassName, &info.INA); err == nil {
+			normINA := reg.ReplaceAllString(strings.ToLower(info.INA), "")
+			result[normINA] = info
+			result[strings.ToLower(strings.TrimSpace(info.INA))] = info
+		}
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+type TransferByDocumentRequest struct {
+	INA             string `json:"ina"`
+	TargetClassName string `json:"target_class_name"`
+}
+
+// TransferStudentByDocument transfers an existing student identified by INA to a target class
+func (h *TenantUserHandler) TransferStudentByDocument(c *gin.Context) {
+	var req TransferByDocumentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request parameters", "details": err.Error()})
+		return
+	}
+
+	cleanINA := strings.TrimSpace(req.INA)
+	targetClassName := strings.TrimSpace(req.TargetClassName)
+
+	if cleanINA == "" || targetClassName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ina va target_class_name bo'sh bo'lmasligi kerak"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failure"})
+		return
+	}
+	defer tx.Rollback()
+
+	// 1. Resolve Target Class ID
+	var targetClassID int
+	classQuery := `
+		SELECT id FROM classes 
+		WHERE (
+			LOWER(name) = LOWER($1) 
+			OR REGEXP_REPLACE(UPPER(TRIM(name)), '\s*-\s*', '-', 'g') = REGEXP_REPLACE(UPPER(TRIM($1)), '\s*-\s*', '-', 'g')
+		) AND is_deleted = false`
+	err = tx.QueryRow(classQuery, targetClassName).Scan(&targetClassID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Sinf '%s' topilmadi. Avval sinf yaratilishi kerak.", targetClassName)})
+		return
+	}
+
+	// 2. Find existing student by normalized INA
+	var studentID, userID, oldClassID int
+	var firstName, lastName, oldClassName string
+	err = tx.QueryRow(`
+		SELECT s.id, s.user_id, COALESCE(s.class_id, 0), u.first_name, u.last_name, COALESCE(c.name, 'Sinfatsiz')
+		FROM students s
+		JOIN users u ON s.user_id = u.id
+		LEFT JOIN classes c ON s.class_id = c.id
+		WHERE (LOWER(TRIM(s.ina)) = LOWER($1) OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = REGEXP_REPLACE(LOWER($1), '[^a-z0-9]', '', 'g'))
+		  AND s.is_deleted = false AND u.is_deleted = false
+		LIMIT 1
+	`, cleanINA).Scan(&studentID, &userID, &oldClassID, &firstName, &lastName, &oldClassName)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Hujjat raqami '%s' bo'lgan o'quvchi topilmadi", cleanINA)})
+		return
+	}
+
+	// 3. Update student class_id
+	_, err = tx.Exec("UPDATE students SET class_id = $1 WHERE id = $2", targetClassID, studentID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Sinfni yangilashda xatolik", "details": err.Error()})
+		return
+	}
+
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "UPDATE",
+		TableName: "students",
+		RecordID:  strconv.Itoa(studentID),
+		OldValues: map[string]interface{}{"student_id": studentID, "class_id": oldClassID, "class_name": oldClassName},
+		NewValues: map[string]interface{}{"student_id": studentID, "class_id": targetClassID, "class_name": targetClassName},
+	})
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transfer"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("%s %s muvaffaqiyatli %s sinfiga o'tkazildi!", firstName, lastName, targetClassName),
+		"student_id": studentID,
+		"user_id": userID,
+		"new_class_name": targetClassName,
+	})
 }

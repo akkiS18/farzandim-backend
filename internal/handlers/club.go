@@ -370,11 +370,17 @@ func (h *ClubHandler) ApproveClubStudent(c *gin.Context) {
 		}
 	}
 
-	_, err := db.Exec(`
+	studentID, err := resolveStudentID(db, req.StudentID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "O'quvchi topilmadi"})
+		return
+	}
+
+	_, err = db.Exec(`
 		UPDATE club_students 
 		SET status = 'APPROVED', updated_at = NOW() 
 		WHERE club_id = $1 AND student_id = $2
-	`, clubID, req.StudentID)
+	`, clubID, studentID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Tasdiqlashda xatolik: " + err.Error()})
 		return
@@ -414,11 +420,17 @@ func (h *ClubHandler) AddClubStudentDirectly(c *gin.Context) {
 		}
 	}
 
-	_, err := db.Exec(`
+	studentID, err := resolveStudentID(db, req.StudentID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "O'quvchi topilmadi (Student record not found)"})
+		return
+	}
+
+	_, err = db.Exec(`
 		INSERT INTO club_students (club_id, student_id, status)
 		VALUES ($1, $2, 'APPROVED')
 		ON CONFLICT (club_id, student_id) DO UPDATE SET status = 'APPROVED', updated_at = NOW()
-	`, clubID, req.StudentID)
+	`, clubID, studentID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Qo'shishda xatolik: " + err.Error()})
 		return
@@ -458,7 +470,13 @@ func (h *ClubHandler) RemoveClubStudent(c *gin.Context) {
 		}
 	}
 
-	_, err := db.Exec("DELETE FROM club_students WHERE club_id = $1 AND student_id = $2", clubID, req.StudentID)
+	studentID, err := resolveStudentID(db, req.StudentID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "O'quvchi topilmadi"})
+		return
+	}
+
+	_, err = db.Exec("DELETE FROM club_students WHERE club_id = $1 AND student_id = $2", clubID, studentID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "O'chirishda xatolik: " + err.Error()})
 		return
@@ -741,7 +759,11 @@ func (h *ClubHandler) SaveClubGradesBatch(c *gin.Context) {
 		if att == "" {
 			att = "PRESENT"
 		}
-		_, err := tx.Exec(query, clubID, g.StudentID, req.LessonDate, att, g.ScoreValue, g.Feedback, userID)
+		targetStudentID, err := resolveStudentIDTx(tx, g.StudentID)
+		if err != nil {
+			targetStudentID = g.StudentID
+		}
+		_, err = tx.Exec(query, clubID, targetStudentID, req.LessonDate, att, g.ScoreValue, g.Feedback, userID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Baholarni saqlashda xatolik: " + err.Error()})
 			return
@@ -906,3 +928,26 @@ func (h *ClubHandler) GetStudentClubGrades(c *gin.Context) {
 
 	c.JSON(http.StatusOK, grades)
 }
+
+func resolveStudentID(db *sql.DB, idInput int) (int, error) {
+	var realStudentID int
+	err := db.QueryRow(`
+		SELECT id FROM students WHERE id = $1 OR user_id = $1 ORDER BY (id = $1) DESC LIMIT 1
+	`, idInput).Scan(&realStudentID)
+	if err != nil {
+		return 0, err
+	}
+	return realStudentID, nil
+}
+
+func resolveStudentIDTx(tx *sql.Tx, idInput int) (int, error) {
+	var realStudentID int
+	err := tx.QueryRow(`
+		SELECT id FROM students WHERE id = $1 OR user_id = $1 ORDER BY (id = $1) DESC LIMIT 1
+	`, idInput).Scan(&realStudentID)
+	if err != nil {
+		return 0, err
+	}
+	return realStudentID, nil
+}
+

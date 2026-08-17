@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -36,12 +37,12 @@ type ImportResult struct {
 
 type TenantUserResponse struct {
 	ID          int        `json:"id"`
-	Email       *string    `json:"email,omitempty"`
-	Phone       *string    `json:"phone,omitempty"`
+	Email       *string    `json:"email"`
+	Phone       *string    `json:"phone"`
 	FirstName   string     `json:"first_name"`
 	LastName    string     `json:"last_name"`
-	MiddleName  *string    `json:"middle_name,omitempty"`
-	Passport    *string    `json:"passport,omitempty"`
+	MiddleName  *string    `json:"middle_name"`
+	Passport    *string    `json:"passport"`
 	RoleID      int        `json:"role_id"`
 	RoleName    string     `json:"role_name"`
 	ClassID     *int       `json:"class_id,omitempty"`
@@ -1576,3 +1577,702 @@ func (h *ImportHandler) ImportGrades(c *gin.Context) {
 		Errors:        []RowError{},
 	})
 }
+
+// ExportHolidayTemplate generates an Excel template for holiday import
+func (h *ImportHandler) ExportHolidayTemplate(c *gin.Context) {
+	f := excelize.NewFile()
+	sheet := "Bayramlar"
+	f.NewSheet(sheet)
+	f.DeleteSheet("Sheet1")
+
+	headers := []string{"Sana (YYYY-MM-DD)", "Bayram Nomi"}
+	for i, h := range headers {
+		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
+		f.SetCellValue(sheet, cell, h)
+	}
+
+	// Example row
+	f.SetCellValue(sheet, "A2", "2026-09-01")
+	f.SetCellValue(sheet, "B2", "O'qituvchilar kuni")
+
+	style, _ := f.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true},
+		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#D4F562"}, Pattern: 1},
+		Alignment: &excelize.Alignment{Horizontal: "center"},
+	})
+	f.SetCellStyle(sheet, "A1", "B1", style)
+	f.SetColWidth(sheet, "A", "A", 20)
+	f.SetColWidth(sheet, "B", "B", 30)
+
+	c.Header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	c.Header("Content-Disposition", `attachment; filename="bayramlar_template.xlsx"`)
+	if err := f.Write(c.Writer); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write template", "details": err.Error()})
+	}
+}
+
+// ImportHolidays bulk-imports holidays from an Excel file
+func (h *ImportHandler) ImportHolidays(c *gin.Context) {
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Excel fayl yuklanmadi", "details": err.Error()})
+		return
+	}
+
+	file, err := fileHeader.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Faylni ochib bo'lmadi"})
+		return
+	}
+	defer file.Close()
+
+	f, err := excelize.OpenReader(file)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Excel formatini o'qib bo'lmadi", "details": err.Error()})
+		return
+	}
+
+	sheetName := f.GetSheetName(0)
+	rows, err := f.GetRows(sheetName)
+	if err != nil || len(rows) < 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Excel fayl bo'sh yoki noto'g'ri formatda"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	ensureHolidayColumns(dbConn)
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failure", "details": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	var rowErrors []RowError
+	importedCount := 0
+
+	for idx, row := range rows[1:] { // skip header
+		rowNum := idx + 2
+		if len(row) < 2 {
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Sana va bayram nomi kerak"})
+			continue
+		}
+
+		dateStr := strings.TrimSpace(row[0])
+		name := strings.TrimSpace(row[1])
+
+		if dateStr == "" || name == "" {
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Sana yoki bayram nomi bo'sh"})
+			continue
+		}
+
+		holidayDate, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			// also try Excel numeric date
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Sana formati noto'g'ri: '%s', YYYY-MM-DD bo'lishi kerak", dateStr)})
+			continue
+		}
+
+		// Upsert: insert or update if already exists
+		var holidayID int
+		var isDeleted bool
+		err = tx.QueryRow("SELECT id, is_deleted FROM school_holidays WHERE holiday_date = $1", holidayDate).Scan(&holidayID, &isDeleted)
+		if err != nil && err != sql.ErrNoRows {
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Bazada tekshirishda xatolik: " + err.Error()})
+			continue
+		}
+
+		if err == sql.ErrNoRows {
+			err = tx.QueryRow(
+				`INSERT INTO school_holidays (holiday_date, name, target_levels, target_classes) VALUES ($1, $2, '{}', '{}') RETURNING id`,
+				holidayDate, name,
+			).Scan(&holidayID)
+			if err != nil {
+				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Qo'shishda xatolik: " + err.Error()})
+				continue
+			}
+		} else {
+			_, err = tx.Exec(
+				`UPDATE school_holidays SET name=$1, is_deleted=false, deleted_at=NULL, updated_at=NOW() WHERE id=$2`,
+				name, holidayID,
+			)
+			if err != nil {
+				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Yangilashda xatolik: " + err.Error()})
+				continue
+			}
+		}
+
+		importedCount++
+	}
+
+	if len(rowErrors) > 0 && importedCount == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success":        false,
+			"imported_count": 0,
+			"failed_count":   len(rowErrors),
+			"errors":         rowErrors,
+		})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, ImportResult{
+		Success:       true,
+		ImportedCount: importedCount,
+		FailedCount:   len(rowErrors),
+		Errors:        rowErrors,
+	})
+}
+
+// SmartStudentRow represents the parsed data coming from the frontend smart parser
+type SmartStudentRow struct {
+	FirstName   string `json:"firstName"`
+	LastName    string `json:"lastName"`
+	MiddleName  string `json:"middleName"`
+	ClassName   string `json:"className"`
+	BirthDate   string `json:"birthDate"`
+	INA         string `json:"ina"`
+	ParentName  string `json:"parentName"`
+	ParentPhone string `json:"parentPhone"`
+	Address     string `json:"address"`
+}
+
+type ImportStudentsSmartRequest struct {
+	Students []SmartStudentRow `json:"students"`
+}
+
+// ImportStudentsSmart processes pre-parsed and validated JSON batch data for students
+func (h *ImportHandler) ImportStudentsSmart(c *gin.Context) {
+	tenantDBVal, _ := c.Get("tenantDB")
+	tenantDB := tenantDBVal.(*sql.DB)
+
+	var req ImportStudentsSmartRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload"})
+		return
+	}
+
+	if len(req.Students) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No students to import"})
+		return
+	}
+
+	// Fetch roles
+	var studentRoleID, parentRoleID int
+	err := tenantDB.QueryRow("SELECT id FROM roles WHERE name = 'STUDENT'").Scan(&studentRoleID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "STUDENT role not found"})
+		return
+	}
+	err = tenantDB.QueryRow("SELECT id FROM roles WHERE name = 'PARENT'").Scan(&parentRoleID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "PARENT role not found"})
+		return
+	}
+
+	var rowErrors []RowError
+	successCount := 0
+	failedCount := 0
+
+	for i, sRow := range req.Students {
+		rowNum := i + 1
+		
+		if sRow.FirstName == "" || sRow.LastName == "" || sRow.ClassName == "" {
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Missing required fields"})
+			failedCount++
+			continue
+		}
+
+		tx, err := tenantDB.Begin()
+		if err != nil {
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Transaction error"})
+			failedCount++
+			continue
+		}
+
+		// 1. Resolve or create Class
+		var classID int
+		err = tx.QueryRow("SELECT id FROM classes WHERE name = $1 AND is_deleted = false", sRow.ClassName).Scan(&classID)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				err = tx.QueryRow("INSERT INTO classes (name) VALUES ($1) RETURNING id", sRow.ClassName).Scan(&classID)
+				if err != nil {
+					tx.Rollback()
+					rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Failed to create class"})
+					failedCount++
+					continue
+				}
+				audit.LogChange(c, tx, audit.LogData{Action: "CREATE", TableName: "classes", RecordID: strconv.Itoa(classID), NewValues: models.Class{ID: classID, Name: sRow.ClassName, IsDeleted: false}})
+			} else {
+				tx.Rollback()
+				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Database error resolving class"})
+				failedCount++
+				continue
+			}
+		}
+
+		// 2. Create Student User
+		studentPass := "SMART_" + time.Now().Format("20060102150405.000") + strconv.Itoa(i)
+		hashedPass, _ := bcrypt.GenerateFromPassword([]byte(studentPass), bcrypt.DefaultCost)
+
+		var studentUserID int
+		var midNamePtr *string
+		if sRow.MiddleName != "" { midNamePtr = &sRow.MiddleName }
+		
+		err = tx.QueryRow("INSERT INTO users (first_name, last_name, middle_name, password_hash, role_id) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+			sRow.FirstName, sRow.LastName, midNamePtr, string(hashedPass), studentRoleID).Scan(&studentUserID)
+		
+		if err != nil {
+			tx.Rollback()
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Failed to create student user"})
+			failedCount++
+			continue
+		}
+
+		// 3. Create Student record
+		var birthdate *time.Time
+		if sRow.BirthDate != "" {
+			if parsed, e := time.Parse("2006-01-02", sRow.BirthDate); e == nil {
+				birthdate = &parsed
+			} else if parsed, e := time.Parse("02.01.2006", sRow.BirthDate); e == nil {
+				birthdate = &parsed
+			}
+		}
+
+		var addressPtr, inaPtr *string
+		if sRow.Address != "" { addressPtr = &sRow.Address }
+		if sRow.INA != "" { inaPtr = &sRow.INA }
+
+		var studentID int
+		err = tx.QueryRow("INSERT INTO students (user_id, class_id, address, birthdate, ina) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+			studentUserID, classID, addressPtr, birthdate, inaPtr).Scan(&studentID)
+		
+		if err != nil {
+			tx.Rollback()
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Failed to create student profile"})
+			failedCount++
+			continue
+		}
+
+		// 4. Handle Parent (if provided)
+		if sRow.ParentName != "" && sRow.ParentPhone != "" {
+			var parentUserID int
+			// Try to find existing parent by phone
+			err = tx.QueryRow("SELECT id FROM users WHERE phone = $1 AND role_id = $2 AND is_deleted = false", sRow.ParentPhone, parentRoleID).Scan(&parentUserID)
+			if err != nil && err != sql.ErrNoRows {
+				tx.Rollback()
+				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Database error resolving parent"})
+				failedCount++
+				continue
+			}
+
+			if err == sql.ErrNoRows {
+				// Create new parent user
+				parts := strings.SplitN(strings.TrimSpace(sRow.ParentName), " ", 2)
+				pLast := parts[0]
+				pFirst := ""
+				if len(parts) > 1 {
+					pFirst = parts[1]
+				}
+
+				pPass := "123"
+				pHashed, _ := bcrypt.GenerateFromPassword([]byte(pPass), bcrypt.DefaultCost)
+				
+				err = tx.QueryRow("INSERT INTO users (first_name, last_name, phone, password_hash, role_id) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+					pFirst, pLast, sRow.ParentPhone, string(pHashed), parentRoleID).Scan(&parentUserID)
+				
+				if err != nil {
+					tx.Rollback()
+					rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Failed to create parent user"})
+					failedCount++
+					continue
+				}
+			}
+
+			// Link parent and student
+			_, err = tx.Exec("INSERT INTO student_parents (student_id, parent_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", studentID, parentUserID)
+			if err != nil {
+				tx.Rollback()
+				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Failed to link parent to student"})
+				failedCount++
+				continue
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Commit failed"})
+			failedCount++
+		} else {
+			successCount++
+		}
+	}
+
+	c.JSON(http.StatusOK, ImportResult{
+		Success:       failedCount == 0,
+		ImportedCount: successCount,
+		FailedCount:   failedCount,
+		Errors:        rowErrors,
+	})
+}
+
+type SmartStudentRowInput struct {
+	ClassName         string `json:"class_name"`
+	StudentFirstName  string `json:"student_first_name"`
+	StudentLastName   string `json:"student_last_name"`
+	StudentMiddleName string `json:"student_middle_name"`
+	StudentBirthdate  string `json:"student_birthdate"`
+	StudentDocumentNo string `json:"student_document_no"`
+	Address           string `json:"address"`
+	FatherFullName    string `json:"father_full_name"`
+	FatherDocumentNo  string `json:"father_document_no"`
+	FatherPhone       string `json:"father_phone"`
+	MotherFullName    string `json:"mother_full_name"`
+	MotherDocumentNo  string `json:"mother_document_no"`
+	MotherPhone       string `json:"mother_phone"`
+}
+
+type BatchSmartStudentImportRequest struct {
+	Students []SmartStudentRowInput `json:"students"`
+}
+
+// BatchImportStudentsSmart handles importing students with student, father, and mother data
+func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
+	tenantDBVal, _ := c.Get("tenantDB")
+	tenantDB := tenantDBVal.(*sql.DB)
+
+	var req BatchSmartStudentImportRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Noto'g'ri so'rov formati (JSON format error)"})
+		return
+	}
+
+	if len(req.Students) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Saqlash uchun o'quvchilar ro'yxati bo'sh"})
+		return
+	}
+
+	var studentRoleID int
+	err := tenantDB.QueryRow("SELECT id FROM roles WHERE name = 'STUDENT'").Scan(&studentRoleID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "STUDENT roli topilmadi"})
+		return
+	}
+
+	var parentRoleID int
+	err = tenantDB.QueryRow("SELECT id FROM roles WHERE name = 'PARENT'").Scan(&parentRoleID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "PARENT roli topilmadi"})
+		return
+	}
+
+	var rowErrors []RowError
+	successCount := 0
+	failedCount := 0
+
+	splitFIO := func(fullName string) (string, string, string) {
+		trimmed := strings.TrimSpace(fullName)
+		if trimmed == "" {
+			return "", "", ""
+		}
+		parts := strings.Fields(trimmed)
+		last := parts[0]
+		first := ""
+		middle := ""
+		if len(parts) > 1 {
+			first = parts[1]
+		}
+		if len(parts) > 2 {
+			middle = strings.Join(parts[2:], " ")
+		}
+		return last, first, middle
+	}
+
+	for idx, st := range req.Students {
+		rowNum := idx + 1
+		sinfName := strings.TrimSpace(st.ClassName)
+		firstName := strings.TrimSpace(st.StudentFirstName)
+		lastName := strings.TrimSpace(st.StudentLastName)
+		middleName := strings.TrimSpace(st.StudentMiddleName)
+
+		if firstName == "" && lastName != "" {
+			l, f, m := splitFIO(lastName)
+			if f != "" {
+				lastName = l
+				firstName = f
+				if middleName == "" {
+					middleName = m
+				}
+			} else {
+				firstName = "O'quvchi"
+			}
+		} else if lastName == "" && firstName != "" {
+			l, f, m := splitFIO(firstName)
+			if l != "" {
+				lastName = l
+				firstName = f
+				if middleName == "" {
+					middleName = m
+				}
+			} else {
+				lastName = "O'quvchi"
+			}
+		}
+
+		if firstName == "" {
+			firstName = "O'quvchi"
+		}
+		if lastName == "" {
+			lastName = fmt.Sprintf("Nomalum_%d", rowNum)
+		}
+		if sinfName == "" {
+			sinfName = "1-A"
+		}
+
+		tx, err := tenantDB.Begin()
+		if err != nil {
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Baza tranzaksiyasi boshlanmadi"})
+			failedCount++
+			continue
+		}
+
+		// 1. Resolve Class — Return error if class does not exist
+		var classID int
+		classQuery := `
+			SELECT id FROM classes 
+			WHERE (
+				LOWER(name) = LOWER($1) 
+				OR REGEXP_REPLACE(UPPER(TRIM(name)), '\s*-\s*', '-', 'g') = REGEXP_REPLACE(UPPER(TRIM($1)), '\s*-\s*', '-', 'g')
+			) AND is_deleted = false`
+		err = tx.QueryRow(classQuery, sinfName).Scan(&classID)
+		if err != nil {
+			tx.Rollback()
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Sinf '%s' topilmadi", sinfName)})
+			failedCount++
+			continue
+		}
+
+		// 2. Create Student User
+		studentPass := "STUDENT_NO_LOGIN_" + fmt.Sprintf("%d_%d", time.Now().UnixNano(), rowNum)
+		hashedStudentPass, _ := bcrypt.GenerateFromPassword([]byte(studentPass), bcrypt.DefaultCost)
+
+		var middleNamePtr *string
+		if middleName != "" {
+			middleNamePtr = &middleName
+		}
+
+		var studentUserID int
+		err = tx.QueryRow(`
+			INSERT INTO users (first_name, last_name, middle_name, phone, password_hash, role_id)
+			VALUES ($1, $2, $3, NULL, $4, $5)
+			RETURNING id`, firstName, lastName, middleNamePtr, string(hashedStudentPass), studentRoleID).Scan(&studentUserID)
+
+		if err != nil {
+			tx.Rollback()
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("O'quvchi accountini yaratishda xatolik: %v", err)})
+			failedCount++
+			continue
+		}
+
+		// 3. Create Student profile
+		var addressPtr *string
+		if strings.TrimSpace(st.Address) != "" && st.Address != "-" {
+			a := strings.TrimSpace(st.Address)
+			addressPtr = &a
+		}
+
+		var birthdatePtr *time.Time
+		if strings.TrimSpace(st.StudentBirthdate) != "" && st.StudentBirthdate != "-" {
+			bdStr := strings.TrimSpace(st.StudentBirthdate)
+			formats := []string{
+				"2006-01-02",
+				"02.01.2006",
+				"01.02.2006",
+				"02/01/2006",
+				"01/02/2006",
+				"2006/01/02",
+				"02,01,2006",
+			}
+			for _, fmtStr := range formats {
+				if parsed, err := time.Parse(fmtStr, bdStr); err == nil {
+					birthdatePtr = &parsed
+					break
+				}
+			}
+		}
+
+		var inaPtr *string
+		if strings.TrimSpace(st.StudentDocumentNo) != "" && st.StudentDocumentNo != "-" {
+			d := NormalizeDocumentNo(st.StudentDocumentNo)
+			inaPtr = &d
+		}
+
+		var studentID int
+		err = tx.QueryRow(`
+			INSERT INTO students (user_id, class_id, address, birthdate, ina)
+			VALUES ($1, $2, $3, $4, $5)
+			RETURNING id`, studentUserID, classID, addressPtr, birthdatePtr, inaPtr).Scan(&studentID)
+
+		if err != nil {
+			tx.Rollback()
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("O'quvchi profilida xatolik: %v", err)})
+			failedCount++
+			continue
+		}
+
+		// Helper to add parent
+		createOrGetParent := func(fullName, passport, phone, relType string) error {
+			cleanName := strings.TrimSpace(fullName)
+			cleanPhone := strings.TrimSpace(phone)
+			cleanDoc := NormalizeDocumentNo(passport)
+
+			if cleanName == "" || cleanName == "-" {
+				return nil // Skip if parent not provided
+			}
+
+			pLast, pFirst, pMiddle := splitFIO(cleanName)
+			if pFirst == "" && pLast != "" {
+				pFirst = "Vasiy"
+			}
+
+			var pPhonePtr *string
+			found := false
+			var parentUserID int
+
+			if cleanPhone != "" && cleanPhone != "-" && !strings.Contains(strings.ToLower(cleanPhone), "yo'q") {
+				// 1. Check if exact parent profile (same phone AND same name) already exists
+				var existingID int
+				err := tx.QueryRow(`
+					SELECT id FROM users 
+					WHERE phone = $1 AND LOWER(first_name) = LOWER($2) AND LOWER(last_name) = LOWER($3) AND role_id = $4 AND is_deleted = false`, 
+					cleanPhone, pFirst, pLast, parentRoleID).Scan(&existingID)
+				if err == nil {
+					parentUserID = existingID
+					found = true
+				} else {
+					// 2. Check if phone is already taken by another user
+					var phoneCount int
+					_ = tx.QueryRow("SELECT COUNT(1) FROM users WHERE phone = $1 AND is_deleted = false", cleanPhone).Scan(&phoneCount)
+					if phoneCount == 0 {
+						pPhonePtr = &cleanPhone
+					} else {
+						// Phone taken by spouse/relative: pass NULL to avoid unique constraint conflict
+						pPhonePtr = nil
+					}
+				}
+			}
+
+			var pDocPtr *string
+			if cleanDoc != "" && cleanDoc != "-" && !strings.Contains(strings.ToLower(cleanDoc), "vafot") {
+				pDocPtr = &cleanDoc
+			}
+
+			if !found && pDocPtr != nil {
+				var existingPassID int
+				err := tx.QueryRow(`
+					SELECT u.id FROM users u
+					JOIN roles r ON u.role_id = r.id
+					WHERE r.name = 'PARENT' AND (LOWER(TRIM(u.passport)) = LOWER($1) OR REGEXP_REPLACE(LOWER(u.passport), '[^a-z0-9]', '', 'g') = REGEXP_REPLACE(LOWER($1), '[^a-z0-9]', '', 'g'))
+					  AND u.is_deleted = false
+					LIMIT 1
+				`, *pDocPtr).Scan(&existingPassID)
+				if err == nil {
+					parentUserID = existingPassID
+					found = true
+				}
+			}
+
+			var pMiddlePtr *string
+			if pMiddle != "" {
+				pMiddlePtr = &pMiddle
+			}
+
+			if !found {
+				pPass := "123"
+				pHashed, _ := bcrypt.GenerateFromPassword([]byte(pPass), bcrypt.DefaultCost)
+
+				err := tx.QueryRow(`
+					INSERT INTO users (first_name, last_name, middle_name, phone, passport, document_no, password_hash, role_id)
+					VALUES ($1, $2, $3, $4, $5, $5, $6, $7)
+					RETURNING id`, pFirst, pLast, pMiddlePtr, pPhonePtr, pDocPtr, string(pHashed), parentRoleID).Scan(&parentUserID)
+
+				if err != nil {
+					return fmt.Errorf("Vasiy accountida xatolik: %v", err)
+				}
+			} else if pDocPtr != nil {
+				_, _ = tx.Exec("UPDATE users SET passport = $1, document_no = $1 WHERE id = $2 AND (document_no IS NULL OR document_no = '')", *pDocPtr, parentUserID)
+			}
+
+			_, err = tx.Exec(`
+				INSERT INTO student_parents (student_id, parent_id, relation_type)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (student_id, parent_id) DO NOTHING`, studentID, parentUserID, relType)
+			if err != nil {
+				return fmt.Errorf("Vasiyni o'quvchiga bog'lashda xatolik: %v", err)
+			}
+			return nil
+		}
+
+		// 4. Father
+		if err := createOrGetParent(st.FatherFullName, st.FatherDocumentNo, st.FatherPhone, "ota"); err != nil {
+			tx.Rollback()
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: err.Error()})
+			failedCount++
+			continue
+		}
+
+		// 5. Mother
+		if err := createOrGetParent(st.MotherFullName, st.MotherDocumentNo, st.MotherPhone, "ona"); err != nil {
+			tx.Rollback()
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: err.Error()})
+			failedCount++
+			continue
+		}
+
+		if err := tx.Commit(); err != nil {
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Commit xatosi"})
+			failedCount++
+		} else {
+			successCount++
+		}
+	}
+
+	c.JSON(http.StatusOK, ImportResult{
+		Success:       failedCount == 0,
+		ImportedCount: successCount,
+		FailedCount:   failedCount,
+		Errors:        rowErrors,
+	})
+}
+
+func NormalizeDocumentNo(doc string) string {
+	clean := strings.TrimSpace(doc)
+	if clean == "" || clean == "-" || strings.EqualFold(clean, "yo'q") {
+		return clean
+	}
+
+	// 1. Birth certificate (e.g. I-NA. 086354 or I-NA.086354 or i-na 086354 -> I-NA 086354)
+	reBirth := regexp.MustCompile(`(?i)^([I|V|X]+-[A-Z]{2})[\s\.]*(\d+)$`)
+	if matches := reBirth.FindStringSubmatch(clean); len(matches) == 3 {
+		return fmt.Sprintf("%s %s", strings.ToUpper(matches[1]), matches[2])
+	}
+
+	// Remove dots after I-NA prefix
+	reDotsPrefix := regexp.MustCompile(`(?i)([I|V|X]+-[A-Z]{2})\s*\.\s*`)
+	clean = reDotsPrefix.ReplaceAllString(clean, "$1 ")
+
+	// 2. Passport series + number (e.g. AB 1234567 or AB. 1234567 -> AB1234567)
+	rePass := regexp.MustCompile(`(?i)^([A-Z]{2})[\s\.]*(\d+)$`)
+	if matches := rePass.FindStringSubmatch(clean); len(matches) == 3 {
+		return fmt.Sprintf("%s%s", strings.ToUpper(matches[1]), matches[2])
+	}
+
+	return clean
+}
+

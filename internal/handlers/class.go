@@ -2,8 +2,10 @@ package handlers
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/farzandim/backend/internal/audit"
@@ -79,14 +81,15 @@ func (h *ClassHandler) ListClasses(c *gin.Context) {
 			return
 		}
 		query := `
-			SELECT c.id, c.name, c.level, s.id as subject_id, s.name as subject_name,
-			       (ct.is_main_teacher OR r.name = 'MAIN_TEACHER') as is_main_teacher
+			SELECT c.id, c.name, c.level,
+			       COALESCE(MAX(ct.subject_id), 0) as subject_id,
+			       COALESCE(MAX(s.name), '') as subject_name,
+			       BOOL_OR(ct.is_main_teacher) as is_main_teacher
 			FROM classes c
-			JOIN class_teachers ct ON ct.class_id = c.id
-			JOIN users u ON ct.teacher_id = u.id
-			JOIN roles r ON u.role_id = r.id
-			JOIN subjects s ON ct.subject_id = s.id
-			WHERE c.is_deleted = false AND ct.is_deleted = false AND s.is_deleted = false AND ct.teacher_id = $1
+			JOIN class_teachers ct ON ct.class_id = c.id AND ct.is_deleted = false
+			LEFT JOIN subjects s ON ct.subject_id = s.id AND s.is_deleted = false
+			WHERE c.is_deleted = false AND ct.teacher_id = $1
+			GROUP BY c.id, c.name, c.level
 			ORDER BY c.name ASC`
 		rows, err = dbConn.Query(query, teacherID)
 	} else {
@@ -153,13 +156,29 @@ func (h *ClassHandler) CreateClass(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	// Insert Class record
+	// 1. Check if an active class already exists with this name
+	var activeExists bool
+	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM classes WHERE LOWER(name) = LOWER($1) AND is_deleted = false)", strings.TrimSpace(req.Name)).Scan(&activeExists)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing class record", "details": err.Error()})
+		return
+	}
+	if activeExists {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Ushbu nomdagi faol sinf allaqachon mavjud"})
+		return
+	}
+
+	// 2. If an old soft-deleted class exists with this exact name, rename it to free up unique name constraint
+	_, _ = tx.Exec("UPDATE classes SET name = name || '__deleted_' || id WHERE LOWER(name) = LOWER($1) AND is_deleted = true", strings.TrimSpace(req.Name))
+
+	// 3. Create fresh new Class record
 	var classID int
 	lvlVal := 1
 	if req.Level != nil {
 		lvlVal = *req.Level
 	}
-	err = tx.QueryRow("INSERT INTO classes (name, level) VALUES ($1, $2) RETURNING id", req.Name, lvlVal).Scan(&classID)
+
+	err = tx.QueryRow("INSERT INTO classes (name, level) VALUES ($1, $2) RETURNING id", strings.TrimSpace(req.Name), lvlVal).Scan(&classID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write class record", "details": err.Error()})
 		return
@@ -295,9 +314,10 @@ func (h *ClassHandler) DeleteClass(c *gin.Context) {
 		return
 	}
 
-	// Perform Soft Delete (flag changes instead of physical deletion)
+	// Perform Soft Delete: append __deleted_<id> suffix to class name to free unique name constraint
 	now := time.Now()
-	_, err = tx.Exec("UPDATE classes SET is_deleted = true, deleted_at = $1 WHERE id = $2", now, classID)
+	deletedName := fmt.Sprintf("%s__deleted_%d", oldClass.Name, classID)
+	_, err = tx.Exec("UPDATE classes SET name = $1, is_deleted = true, deleted_at = $2 WHERE id = $3", deletedName, now, classID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to execute soft delete database operation", "details": err.Error()})
 		return

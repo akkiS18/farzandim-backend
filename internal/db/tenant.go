@@ -139,6 +139,17 @@ func (tm *TenantManager) CreateAndMigrateTenantDB(pgRootURL string, schoolUUID s
 
 	err = m.Up()
 	if err != nil && err != migrate.ErrNoChange {
+		if strings.Contains(err.Error(), "Dirty") || strings.Contains(err.Error(), "dirty") {
+			v, dirty, verr := m.Version()
+			if verr == nil && dirty {
+				log.Printf("Detected dirty database state for %s at version %d, force clearing dirty state...", dbName, v)
+				if errForce := m.Force(int(v)); errForce == nil {
+					err = m.Up() // retry up after clearing dirty flag
+				}
+			}
+		}
+	}
+	if err != nil && err != migrate.ErrNoChange {
 		return "", fmt.Errorf("failed to run migrations: %w", err)
 	}
 

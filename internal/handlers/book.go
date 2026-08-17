@@ -388,16 +388,30 @@ func (h *BookHandler) Update(c *gin.Context) {
 		    author = COALESCE(NULLIF($2, ''), author),
 		    description = COALESCE(NULLIF($3, ''), description),
 		    cover_url = COALESCE(NULLIF($4, ''), cover_url),
-		    category_id = COALESCE($5, category_id),
-		    download_link = COALESCE(NULLIF($6, ''), download_link),
-		    location_in_school = COALESCE(NULLIF($7, ''), location_in_school),
+		    file_url = COALESCE(NULLIF($5, ''), file_url),
+		    file_size = COALESCE(NULLIF($6, ''), file_size),
+		    category_id = COALESCE($7, category_id),
+		    download_link = COALESCE(NULLIF($8, ''), download_link),
+		    location_in_school = COALESCE(NULLIF($9, ''), location_in_school),
+		    target_levels = COALESCE($10, target_levels),
+		    class_ids = COALESCE($11, class_ids),
 		    updated_at = NOW()
-		WHERE id = $8 AND is_deleted = false
+		WHERE id = $12 AND is_deleted = false
 		RETURNING id, title, author, description, cover_url, file_url, file_size, category_id, download_link, location_in_school, created_by, target_levels, class_ids, created_at, updated_at`
 
 	var item models.Book
 	var catID, createdBy sql.NullInt64
 	var tLevels, cIDs pq.Int64Array
+
+	var targetLevelsArg interface{} = nil
+	if input.TargetLevels != nil {
+		targetLevelsArg = pq.Int64Array(input.TargetLevels)
+	}
+
+	var classIDsArg interface{} = nil
+	if input.ClassIDs != nil {
+		classIDsArg = pq.Int64Array(input.ClassIDs)
+	}
 
 	err = tx.QueryRow(
 		query,
@@ -405,9 +419,13 @@ func (h *BookHandler) Update(c *gin.Context) {
 		input.Author,
 		input.Description,
 		input.CoverURL,
+		input.FileURL,
+		input.FileSize,
 		input.CategoryID,
 		input.DownloadLink,
 		input.LocationInSchool,
+		targetLevelsArg,
+		classIDsArg,
 		bookID,
 	).Scan(
 		&item.ID,
