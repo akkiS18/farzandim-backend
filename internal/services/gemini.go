@@ -186,7 +186,7 @@ MUHIM TASHKILIY QOIDALAR:
 %s
 
 ---SECTION: FANLAR VA KITOBXONLIK TAHLILI---
-(Qaysi fanlarda a'lo o'zlashtiryapti va %s)
+(Har bir fan va olgan bahosini (masalan: Matematika: 5 - Nazorat ishidan a'lo natija) alohida sanab, qaysi fanlarda a'lo o'zlashtirganligi hamda %s)
 
 ---SECTION: OTA-ONAGA AMALIY TAVSIYA---
 (Uydan turib farzandiga yordam berish bo'yicha yagona, qisqa va eng muhim bitta pedagogik maslahat. Ro'yxat qilmang, faqat 1-2 jumlada.)`,
@@ -201,7 +201,7 @@ MUHIM TASHKILIY QOIDALAR:
 		}(),
 		func() string {
 			if hasPrevWeek {
-				return "---SECTION: DINAMIKA TAHLILI---\n(O'tgan hafta ko'rsatkichlari bilan solishtirma tahlil va o'sish dinamikasi.)"
+				return fmt.Sprintf("---SECTION: DINAMIKA TAHLILI---\n(O'tgan haftadagi o'rtacha ball (%.2f) bilan joriy haftadagi o'rtacha ball (%.2f) o'rtasidagi solishtirma tahlil, o'sish yoki o'zgarish dinamikasini aniq sonlar bilan ko'rsating.)", data.PrevAverageGrade, data.CurrentAverageGrade)
 			}
 			return ""
 		}(),

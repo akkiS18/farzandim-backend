@@ -538,16 +538,16 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 	var totalGradeCount int
 
 	gRows, err := dbConn.Query(`
-		SELECT sub.name, COALESCE(g.numeric_value, 0.0)
+		SELECT sub.name, COALESCE(g.numeric_value, 0.0), COALESCE(g.grade_category, 'DAILY')
 		FROM grades g
 		JOIN subjects sub ON g.subject_id = sub.id
 		WHERE g.student_id = $1 AND g.grade_date >= $2 AND g.grade_date <= $3 AND g.is_deleted = false`, studentID, startStr, endStr)
 	if err == nil {
 		for gRows.Next() {
-			var subName string
+			var subName, category string
 			var val float64
-			if err := gRows.Scan(&subName, &val); err == nil {
-				gradeStrings = append(gradeStrings, fmt.Sprintf("%s: %.0f", subName, val))
+			if err := gRows.Scan(&subName, &val, &category); err == nil {
+				gradeStrings = append(gradeStrings, fmt.Sprintf("%s: %.0f (Turi: %s)", subName, val, category))
 				totalGradeSum += val
 				totalGradeCount++
 			}
@@ -599,13 +599,18 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 		bRows.Close()
 	}
 
-	// 6. Fetch Previous Week's Report for Comparison
+	// 6. Fetch Previous Week's Report or Grades for Comparison
 	prevWeekNum := weekNum - 1
 	prevYear := year
 	if prevWeekNum <= 0 {
 		prevWeekNum = 52
 		prevYear = year - 1
 	}
+
+	prevMonday := monday.AddDate(0, 0, -7)
+	prevSunday := sunday.AddDate(0, 0, -7)
+	prevStartStr := prevMonday.Format("2006-01-02")
+	prevEndStr := prevSunday.Format("2006-01-02")
 
 	var prevReportText string
 	var prevAvgGrade float64 = 0.0
@@ -623,6 +628,15 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 				prevAvgGrade = avg
 			}
 		}
+	}
+
+	// Direct DB fallback for previous week average grade if no previous AI report exists
+	if prevAvgGrade == 0.0 {
+		_ = dbConn.QueryRow(`
+			SELECT COALESCE(AVG(g.numeric_value), 0.0)
+			FROM grades g
+			WHERE g.student_id = $1 AND g.grade_date >= $2 AND g.grade_date <= $3 AND g.is_deleted = false`,
+			studentID, prevStartStr, prevEndStr).Scan(&prevAvgGrade)
 	}
 
 	// 7. Call Gemini AI Service
