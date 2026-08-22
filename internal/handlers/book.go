@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/farzandim/backend/internal/audit"
@@ -14,6 +15,7 @@ import (
 	"github.com/farzandim/backend/internal/storage"
 	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
+	"github.com/xuri/excelize/v2"
 )
 
 type BookHandler struct{}
@@ -570,5 +572,210 @@ func (h *BookHandler) UploadFile(c *gin.Context) {
 		"file_url":  urlPath,
 		"file_name": file.Filename,
 		"file_size": fmt.Sprintf("%.2f MB", float64(file.Size)/(1024*1024)),
+	})
+}
+
+// ExportBookTemplate generates an Excel template matching the required format
+func (h *BookHandler) ExportBookTemplate(c *gin.Context) {
+	f := excelize.NewFile()
+	sheet := "Kitoblar"
+	f.NewSheet(sheet)
+	f.DeleteSheet("Sheet1")
+
+	// Headers matching user's specification exactly:
+	headers := []string{
+		"Kitob nomi",
+		"Muallif",
+		"muqova rasmi linki",
+		"kitob download linki",
+		"kitobning kutubxona javonidagi o'rni",
+		"Tavsif / Qisqacha Mazmun",
+	}
+
+	for i, hdr := range headers {
+		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
+		f.SetCellValue(sheet, cell, hdr)
+	}
+
+	// Sample rows
+	f.SetCellValue(sheet, "A2", "Sariq devni minib")
+	f.SetCellValue(sheet, "B2", "Xudoyberdi To'xtaboyev")
+	f.SetCellValue(sheet, "C2", "https://example.com/cover1.jpg")
+	f.SetCellValue(sheet, "D2", "https://example.com/book1.pdf")
+	f.SetCellValue(sheet, "E2", "A-12 javon, 3-qator")
+	f.SetCellValue(sheet, "F2", "Sarguzasht va tarbiyaviy qissa")
+
+	f.SetCellValue(sheet, "A3", "Yulduzli tunlar")
+	f.SetCellValue(sheet, "B3", "Pirimqul Qodirov")
+	f.SetCellValue(sheet, "C3", "")
+	f.SetCellValue(sheet, "D3", "")
+	f.SetCellValue(sheet, "E3", "B-4 javon")
+	f.SetCellValue(sheet, "F3", "Tarixiy asar")
+
+	style, _ := f.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true, Color: "1D1E26"},
+		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#D4F562"}, Pattern: 1},
+		Alignment: &excelize.Alignment{Horizontal: "center", Vertical: "center"},
+	})
+	f.SetCellStyle(sheet, "A1", "F1", style)
+	f.SetRowHeight(sheet, 1, 26)
+
+	f.SetColWidth(sheet, "A", "A", 28)
+	f.SetColWidth(sheet, "B", "B", 24)
+	f.SetColWidth(sheet, "C", "C", 30)
+	f.SetColWidth(sheet, "D", "D", 30)
+	f.SetColWidth(sheet, "E", "E", 32)
+	f.SetColWidth(sheet, "F", "F", 40)
+
+	c.Header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	c.Header("Content-Disposition", `attachment; filename="kitoblar_shablon.xlsx"`)
+	if err := f.Write(c.Writer); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Shablon faylni yaratib bo'lmadi", "details": err.Error()})
+	}
+}
+
+// ImportBooks imports books in bulk from an uploaded Excel file
+func (h *BookHandler) ImportBooks(c *gin.Context) {
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Excel fayl yuklanmadi", "details": err.Error()})
+		return
+	}
+
+	categoryIDStr := c.PostForm("category_id")
+	var categoryID *int
+	if categoryIDStr != "" {
+		if cId, err := strconv.Atoi(categoryIDStr); err == nil && cId > 0 {
+			categoryID = &cId
+		}
+	}
+
+	file, err := fileHeader.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Faylni ochib bo'lmadi"})
+		return
+	}
+	defer file.Close()
+
+	f, err := excelize.OpenReader(file)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Excel formatini o'qib bo'lmadi", "details": err.Error()})
+		return
+	}
+
+	sheetName := f.GetSheetName(0)
+	rows, err := f.GetRows(sheetName)
+	if err != nil || len(rows) < 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Excel fayl bo'sh yoki noto'g'ri formatda"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	userIDVal, _ := c.Get("userID")
+	userIDStr, _ := userIDVal.(string)
+	currentUserID, _ := strconv.Atoi(userIDStr)
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failure", "details": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	type RowError struct {
+		Row   int    `json:"row"`
+		Error string `json:"error"`
+	}
+
+	var rowErrors []RowError
+	importedCount := 0
+
+	for idx, row := range rows[1:] { // skip header row
+		rowNum := idx + 2
+
+		// Extract columns safely
+		title := ""
+		author := ""
+		coverURL := ""
+		downloadLink := ""
+		locationInSchool := ""
+		description := ""
+
+		if len(row) > 0 {
+			title = strings.TrimSpace(row[0])
+		}
+		if len(row) > 1 {
+			author = strings.TrimSpace(row[1])
+		}
+		if len(row) > 2 {
+			coverURL = strings.TrimSpace(row[2])
+		}
+		if len(row) > 3 {
+			downloadLink = strings.TrimSpace(row[3])
+		}
+		if len(row) > 4 {
+			locationInSchool = strings.TrimSpace(row[4])
+		}
+		if len(row) > 5 {
+			description = strings.TrimSpace(row[5])
+		}
+
+		// Check if row is completely empty
+		if title == "" && author == "" && coverURL == "" && downloadLink == "" && locationInSchool == "" && description == "" {
+			continue
+		}
+
+		// Mandatory field validation: Kitob nomi (title) is required by DB schema (NOT NULL)
+		if title == "" {
+			rowErrors = append(rowErrors, RowError{
+				Row:   rowNum,
+				Error: "Kitob nomi (majburiy maydon) to'ldirilmagan",
+			})
+			continue
+		}
+
+		var newBookID int
+		err := tx.QueryRow(`
+			INSERT INTO books (
+				title, author, description, cover_url, file_url, download_link,
+				location_in_school, created_by, category_id, is_deleted, created_at, updated_at
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false, NOW(), NOW())
+			RETURNING id
+		`, title, author, description, coverURL, downloadLink, downloadLink, locationInSchool, currentUserID, categoryID).Scan(&newBookID)
+
+		if err != nil {
+			rowErrors = append(rowErrors, RowError{
+				Row:   rowNum,
+				Error: fmt.Sprintf("Saqlashda xatolik: %s", err.Error()),
+			})
+			continue
+		}
+
+		importedCount++
+	}
+
+	if len(rowErrors) > 0 && importedCount == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success":        false,
+			"imported_count": 0,
+			"failed_count":   len(rowErrors),
+			"errors":         rowErrors,
+		})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":        true,
+		"imported_count": importedCount,
+		"failed_count":   len(rowErrors),
+		"errors":         rowErrors,
 	})
 }

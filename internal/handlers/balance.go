@@ -830,21 +830,23 @@ func (h *BalanceHandler) executePlanSweep(dbConn *sql.DB, plan models.ChargePlan
 	}
 	clsRows.Close()
 
-	// Fetch students
-	stdRows, _ := dbConn.Query("SELECT student_id FROM charge_plan_students WHERE charge_plan_id = $1", plan.ID)
-	var directStudents []int
+	// Fetch direct students with their join date
+	stdRows, _ := dbConn.Query(`
+		SELECT cps.student_id, u.created_at 
+		FROM charge_plan_students cps
+		JOIN students s ON cps.student_id = s.id
+		JOIN users u ON s.user_id = u.id
+		WHERE cps.charge_plan_id = $1 AND s.is_deleted = false`, plan.ID)
+	
+	studentJoinedDates := make(map[int]time.Time)
 	for stdRows.Next() {
 		var s int
-		if err := stdRows.Scan(&s); err == nil {
-			directStudents = append(directStudents, s)
+		var joinedAt time.Time
+		if err := stdRows.Scan(&s, &joinedAt); err == nil {
+			studentJoinedDates[s] = joinedAt
 		}
 	}
 	stdRows.Close()
-
-	studentIDs := make(map[int]bool)
-	for _, sid := range directStudents {
-		studentIDs[sid] = true
-	}
 
 	// Fetch level matches
 	if len(levels) > 0 {
@@ -855,16 +857,18 @@ func (h *BalanceHandler) executePlanSweep(dbConn *sql.DB, plan models.ChargePlan
 			args[i] = l
 		}
 		query := fmt.Sprintf(`
-			SELECT s.id 
+			SELECT s.id, u.created_at 
 			FROM students s 
+			JOIN users u ON s.user_id = u.id
 			JOIN classes c ON s.class_id = c.id 
 			WHERE s.is_deleted = false AND c.level IN (%s)`, strings.Join(qMarks, ","))
 		rows, err := dbConn.Query(query, args...)
 		if err == nil {
 			for rows.Next() {
 				var sid int
-				if err := rows.Scan(&sid); err == nil {
-					studentIDs[sid] = true
+				var joinedAt time.Time
+				if err := rows.Scan(&sid, &joinedAt); err == nil {
+					studentJoinedDates[sid] = joinedAt
 				}
 			}
 			rows.Close()
@@ -880,15 +884,17 @@ func (h *BalanceHandler) executePlanSweep(dbConn *sql.DB, plan models.ChargePlan
 			args[i] = c
 		}
 		query := fmt.Sprintf(`
-			SELECT id 
-			FROM students 
-			WHERE is_deleted = false AND class_id IN (%s)`, strings.Join(qMarks, ","))
+			SELECT s.id, u.created_at 
+			FROM students s 
+			JOIN users u ON s.user_id = u.id
+			WHERE s.is_deleted = false AND s.class_id IN (%s)`, strings.Join(qMarks, ","))
 		rows, err := dbConn.Query(query, args...)
 		if err == nil {
 			for rows.Next() {
 				var sid int
-				if err := rows.Scan(&sid); err == nil {
-					studentIDs[sid] = true
+				var joinedAt time.Time
+				if err := rows.Scan(&sid, &joinedAt); err == nil {
+					studentJoinedDates[sid] = joinedAt
 				}
 			}
 			rows.Close()
@@ -898,7 +904,10 @@ func (h *BalanceHandler) executePlanSweep(dbConn *sql.DB, plan models.ChargePlan
 	chargedCount := 0
 	now := time.Now()
 
-	for sid := range studentIDs {
+	for sid, joinedAt := range studentJoinedDates {
+		// Normalize joinedAt to start of day UTC
+		joinedDateStart := time.Date(joinedAt.Year(), joinedAt.Month(), joinedAt.Day(), 0, 0, 0, 0, time.UTC)
+
 		// Traverse billing months from plan.StartDate to current month
 		currentMonth := time.Date(plan.StartDate.Year(), plan.StartDate.Month(), 1, 0, 0, 0, 0, time.UTC)
 		limitMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
@@ -915,8 +924,11 @@ func (h *BalanceHandler) executePlanSweep(dbConn *sql.DB, plan models.ChargePlan
 
 			scheduledChargeDate := time.Date(currentMonth.Year(), currentMonth.Month(), chargeDay, 0, 0, 0, 0, time.UTC)
 
-			// Only process if the scheduled charge day is reached, and fits within plan boundaries
-			if !scheduledChargeDate.After(now) && !scheduledChargeDate.Before(plan.StartDate) && !scheduledChargeDate.After(plan.EndDate) {
+			// Only process if:
+			// 1. Scheduled charge date is ON OR AFTER the student's join date (joinedDateStart)
+			// 2. Scheduled charge date is <= now
+			// 3. Fits within plan boundaries
+			if !scheduledChargeDate.Before(joinedDateStart) && !scheduledChargeDate.After(now) && !scheduledChargeDate.Before(plan.StartDate) && !scheduledChargeDate.After(plan.EndDate) {
 				var exists bool
 				err := dbConn.QueryRow("SELECT EXISTS(SELECT 1 FROM charge_logs WHERE charge_plan_id = $1 AND student_id = $2 AND billing_month = $3)", plan.ID, sid, currentMonth).Scan(&exists)
 				if err == nil && !exists {
@@ -986,11 +998,13 @@ func (h *BalanceHandler) GetNextCharge(c *gin.Context) {
 
 	var classID int
 	var classLevel int
+	var studentCreatedAt time.Time
 	err = dbConn.QueryRow(`
-		SELECT s.class_id, COALESCE(c.level, 1) 
+		SELECT s.class_id, COALESCE(c.level, 1), u.created_at 
 		FROM students s 
+		JOIN users u ON s.user_id = u.id
 		LEFT JOIN classes c ON s.class_id = c.id 
-		WHERE s.id = $1 AND s.is_deleted = false`, studentID).Scan(&classID, &classLevel)
+		WHERE s.id = $1 AND s.is_deleted = false`, studentID).Scan(&classID, &classLevel, &studentCreatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "O'quvchi topilmadi"})
@@ -999,6 +1013,8 @@ func (h *BalanceHandler) GetNextCharge(c *gin.Context) {
 		}
 		return
 	}
+
+	studentJoinedDateStart := time.Date(studentCreatedAt.Year(), studentCreatedAt.Month(), studentCreatedAt.Day(), 0, 0, 0, 0, time.UTC)
 
 	rows, err := dbConn.Query("SELECT id, name, amount, start_date, end_date, charge_day FROM charge_plans")
 	if err != nil {
@@ -1045,7 +1061,7 @@ func (h *BalanceHandler) GetNextCharge(c *gin.Context) {
 			}
 			scheduledDate := time.Date(currentMonth.Year(), currentMonth.Month(), chargeDay, 0, 0, 0, 0, time.UTC)
 
-			if !scheduledDate.Before(p.StartDate) && !scheduledDate.After(p.EndDate) {
+			if !scheduledDate.Before(studentJoinedDateStart) && !scheduledDate.Before(p.StartDate) && !scheduledDate.After(p.EndDate) {
 				var alreadyCharged bool
 				dbConn.QueryRow("SELECT EXISTS(SELECT 1 FROM charge_logs WHERE charge_plan_id = $1 AND student_id = $2 AND billing_month = $3)", p.ID, studentID, currentMonth).Scan(&alreadyCharged)
 

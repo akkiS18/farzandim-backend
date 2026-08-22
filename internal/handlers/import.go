@@ -2251,24 +2251,40 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 	})
 }
 
+func fixRomanPrefix(prefix string) string {
+	upper := strings.ToUpper(strings.TrimSpace(prefix))
+	upper = strings.ReplaceAll(upper, "L", "I")
+	upper = strings.ReplaceAll(upper, "1", "I")
+	upper = strings.ReplaceAll(upper, "|", "I")
+	return upper
+}
+
 func NormalizeDocumentNo(doc string) string {
 	clean := strings.TrimSpace(doc)
 	if clean == "" || clean == "-" || strings.EqualFold(clean, "yo'q") {
 		return clean
 	}
 
-	// 1. Birth certificate (e.g. I-NA. 086354 or I-NA.086354 or i-na 086354 -> I-NA 086354)
-	reBirth := regexp.MustCompile(`(?i)^([I|V|X]+-[A-Z]{2})[\s\.]*(\d+)$`)
-	if matches := reBirth.FindStringSubmatch(clean); len(matches) == 3 {
-		return fmt.Sprintf("%s %s", strings.ToUpper(matches[1]), matches[2])
+	// 1. Birth certificate with separator (e.g. I-NA. 086354, l-NA 086354, l-na.086354, 1-NA 086354, II-NA 086354, etc.)
+	reBirth1 := regexp.MustCompile(`(?i)^([ivxl1\|]+)[\s\.-]+([a-z]{2})[\s\.-]*(\d+)$`)
+	if matches := reBirth1.FindStringSubmatch(clean); len(matches) == 4 {
+		roman := fixRomanPrefix(matches[1])
+		series := strings.ToUpper(matches[2])
+		num := matches[3]
+		return fmt.Sprintf("%s-%s %s", roman, series, num)
 	}
 
-	// Remove dots after I-NA prefix
-	reDotsPrefix := regexp.MustCompile(`(?i)([I|V|X]+-[A-Z]{2})\s*\.\s*`)
-	clean = reDotsPrefix.ReplaceAllString(clean, "$1 ")
+	// 2. Birth certificate without separator (e.g. ina086354, lna086354, iina 086354)
+	reBirth2 := regexp.MustCompile(`(?i)^([ivxl1\|]{1,4})([a-z]{2})[\s\.-]*(\d+)$`)
+	if matches := reBirth2.FindStringSubmatch(clean); len(matches) == 4 {
+		roman := fixRomanPrefix(matches[1])
+		series := strings.ToUpper(matches[2])
+		num := matches[3]
+		return fmt.Sprintf("%s-%s %s", roman, series, num)
+	}
 
-	// 2. Passport series + number (e.g. AB 1234567 or AB. 1234567 -> AB1234567)
-	rePass := regexp.MustCompile(`(?i)^([A-Z]{2})[\s\.]*(\d+)$`)
+	// 3. Passport: 2 letters + numbers (e.g. AB 1234567 or AB. 1234567 -> AB1234567)
+	rePass := regexp.MustCompile(`(?i)^([a-z]{2})[\s\.-]*(\d{6,8})$`)
 	if matches := rePass.FindStringSubmatch(clean); len(matches) == 3 {
 		return fmt.Sprintf("%s%s", strings.ToUpper(matches[1]), matches[2])
 	}

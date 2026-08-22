@@ -323,6 +323,14 @@ func (h *ClassHandler) DeleteClass(c *gin.Context) {
 		return
 	}
 
+	// Cascade soft delete to all students belonging to this class
+	_, _ = tx.Exec("UPDATE students SET is_deleted = true, deleted_at = $1 WHERE class_id = $2 AND is_deleted = false", now, classID)
+
+	// Cascade soft delete to user accounts of these deleted students
+	_, _ = tx.Exec(`
+		UPDATE users SET is_deleted = true, deleted_at = $1 
+		WHERE id IN (SELECT user_id FROM students WHERE class_id = $2) AND is_deleted = false`, now, classID)
+
 	// Write Audit Log
 	audit.LogChange(c, tx, audit.LogData{
 		Action:    "SOFT_DELETE",

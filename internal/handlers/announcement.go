@@ -657,3 +657,106 @@ func (h *AnnouncementHandler) VotePoll(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "Ovozingiz muvaffaqiyatli qabul qilindi"})
 }
+
+type PollVoterItem struct {
+	VoteID           int       `json:"vote_id"`
+	AnnouncementID   int       `json:"announcement_id"`
+	OptionID         int       `json:"option_id"`
+	OptionText       string    `json:"option_text"`
+	UserID           int       `json:"user_id"`
+	FullName         string    `json:"full_name"`
+	Phone            string    `json:"phone"`
+	RoleName         string    `json:"role_name"`
+	TelegramID       string    `json:"telegram_id"`
+	ChildrenInfo     string    `json:"children_info"`
+	StudentClassName string    `json:"student_class_name"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+// GetPollVoters returns detailed list of all users who voted on an announcement poll
+func (h *AnnouncementHandler) GetPollVoters(c *gin.Context) {
+	announcementIDStr := c.Param("id")
+	announcementID, err := strconv.Atoi(announcementIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid announcement ID"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	ensureAnnouncementPollColumns(dbConn)
+
+	query := `
+		SELECT 
+			v.id,
+			v.announcement_id,
+			v.option_id,
+			COALESCE(po.option_text, ''),
+			v.user_id,
+			TRIM(COALESCE(u.first_name, '') || ' ' || COALESCE(u.last_name, '') || ' ' || COALESCE(u.middle_name, '')),
+			COALESCE(u.phone, ''),
+			COALESCE(r.name, ''),
+			COALESCE(u.telegram_id, ''),
+			COALESCE((
+				SELECT string_agg(CONCAT(st_u.first_name, ' ', st_u.last_name, CASE WHEN c.name IS NOT NULL AND c.name != '' THEN ' (' || c.name || ')' ELSE '' END), ', ')
+				FROM student_parents sp
+				JOIN students st ON sp.student_id = st.id
+				JOIN users st_u ON st.user_id = st_u.id
+				LEFT JOIN classes c ON st.class_id = c.id
+				WHERE sp.parent_id = u.id AND st.is_deleted = false AND st_u.is_deleted = false
+			), ''),
+			COALESCE((
+				SELECT c.name
+				FROM students st
+				JOIN classes c ON st.class_id = c.id
+				WHERE st.user_id = u.id AND st.is_deleted = false
+				LIMIT 1
+			), ''),
+			v.created_at
+		FROM announcement_poll_votes v
+		LEFT JOIN announcement_poll_options po ON v.option_id = po.id
+		LEFT JOIN users u ON v.user_id = u.id
+		LEFT JOIN roles r ON u.role_id = r.id
+		WHERE v.announcement_id = $1
+		ORDER BY v.created_at DESC;
+	`
+
+	rows, err := dbConn.Query(query, announcementID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Ovoz beruvchilarni olishda xatolik", "details": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var voters []PollVoterItem
+	for rows.Next() {
+		var item PollVoterItem
+		var rawCreatedAt sql.NullTime
+		if err := rows.Scan(
+			&item.VoteID,
+			&item.AnnouncementID,
+			&item.OptionID,
+			&item.OptionText,
+			&item.UserID,
+			&item.FullName,
+			&item.Phone,
+			&item.RoleName,
+			&item.TelegramID,
+			&item.ChildrenInfo,
+			&item.StudentClassName,
+			&rawCreatedAt,
+		); err == nil {
+			if rawCreatedAt.Valid {
+				item.CreatedAt = rawCreatedAt.Time
+			}
+			voters = append(voters, item)
+		}
+	}
+
+	if voters == nil {
+		voters = []PollVoterItem{}
+	}
+
+	c.JSON(http.StatusOK, voters)
+}

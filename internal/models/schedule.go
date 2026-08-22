@@ -28,9 +28,10 @@ type ClassScheduleResponse struct {
 }
 
 type SaveScheduleRequest struct {
-	StartDate string                `json:"start_date" binding:"required"`
-	EndDate   string                `json:"end_date" binding:"required"`
-	Lessons   []ScheduleLessonInput `json:"lessons" binding:"required"`
+	StartDate         string                `json:"start_date" binding:"required"`
+	EndDate           string                `json:"end_date" binding:"required"`
+	OriginalStartDate string                `json:"original_start_date"`
+	Lessons           []ScheduleLessonInput `json:"lessons" binding:"required"`
 }
 
 type ScheduleLessonInput struct {

@@ -262,19 +262,42 @@ func (h *ScheduleHandler) SaveSchedule(c *gin.Context) {
 	}
 
 	// Check if the new schedule date range overlaps with another active schedule period
-	var hasOverlap bool
-	err = dbConn.QueryRow(`
-		SELECT EXISTS(
-			SELECT 1 FROM class_schedules 
+	var conflictStart, conflictEnd string
+	var overlapQuery string
+	var overlapArgs []interface{}
+
+	if req.OriginalStartDate != "" {
+		// Editing existing period: check overlap with ANY OTHER active period
+		overlapQuery = `
+			SELECT to_char(start_date, 'YYYY-MM-DD'), to_char(end_date, 'YYYY-MM-DD')
+			FROM class_schedules 
 			WHERE class_id = $1 
-			  AND start_date <> $2 
+			  AND start_date <> $2::date
 			  AND is_deleted = false 
 			  AND start_date <= $3::date 
 			  AND end_date >= $4::date
-		)
-	`, classID, req.StartDate, req.EndDate, req.StartDate).Scan(&hasOverlap)
-	if err == nil && hasOverlap {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Yangi dars jadvali sanalari mavjud faol jadval davri bilan ustma-ust tushib qolyapti"})
+			LIMIT 1
+		`
+		overlapArgs = []interface{}{classID, req.OriginalStartDate, req.EndDate, req.StartDate}
+	} else {
+		// Adding new period: check overlap with ALL active periods
+		overlapQuery = `
+			SELECT to_char(start_date, 'YYYY-MM-DD'), to_char(end_date, 'YYYY-MM-DD')
+			FROM class_schedules 
+			WHERE class_id = $1 
+			  AND is_deleted = false 
+			  AND start_date <= $2::date 
+			  AND end_date >= $3::date
+			LIMIT 1
+		`
+		overlapArgs = []interface{}{classID, req.EndDate, req.StartDate}
+	}
+
+	err = dbConn.QueryRow(overlapQuery, overlapArgs...).Scan(&conflictStart, &conflictEnd)
+	if err == nil && conflictStart != "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("Siz kiritgan sana oralig'i (%s — %s) davridagi mavjud dars jadvali bilan ustma-ust tushib qolyapti!", conflictStart, conflictEnd),
+		})
 		return
 	}
 
@@ -285,9 +308,16 @@ func (h *ScheduleHandler) SaveSchedule(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
+	targetOldStartDate := startDate
+	if req.OriginalStartDate != "" {
+		if parsedOrig, errOrig := time.Parse("2006-01-02", req.OriginalStartDate); errOrig == nil {
+			targetOldStartDate = parsedOrig
+		}
+	}
+
 	// Get old active schedules to log audit properly
 	var oldSchedules []models.ClassSchedule
-	oldRows, err := tx.Query(`SELECT id, class_id, day_of_week, lesson_number, subject_id, start_date, end_date FROM class_schedules WHERE class_id = $1 AND start_date = $2 AND is_deleted = false`, classID, startDate)
+	oldRows, err := tx.Query(`SELECT id, class_id, day_of_week, lesson_number, subject_id, start_date, end_date FROM class_schedules WHERE class_id = $1 AND start_date = $2 AND is_deleted = false`, classID, targetOldStartDate)
 	if err == nil {
 		for oldRows.Next() {
 			var old models.ClassSchedule
@@ -298,11 +328,13 @@ func (h *ScheduleHandler) SaveSchedule(c *gin.Context) {
 		oldRows.Close()
 	}
 
-	// Overwrite strategy: soft-delete all existing schedule records for this class with the same start_date
-	_, err = tx.Exec(`UPDATE class_schedules SET is_deleted = true, deleted_at = NOW() WHERE class_id = $1 AND start_date = $2 AND is_deleted = false`, classID, startDate)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to clear previous schedule records", "details": err.Error()})
-		return
+	// If editing an existing period (or updating by start_date), soft-delete the previous period records
+	if req.OriginalStartDate != "" || len(oldSchedules) > 0 {
+		_, err = tx.Exec(`UPDATE class_schedules SET is_deleted = true, deleted_at = NOW() WHERE class_id = $1 AND start_date = $2 AND is_deleted = false`, classID, targetOldStartDate)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to clear previous schedule records", "details": err.Error()})
+			return
+		}
 	}
 
 	// Insert new schedule records

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/farzandim/backend/internal/audit"
@@ -19,19 +20,38 @@ func NewDateRangePresetHandler() *DateRangePresetHandler {
 }
 
 func parseFlexibleDate(dateStr string) (time.Time, error) {
+	s := strings.TrimSpace(dateStr)
+	if s == "" {
+		return time.Time{}, fmt.Errorf("sana bo'sh")
+	}
+
 	formats := []string{
 		"2006-01-02",
 		"02.01.2006",
 		"02/01/2006",
 		"2006/01/02",
 		"01/02/2006",
+		"2.1.2006",
+		"2-1-2006",
+		"2006-1-2",
+		"2006.01.02",
+		"02-01-2006",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02 15:04:05",
 	}
 	for _, f := range formats {
-		if t, err := time.Parse(f, dateStr); err == nil {
-			return t, nil
+		if t, err := time.Parse(f, s); err == nil {
+			return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC), nil
 		}
 	}
-	return time.Time{}, fmt.Errorf("invalid date format: %s", dateStr)
+
+	// If numeric Excel serial day (e.g. 45536)
+	if num, err := strconv.ParseFloat(s, 64); err == nil && num > 20000 && num < 70000 {
+		excelEpoch := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
+		return excelEpoch.Add(time.Duration(num * 24 * float64(time.Hour))), nil
+	}
+
+	return time.Time{}, fmt.Errorf("sana formati noto'g'ri (kutilgan: YYYY-MM-DD yoki DD.MM.YYYY): %s", s)
 }
 
 // List returns all active date range presets for a tenant

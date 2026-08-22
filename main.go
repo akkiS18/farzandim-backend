@@ -78,6 +78,7 @@ func main() {
 	readingAssignmentHandler := handlers.NewReadingAssignmentHandler()
 	aiReportHandler := handlers.NewAIReportHandler()
 	aiInstructionHandler := handlers.NewAIInstructionHandler()
+	lessonPlanHandler := handlers.NewLessonPlanHandler()
 
 	// 4. Initialize web server router
 	r := gin.Default()
@@ -190,6 +191,8 @@ func main() {
 		authTenantGroup.PUT("/books/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), bookHandler.Update)
 		authTenantGroup.DELETE("/books/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), bookHandler.Delete)
 		authTenantGroup.POST("/upload/book", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), bookHandler.UploadFile)
+		authTenantGroup.GET("/import/template/books", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), bookHandler.ExportBookTemplate)
+		authTenantGroup.POST("/import/books", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), bookHandler.ImportBooks)
 
 		authTenantGroup.GET("/reading-assignments", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), readingAssignmentHandler.ListAssignments)
 		authTenantGroup.POST("/reading-assignments", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), readingAssignmentHandler.CreateAssignment)
@@ -198,6 +201,15 @@ func main() {
 		authTenantGroup.DELETE("/reading-assignments/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), readingAssignmentHandler.DeleteAssignment)
 
 		authTenantGroup.GET("/student/reading-assignments", readingAssignmentHandler.GetStudentAssignments)
+
+		// Dars Ish Rejalari (Lesson Plans / Syllabus) APIs
+		authTenantGroup.GET("/lesson-plans", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.List)
+		authTenantGroup.GET("/lesson-plans/meta", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.GetMeta)
+		authTenantGroup.POST("/lesson-plans", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.Create)
+		authTenantGroup.PUT("/lesson-plans/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.Update)
+		authTenantGroup.DELETE("/lesson-plans/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.Delete)
+		authTenantGroup.GET("/import/template/lesson-plans", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.ExportLessonPlanTemplate)
+		authTenantGroup.POST("/import/lesson-plans", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.ImportLessonPlans)
 
 		// Dashboard Statistics API
 		authTenantGroup.GET("/dashboard/stats", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), dashboardHandler.GetStats)
@@ -297,6 +309,7 @@ func main() {
 		authTenantGroup.POST("/announcements", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), announcementHandler.CreateAnnouncement)
 		authTenantGroup.DELETE("/announcements/:id", middleware.RequireRole("ADMIN"), announcementHandler.DeleteAnnouncement)
 		authTenantGroup.POST("/announcements/:id/vote", announcementHandler.VotePoll)
+		authTenantGroup.GET("/announcements/:id/poll-voters", announcementHandler.GetPollVoters)
 
 		// Comments & Feedback Loop
 		authTenantGroup.POST("/grades/:id/comments", middleware.RequireRole("PARENT", "ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), commentHandler.CreateGradeComment)

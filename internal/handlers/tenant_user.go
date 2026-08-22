@@ -1667,10 +1667,18 @@ func (h *TenantUserHandler) CheckStudentDocuments(c *gin.Context) {
 	for _, d := range req.Documents {
 		trimmed := strings.TrimSpace(d)
 		if trimmed != "" && trimmed != "-" && !strings.EqualFold(trimmed, "yo'q") {
-			norm := reg.ReplaceAllString(strings.ToLower(trimmed), "")
+			normDoc := NormalizeDocumentNo(trimmed)
+			norm := reg.ReplaceAllString(strings.ToLower(normDoc), "")
 			if norm != "" {
 				cleanDocs = append(cleanDocs, norm)
+				cleanDocs = append(cleanDocs, strings.ToLower(normDoc))
 				cleanDocs = append(cleanDocs, strings.ToLower(trimmed))
+				if strings.HasPrefix(norm, "i") {
+					cleanDocs = append(cleanDocs, "l"+norm[1:])
+				}
+				if strings.HasPrefix(norm, "l") {
+					cleanDocs = append(cleanDocs, "i"+norm[1:])
+				}
 			}
 		}
 	}
@@ -1683,12 +1691,29 @@ func (h *TenantUserHandler) CheckStudentDocuments(c *gin.Context) {
 	tenantDBVal, _ := c.Get("tenantDB")
 	dbConn := tenantDBVal.(*sql.DB)
 
+	// Clean up legacy dirty 'l-' prefix in database asynchronously
+	go func(db *sql.DB) {
+		_, _ = db.Exec(`
+			UPDATE students 
+			SET ina = REGEXP_REPLACE(ina, '^[lL1]-', 'I-') 
+			WHERE ina ~* '^[lL1]-[a-zA-Z]{2}';
+			UPDATE users 
+			SET passport = REGEXP_REPLACE(passport, '^[lL1]-', 'I-') 
+			WHERE passport ~* '^[lL1]-[a-zA-Z]{2}';
+		`)
+	}(dbConn)
+
 	rows, err := dbConn.Query(`
 		SELECT s.id, s.user_id, u.first_name, u.last_name, COALESCE(u.middle_name, ''), COALESCE(s.class_id, 0), COALESCE(c.name, 'Sinfatsiz'), COALESCE(s.ina, '')
 		FROM students s
 		JOIN users u ON s.user_id = u.id
 		LEFT JOIN classes c ON s.class_id = c.id
-		WHERE (LOWER(TRIM(s.ina)) = ANY($1) OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = ANY($1)) AND s.is_deleted = false AND u.is_deleted = false
+		WHERE (
+			LOWER(TRIM(s.ina)) = ANY($1) 
+			OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = ANY($1)
+			OR REGEXP_REPLACE(REGEXP_REPLACE(LOWER(s.ina), '^[l1]-', 'i-'), '[^a-z0-9]', '', 'g') = ANY($1)
+		) 
+		  AND s.is_deleted = false AND u.is_deleted = false AND (c.id IS NULL OR c.is_deleted = false)
 	`, pq.Array(cleanDocs))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check student documents", "details": err.Error()})
@@ -1700,9 +1725,16 @@ func (h *TenantUserHandler) CheckStudentDocuments(c *gin.Context) {
 	for rows.Next() {
 		var info ExistingStudentDocInfo
 		if err := rows.Scan(&info.StudentID, &info.UserID, &info.FirstName, &info.LastName, &info.MiddleName, &info.ClassID, &info.ClassName, &info.INA); err == nil {
+			info.INA = NormalizeDocumentNo(info.INA)
 			normINA := reg.ReplaceAllString(strings.ToLower(info.INA), "")
 			result[normINA] = info
 			result[strings.ToLower(strings.TrimSpace(info.INA))] = info
+			if strings.HasPrefix(normINA, "i") {
+				result["l"+normINA[1:]] = info
+			}
+			if strings.HasPrefix(normINA, "l") {
+				result["i"+normINA[1:]] = info
+			}
 		}
 	}
 
@@ -1755,6 +1787,7 @@ func (h *TenantUserHandler) TransferStudentByDocument(c *gin.Context) {
 	}
 
 	// 2. Find existing student by normalized INA
+	normINA := NormalizeDocumentNo(cleanINA)
 	var studentID, userID, oldClassID int
 	var firstName, lastName, oldClassName string
 	err = tx.QueryRow(`
@@ -1762,17 +1795,23 @@ func (h *TenantUserHandler) TransferStudentByDocument(c *gin.Context) {
 		FROM students s
 		JOIN users u ON s.user_id = u.id
 		LEFT JOIN classes c ON s.class_id = c.id
-		WHERE (LOWER(TRIM(s.ina)) = LOWER($1) OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = REGEXP_REPLACE(LOWER($1), '[^a-z0-9]', '', 'g'))
-		  AND s.is_deleted = false AND u.is_deleted = false
+		WHERE (
+			LOWER(TRIM(s.ina)) = LOWER($1) 
+			OR LOWER(TRIM(s.ina)) = LOWER($2)
+			OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = REGEXP_REPLACE(LOWER($1), '[^a-z0-9]', '', 'g')
+			OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = REGEXP_REPLACE(LOWER($2), '[^a-z0-9]', '', 'g')
+			OR REGEXP_REPLACE(REGEXP_REPLACE(LOWER(s.ina), '^[l1]-', 'i-'), '[^a-z0-9]', '', 'g') = REGEXP_REPLACE(REGEXP_REPLACE(LOWER($2), '^[l1]-', 'i-'), '[^a-z0-9]', '', 'g')
+		)
+		  AND s.is_deleted = false AND u.is_deleted = false AND (c.id IS NULL OR c.is_deleted = false)
 		LIMIT 1
-	`, cleanINA).Scan(&studentID, &userID, &oldClassID, &firstName, &lastName, &oldClassName)
+	`, cleanINA, normINA).Scan(&studentID, &userID, &oldClassID, &firstName, &lastName, &oldClassName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Hujjat raqami '%s' bo'lgan o'quvchi topilmadi", cleanINA)})
 		return
 	}
 
-	// 3. Update student class_id
-	_, err = tx.Exec("UPDATE students SET class_id = $1 WHERE id = $2", targetClassID, studentID)
+	// 3. Update student class_id and normalize INA
+	_, err = tx.Exec("UPDATE students SET class_id = $1, ina = $2 WHERE id = $3", targetClassID, normINA, studentID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Sinfni yangilashda xatolik", "details": err.Error()})
 		return
