@@ -206,6 +206,7 @@ func main() {
 		authTenantGroup.GET("/lesson-plans", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.List)
 		authTenantGroup.GET("/lesson-plans/meta", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.GetMeta)
 		authTenantGroup.POST("/lesson-plans", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.Create)
+		authTenantGroup.POST("/lesson-plans/batch", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.BatchSave)
 		authTenantGroup.PUT("/lesson-plans/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.Update)
 		authTenantGroup.DELETE("/lesson-plans/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.Delete)
 		authTenantGroup.GET("/import/template/lesson-plans", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.ExportLessonPlanTemplate)

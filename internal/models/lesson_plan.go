@@ -53,3 +53,20 @@ type UpdateLessonPlanRequest struct {
 	TopicName    string `json:"topic_name" binding:"required"`
 	Notes        string `json:"notes"`
 }
+
+type BatchLessonPlanItem struct {
+	StartDate    string `json:"start_date" binding:"required"`
+	DayOfWeek    int    `json:"day_of_week"`
+	LessonNumber int    `json:"lesson_number"`
+	TopicName    string `json:"topic_name" binding:"required"`
+	Notes        string `json:"notes"`
+}
+
+type BatchLessonPlanRequest struct {
+	ClassID       int                   `json:"class_id" binding:"required"`
+	SubjectID     int                   `json:"subject_id" binding:"required"`
+	StartDateFrom string                `json:"start_date_from,omitempty"`
+	StartDateTo   string                `json:"start_date_to,omitempty"`
+	Overwrite     bool                  `json:"overwrite"`
+	Items         []BatchLessonPlanItem `json:"items" binding:"required"`
+}

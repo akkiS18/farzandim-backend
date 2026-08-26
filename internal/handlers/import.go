@@ -36,24 +36,25 @@ type ImportResult struct {
 }
 
 type TenantUserResponse struct {
-	ID          int        `json:"id"`
-	Email       *string    `json:"email"`
-	Phone       *string    `json:"phone"`
-	FirstName   string     `json:"first_name"`
-	LastName    string     `json:"last_name"`
-	MiddleName  *string    `json:"middle_name"`
-	Passport    *string    `json:"passport"`
-	RoleID      int        `json:"role_id"`
-	RoleName    string     `json:"role_name"`
-	ClassID     *int       `json:"class_id,omitempty"`
-	ClassName   *string    `json:"class_name,omitempty"`
-	StudentID   *int       `json:"student_id,omitempty"`
-	StudentName *string    `json:"student_name,omitempty"`
-	Address     *string    `json:"address,omitempty"`
-	BirthDate   *time.Time `json:"birthdate,omitempty"`
-	INA         *string    `json:"ina,omitempty"`
-	Balance     *float64   `json:"balance,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
+	ID             int        `json:"id"`
+	Email          *string    `json:"email"`
+	Phone          *string    `json:"phone"`
+	FirstName      string     `json:"first_name"`
+	LastName       string     `json:"last_name"`
+	MiddleName     *string    `json:"middle_name"`
+	Passport       *string    `json:"passport"`
+	RoleID         int        `json:"role_id"`
+	RoleName       string     `json:"role_name"`
+	ClassID        *int       `json:"class_id,omitempty"`
+	ClassName      *string    `json:"class_name,omitempty"`
+	StudentID      *int       `json:"student_id,omitempty"`
+	StudentName    *string    `json:"student_name,omitempty"`
+	Address        *string    `json:"address,omitempty"`
+	BirthDate      *time.Time `json:"birthdate,omitempty"`
+	EnrollmentDate *time.Time `json:"enrollment_date,omitempty"`
+	INA            *string    `json:"ina,omitempty"`
+	Balance        *float64   `json:"balance,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
 }
 
 // ListUsers lists all active users in the school tenant database with filters
@@ -104,7 +105,7 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
 			       s.id as student_id, NULL::text as student_name,
-			       u.passport, s.address, s.birthdate, s.ina, s.balance
+			       u.passport, s.address, s.birthdate, s.ina, s.balance, s.enrollment_date
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
 			JOIN students s ON u.id = s.user_id AND %s
@@ -123,7 +124,7 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
 			       s.id as student_id, NULL::text as student_name,
-			       u.passport, s.address, s.birthdate, s.ina, s.balance
+			       u.passport, s.address, s.birthdate, s.ina, s.balance, s.enrollment_date
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
 			JOIN students s ON u.id = s.user_id AND %s
@@ -136,7 +137,7 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
 			       s.id as student_id, (su.first_name || ' ' || su.last_name || COALESCE(' ' || su.middle_name, '')) as student_name,
-			       u.passport, NULL::text as address, NULL::date as birthdate, NULL::text as ina, NULL::numeric as balance
+			       u.passport, NULL::text as address, NULL::date as birthdate, NULL::text as ina, NULL::numeric as balance, NULL::date as enrollment_date
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
 			LEFT JOIN student_parents sp ON sp.parent_id = u.id
@@ -158,7 +159,7 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
 			       s.id as student_id, NULL::text as student_name,
-			       u.passport, s.address, s.birthdate, s.ina, s.balance
+			       u.passport, s.address, s.birthdate, s.ina, s.balance, s.enrollment_date
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
 			LEFT JOIN students s ON u.id = s.user_id AND %s
@@ -207,13 +208,14 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		var passportNull sql.NullString
 		var addressNull sql.NullString
 		var birthdateNull sql.NullTime
+		var enrollmentDateNull sql.NullTime
 		var inaNull sql.NullString
 		var balanceNull sql.NullFloat64
 
 		err := rows.Scan(
 			&u.ID, &emailNull, &phoneNull, &u.FirstName, &u.LastName, &middleNameNull, &u.RoleID, &u.RoleName, &u.CreatedAt,
 			&classIDNull, &classNameNull, &studentIDNull, &studentNameNull,
-			&passportNull, &addressNull, &birthdateNull, &inaNull, &balanceNull,
+			&passportNull, &addressNull, &birthdateNull, &inaNull, &balanceNull, &enrollmentDateNull,
 		)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse user records", "details": err.Error()})
@@ -251,6 +253,9 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		}
 		if birthdateNull.Valid {
 			u.BirthDate = &birthdateNull.Time
+		}
+		if enrollmentDateNull.Valid {
+			u.EnrollmentDate = &enrollmentDateNull.Time
 		}
 		if inaNull.Valid {
 			u.INA = &inaNull.String
@@ -519,8 +524,8 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 
 		var studentID int
 		insertStudentQuery := `
-			INSERT INTO students (user_id, class_id, address, birthdate, ina)
-			VALUES ($1, $2, $3, $4, $5)
+			INSERT INTO students (user_id, class_id, address, birthdate, ina, enrollment_date)
+			VALUES ($1, $2, $3, $4, $5, NOW()::date)
 			RETURNING id`
 		err = tx.QueryRow(insertStudentQuery, userID, classID, addressPtr, birthdate, inaPtr).Scan(&studentID)
 		if err != nil {
@@ -1733,15 +1738,16 @@ func (h *ImportHandler) ImportHolidays(c *gin.Context) {
 
 // SmartStudentRow represents the parsed data coming from the frontend smart parser
 type SmartStudentRow struct {
-	FirstName   string `json:"firstName"`
-	LastName    string `json:"lastName"`
-	MiddleName  string `json:"middleName"`
-	ClassName   string `json:"className"`
-	BirthDate   string `json:"birthDate"`
-	INA         string `json:"ina"`
-	ParentName  string `json:"parentName"`
-	ParentPhone string `json:"parentPhone"`
-	Address     string `json:"address"`
+	FirstName      string `json:"firstName"`
+	LastName       string `json:"lastName"`
+	MiddleName     string `json:"middleName"`
+	ClassName      string `json:"className"`
+	BirthDate      string `json:"birthDate"`
+	EnrollmentDate string `json:"enrollmentDate"`
+	INA            string `json:"ina"`
+	ParentName     string `json:"parentName"`
+	ParentPhone    string `json:"parentPhone"`
+	Address        string `json:"address"`
 }
 
 type ImportStudentsSmartRequest struct {
@@ -1846,13 +1852,26 @@ func (h *ImportHandler) ImportStudentsSmart(c *gin.Context) {
 			}
 		}
 
+		var enrollmentDate *time.Time
+		if sRow.EnrollmentDate != "" {
+			if parsed, e := time.Parse("2006-01-02", sRow.EnrollmentDate); e == nil {
+				enrollmentDate = &parsed
+			} else if parsed, e := time.Parse("02.01.2006", sRow.EnrollmentDate); e == nil {
+				enrollmentDate = &parsed
+			}
+		}
+		if enrollmentDate == nil {
+			now := time.Now()
+			enrollmentDate = &now
+		}
+
 		var addressPtr, inaPtr *string
 		if sRow.Address != "" { addressPtr = &sRow.Address }
 		if sRow.INA != "" { inaPtr = &sRow.INA }
 
 		var studentID int
-		err = tx.QueryRow("INSERT INTO students (user_id, class_id, address, birthdate, ina) VALUES ($1, $2, $3, $4, $5) RETURNING id",
-			studentUserID, classID, addressPtr, birthdate, inaPtr).Scan(&studentID)
+		err = tx.QueryRow("INSERT INTO students (user_id, class_id, address, birthdate, ina, enrollment_date) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+			studentUserID, classID, addressPtr, birthdate, inaPtr, enrollmentDate).Scan(&studentID)
 		
 		if err != nil {
 			tx.Rollback()
@@ -1929,6 +1948,7 @@ type SmartStudentRowInput struct {
 	StudentMiddleName string `json:"student_middle_name"`
 	StudentBirthdate  string `json:"student_birthdate"`
 	StudentDocumentNo string `json:"student_document_no"`
+	EnrollmentDate    string `json:"enrollment_date"`
 	Address           string `json:"address"`
 	FatherFullName    string `json:"father_full_name"`
 	FatherDocumentNo  string `json:"father_document_no"`
@@ -2113,11 +2133,35 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 			inaPtr = &d
 		}
 
+		var enrollmentDatePtr *time.Time
+		if strings.TrimSpace(st.EnrollmentDate) != "" && st.EnrollmentDate != "-" {
+			edStr := strings.TrimSpace(st.EnrollmentDate)
+			formats := []string{
+				"2006-01-02",
+				"02.01.2006",
+				"01.02.2006",
+				"02/01/2006",
+				"01/02/2006",
+				"2006/01/02",
+				"02,01,2006",
+			}
+			for _, fmtStr := range formats {
+				if parsed, err := time.Parse(fmtStr, edStr); err == nil {
+					enrollmentDatePtr = &parsed
+					break
+				}
+			}
+		}
+		if enrollmentDatePtr == nil {
+			now := time.Now()
+			enrollmentDatePtr = &now
+		}
+
 		var studentID int
 		err = tx.QueryRow(`
-			INSERT INTO students (user_id, class_id, address, birthdate, ina)
-			VALUES ($1, $2, $3, $4, $5)
-			RETURNING id`, studentUserID, classID, addressPtr, birthdatePtr, inaPtr).Scan(&studentID)
+			INSERT INTO students (user_id, class_id, address, birthdate, ina, enrollment_date)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			RETURNING id`, studentUserID, classID, addressPtr, birthdatePtr, inaPtr, enrollmentDatePtr).Scan(&studentID)
 
 		if err != nil {
 			tx.Rollback()

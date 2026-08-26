@@ -23,13 +23,14 @@ func NewTenantUserHandler() *TenantUserHandler {
 }
 
 type CreateStudentRequest struct {
-	FirstName  string  `json:"first_name" binding:"required"`
-	LastName   string  `json:"last_name" binding:"required"`
-	MiddleName *string `json:"middle_name"`
-	Email      *string `json:"email"`
-	Address    *string `json:"address"`
-	BirthDate  *string `json:"birthdate"`
-	INA        *string `json:"ina"`
+	FirstName      string  `json:"first_name" binding:"required"`
+	LastName       string  `json:"last_name" binding:"required"`
+	MiddleName     *string `json:"middle_name"`
+	Email          *string `json:"email"`
+	Address        *string `json:"address"`
+	BirthDate      *string `json:"birthdate"`
+	EnrollmentDate *string `json:"enrollment_date"`
+	INA            *string `json:"ina"`
 }
 
 type CreateTeacherRequest struct {
@@ -163,11 +164,22 @@ func (h *TenantUserHandler) CreateClassStudent(c *gin.Context) {
 		birthdateVal = nil
 	}
 
+	var enrollmentDateVal interface{}
+	if req.EnrollmentDate != nil && *req.EnrollmentDate != "" {
+		if parsedDate, err := time.Parse("2006-01-02", *req.EnrollmentDate); err == nil {
+			enrollmentDateVal = parsedDate
+		} else {
+			enrollmentDateVal = time.Now()
+		}
+	} else {
+		enrollmentDateVal = time.Now()
+	}
+
 	insertStudentQuery := `
-		INSERT INTO students (user_id, class_id, address, birthdate, ina)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO students (user_id, class_id, address, birthdate, ina, enrollment_date)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id`
-	err = tx.QueryRow(insertStudentQuery, userID, classID, req.Address, birthdateVal, req.INA).Scan(&studentID)
+	err = tx.QueryRow(insertStudentQuery, userID, classID, req.Address, birthdateVal, req.INA, enrollmentDateVal).Scan(&studentID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to map student profile", "details": err.Error()})
 		return
@@ -1356,14 +1368,15 @@ func (h *TenantUserHandler) DeleteSubject(c *gin.Context) {
 
 // UpdateStudentRequest holds fields that can be updated for a student
 type UpdateStudentRequest struct {
-	FirstName  string  `json:"first_name" binding:"required"`
-	LastName   string  `json:"last_name" binding:"required"`
-	MiddleName *string `json:"middle_name"`
-	Phone      *string `json:"phone"`
-	Password   *string `json:"password"`
-	Address    *string `json:"address"`
-	BirthDate  *string `json:"birthdate"` // Format: YYYY-MM-DD
-	INA        *string `json:"ina"`
+	FirstName      string  `json:"first_name" binding:"required"`
+	LastName       string  `json:"last_name" binding:"required"`
+	MiddleName     *string `json:"middle_name"`
+	Phone          *string `json:"phone"`
+	Password       *string `json:"password"`
+	Address        *string `json:"address"`
+	BirthDate      *string `json:"birthdate"` // Format: YYYY-MM-DD
+	EnrollmentDate *string `json:"enrollment_date"` // Format: YYYY-MM-DD
+	INA            *string `json:"ina"`
 }
 
 // UpdateStudent updates a student user's profile (name, phone, password)
@@ -1508,11 +1521,27 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 		}
 	}
 
-	_, err = tx.Exec(`
-		UPDATE students 
-		SET address = $1, birthdate = $2, ina = $3 
-		WHERE id = $4`, 
-		req.Address, birthdate, req.INA, studentID)
+	var enrollmentDate *time.Time
+	if req.EnrollmentDate != nil && *req.EnrollmentDate != "" {
+		parsedDate, err := time.Parse("2006-01-02", *req.EnrollmentDate)
+		if err == nil {
+			enrollmentDate = &parsedDate
+		}
+	}
+
+	if enrollmentDate != nil {
+		_, err = tx.Exec(`
+			UPDATE students 
+			SET address = $1, birthdate = $2, ina = $3, enrollment_date = $4 
+			WHERE id = $5`, 
+			req.Address, birthdate, req.INA, enrollmentDate, studentID)
+	} else {
+		_, err = tx.Exec(`
+			UPDATE students 
+			SET address = $1, birthdate = $2, ina = $3 
+			WHERE id = $4`, 
+			req.Address, birthdate, req.INA, studentID)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "O'quvchi qo'shimcha ma'lumotlarini yangilashda xatolik", "details": err.Error()})
 		return
@@ -1542,9 +1571,10 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 		RecordID:  strconv.Itoa(studentID),
 		OldValues: map[string]interface{}{"student_id": studentID},
 		NewValues: map[string]interface{}{
-			"address":   req.Address,
-			"birthdate": birthdate,
-			"ina":       req.INA,
+			"address":         req.Address,
+			"birthdate":       birthdate,
+			"enrollment_date": enrollmentDate,
+			"ina":             req.INA,
 		},
 	})
 
@@ -1554,15 +1584,16 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"id":          targetUserID,
-		"first_name":  req.FirstName,
-		"last_name":   req.LastName,
-		"middle_name": req.MiddleName,
-		"phone":       req.Phone,
-		"role_id":     oldUser.RoleID,
-		"address":     req.Address,
-		"birthdate":   birthdate,
-		"ina":         req.INA,
+		"id":              targetUserID,
+		"first_name":      req.FirstName,
+		"last_name":       req.LastName,
+		"middle_name":     req.MiddleName,
+		"phone":           req.Phone,
+		"role_id":         oldUser.RoleID,
+		"address":         req.Address,
+		"birthdate":       birthdate,
+		"enrollment_date": enrollmentDate,
+		"ina":             req.INA,
 	})
 }
 

@@ -37,15 +37,16 @@ type Class struct {
 }
 
 type Student struct {
-	ID        int        `json:"id" db:"id"`
-	UserID    int        `json:"user_id" db:"user_id"`
-	ClassID   int        `json:"class_id" db:"class_id"`
-	Address   *string    `json:"address,omitempty" db:"address"`
-	BirthDate *time.Time `json:"birthdate,omitempty" db:"birthdate"`
-	INA       *string    `json:"ina,omitempty" db:"ina"`
-	Balance   float64    `json:"balance" db:"balance"`
-	IsDeleted bool       `json:"is_deleted" db:"is_deleted"`
-	DeletedAt *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
+	ID             int        `json:"id" db:"id"`
+	UserID         int        `json:"user_id" db:"user_id"`
+	ClassID        int        `json:"class_id" db:"class_id"`
+	Address        *string    `json:"address,omitempty" db:"address"`
+	BirthDate      *time.Time `json:"birthdate,omitempty" db:"birthdate"`
+	EnrollmentDate *time.Time `json:"enrollment_date,omitempty" db:"enrollment_date"`
+	INA            *string    `json:"ina,omitempty" db:"ina"`
+	Balance        float64    `json:"balance" db:"balance"`
+	IsDeleted      bool       `json:"is_deleted" db:"is_deleted"`
+	DeletedAt      *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
 }
 
 type Subject struct {

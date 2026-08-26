@@ -331,6 +331,142 @@ func (h *LessonPlanHandler) Create(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"message": "Dars rejasi muvaffaqiyatli saqlandi", "id": newID})
 }
 
+// BatchSave processes and saves multiple lesson plans for a class & subject
+func (h *LessonPlanHandler) BatchSave(c *gin.Context) {
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn, ok := tenantDBVal.(*sql.DB)
+	if !ok || dbConn == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Tenant database connection missing"})
+		return
+	}
+
+	userRoleVal, _ := c.Get("role")
+	userRole, _ := userRoleVal.(string)
+	userIDVal, _ := c.Get("userID")
+	userIDStr, _ := userIDVal.(string)
+	currentUserID, _ := strconv.Atoi(userIDStr)
+
+	var req models.BatchLessonPlanRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Noto'g'ri parametrlar kiritildi", "details": err.Error()})
+		return
+	}
+
+	if len(req.Items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Saqlash uchun dars mavzulari mavjud emas"})
+		return
+	}
+
+	// Teacher can only add plans for subjects they teach
+	if userRole != "ADMIN" {
+		var isAllowed bool
+		_ = dbConn.QueryRow("SELECT EXISTS(SELECT 1 FROM class_teachers WHERE teacher_id = $1 AND subject_id = $2 AND is_deleted = false)", currentUserID, req.SubjectID).Scan(&isAllowed)
+		if !isAllowed {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Siz ushbu fandan dars bermaysiz. Faqat o'zingizning fanlaringiz rejasini kiritishingiz mumkin."})
+			return
+		}
+	}
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Tranzaksiya ochishda xatolik"})
+		return
+	}
+	defer tx.Rollback()
+
+	// If date range specified or overwrite is true, clean existing plans in this range for this teacher, class, subject
+	if req.StartDateFrom != "" && req.StartDateTo != "" {
+		parsedFrom, errFrom := parseFlexibleDate(req.StartDateFrom)
+		parsedTo, errTo := parseFlexibleDate(req.StartDateTo)
+		if errFrom == nil && errTo == nil {
+			_, err = tx.Exec(`
+				UPDATE lesson_plans 
+				SET is_deleted = true, deleted_at = NOW(), updated_at = NOW() 
+				WHERE class_id = $1 AND subject_id = $2 AND teacher_id = $3 AND start_date >= $4 AND start_date <= $5 AND is_deleted = false
+			`, req.ClassID, req.SubjectID, currentUserID, parsedFrom.Format("2006-01-02"), parsedTo.Format("2006-01-02"))
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Eski rejalarni tozalashda xatolik", "details": err.Error()})
+				return
+			}
+		}
+	} else if req.Overwrite {
+		_, err = tx.Exec(`
+			UPDATE lesson_plans 
+			SET is_deleted = true, deleted_at = NOW(), updated_at = NOW() 
+			WHERE class_id = $1 AND subject_id = $2 AND teacher_id = $3 AND is_deleted = false
+		`, req.ClassID, req.SubjectID, currentUserID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Eski rejalarni tozalashda xatolik", "details": err.Error()})
+			return
+		}
+	}
+
+	savedCount := 0
+	for _, item := range req.Items {
+		topic := strings.TrimSpace(item.TopicName)
+		if topic == "" {
+			continue
+		}
+
+		parsedDate, errDate := parseFlexibleDate(item.StartDate)
+		if errDate != nil {
+			continue
+		}
+
+		dayOfWeek := item.DayOfWeek
+		if dayOfWeek < 1 || dayOfWeek > 7 {
+			dayOfWeek = int(parsedDate.Weekday())
+			if dayOfWeek == 0 {
+				dayOfWeek = 7
+			}
+		}
+
+		lessonNumber := item.LessonNumber
+		if lessonNumber < 1 {
+			lessonNumber = 1
+		}
+
+		_, err = tx.Exec(`
+			INSERT INTO lesson_plans (
+				teacher_id, class_id, subject_id, day_of_week, lesson_number,
+				start_date, topic_name, notes, is_deleted, created_at, updated_at
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false, NOW(), NOW())
+		`, currentUserID, req.ClassID, req.SubjectID, dayOfWeek, lessonNumber,
+			parsedDate.Format("2006-01-02"), topic, strings.TrimSpace(item.Notes),
+		)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Mavzularni bazaga yozishda xatolik", "details": err.Error()})
+			return
+		}
+		savedCount++
+	}
+
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "BATCH_CREATE",
+		TableName: "lesson_plans",
+		RecordID:  fmt.Sprintf("class_%d_sub_%d", req.ClassID, req.SubjectID),
+		NewValues: map[string]interface{}{
+			"class_id":        req.ClassID,
+			"subject_id":      req.SubjectID,
+			"start_date_from": req.StartDateFrom,
+			"start_date_to":   req.StartDateTo,
+			"saved_count":     savedCount,
+		},
+	})
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Tranzaksiyani yakunlashda xatolik"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":     true,
+		"message":     fmt.Sprintf("%d ta dars mavzusi muvaffaqiyatli saqlandi!", savedCount),
+		"saved_count": savedCount,
+	})
+}
+
 // Update modifies an existing lesson plan
 func (h *LessonPlanHandler) Update(c *gin.Context) {
 	idStr := c.Param("id")

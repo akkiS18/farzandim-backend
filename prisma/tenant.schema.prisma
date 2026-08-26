@@ -68,10 +68,11 @@ model UserStudent {
   deleted_at DateTime?
 
   // Extended profile and balance fields
-  address    String?
-  birthdate  DateTime?       @db.Date
-  ina        String?
-  balance    Decimal         @default(0.00) @db.Decimal(12, 2)
+  address         String?
+  birthdate       DateTime?       @db.Date
+  enrollment_date DateTime?       @default(now()) @db.Date
+  ina             String?
+  balance         Decimal         @default(0.00) @db.Decimal(12, 2)
 
   parents    StudentParent[]
   grades     Grade[]
