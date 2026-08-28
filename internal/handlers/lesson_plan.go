@@ -176,12 +176,17 @@ func (h *LessonPlanHandler) GetMeta(c *gin.Context) {
 	userIDStr, _ := userIDVal.(string)
 	currentUserID, _ := strconv.Atoi(userIDStr)
 
+	type ClassMetaItem struct {
+		ID            int    `json:"id"`
+		Name          string `json:"name"`
+		IsMainTeacher bool   `json:"is_main_teacher"`
+	}
 	type SimpleItem struct {
 		ID   int    `json:"id"`
 		Name string `json:"name"`
 	}
 
-	var classesList []SimpleItem
+	var classesList []ClassMetaItem
 	var subjectsList []SimpleItem
 
 	if userRole == "ADMIN" {
@@ -189,8 +194,9 @@ func (h *LessonPlanHandler) GetMeta(c *gin.Context) {
 		if err == nil {
 			defer cRows.Close()
 			for cRows.Next() {
-				var it SimpleItem
+				var it ClassMetaItem
 				if err := cRows.Scan(&it.ID, &it.Name); err == nil {
+					it.IsMainTeacher = true
 					classesList = append(classesList, it)
 				}
 			}
@@ -208,7 +214,11 @@ func (h *LessonPlanHandler) GetMeta(c *gin.Context) {
 		}
 	} else {
 		cRows, err := dbConn.Query(`
-			SELECT DISTINCT c.id, c.name
+			SELECT DISTINCT c.id, c.name,
+			  EXISTS(
+			    SELECT 1 FROM class_teachers ct2 
+			    WHERE ct2.class_id = c.id AND ct2.teacher_id = $1 AND ct2.is_main_teacher = true AND ct2.is_deleted = false
+			  ) as is_main
 			FROM class_teachers ct
 			JOIN classes c ON ct.class_id = c.id
 			WHERE ct.teacher_id = $1 AND ct.is_deleted = false AND c.is_deleted = false
@@ -217,8 +227,8 @@ func (h *LessonPlanHandler) GetMeta(c *gin.Context) {
 		if err == nil {
 			defer cRows.Close()
 			for cRows.Next() {
-				var it SimpleItem
-				if err := cRows.Scan(&it.ID, &it.Name); err == nil {
+				var it ClassMetaItem
+				if err := cRows.Scan(&it.ID, &it.Name, &it.IsMainTeacher); err == nil {
 					classesList = append(classesList, it)
 				}
 			}
@@ -243,7 +253,7 @@ func (h *LessonPlanHandler) GetMeta(c *gin.Context) {
 	}
 
 	if classesList == nil {
-		classesList = []SimpleItem{}
+		classesList = []ClassMetaItem{}
 	}
 	if subjectsList == nil {
 		subjectsList = []SimpleItem{}
@@ -252,6 +262,87 @@ func (h *LessonPlanHandler) GetMeta(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"classes":  classesList,
 		"subjects": subjectsList,
+	})
+}
+
+// GetClassSubjects returns subjects for a specific class.
+// If the user is ADMIN or Main Teacher of this class, returns all class subjects.
+// Otherwise returns only the subjects taught by this teacher in this class.
+func (h *LessonPlanHandler) GetClassSubjects(c *gin.Context) {
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn, ok := tenantDBVal.(*sql.DB)
+	if !ok || dbConn == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Tenant database connection missing"})
+		return
+	}
+
+	classIDStr := c.Query("class_id")
+	classID, _ := strconv.Atoi(classIDStr)
+	if classID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "class_id parametiri bo'sh bo'lmasligi kerak"})
+		return
+	}
+
+	userRoleVal, _ := c.Get("role")
+	userRole, _ := userRoleVal.(string)
+	userIDVal, _ := c.Get("userID")
+	userIDStr, _ := userIDVal.(string)
+	currentUserID, _ := strconv.Atoi(userIDStr)
+
+	var isMainTeacher bool
+	_ = dbConn.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM class_teachers 
+			WHERE class_id = $1 AND teacher_id = $2 AND is_main_teacher = true AND is_deleted = false
+		)`, classID, currentUserID).Scan(&isMainTeacher)
+
+	type SimpleItem struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}
+	var subjectsList []SimpleItem
+
+	var query string
+	var args []interface{}
+
+	if userRole == "ADMIN" || isMainTeacher {
+		query = `
+			SELECT DISTINCT s.id, s.name
+			FROM subjects s
+			LEFT JOIN class_teachers ct ON ct.subject_id = s.id AND ct.class_id = $1 AND ct.is_deleted = false
+			LEFT JOIN class_schedules cs ON cs.subject_id = s.id AND cs.class_id = $1 AND cs.is_deleted = false
+			WHERE s.is_deleted = false AND (ct.id IS NOT NULL OR cs.id IS NOT NULL)
+			ORDER BY s.name ASC`
+		args = append(args, classID)
+	} else {
+		query = `
+			SELECT DISTINCT s.id, s.name
+			FROM subjects s
+			JOIN class_teachers ct ON ct.subject_id = s.id
+			WHERE ct.class_id = $1 AND ct.teacher_id = $2 AND ct.is_deleted = false AND s.is_deleted = false
+			ORDER BY s.name ASC`
+		args = append(args, classID, currentUserID)
+	}
+
+	rows, err := dbConn.Query(query, args...)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var it SimpleItem
+			if err := rows.Scan(&it.ID, &it.Name); err == nil {
+				subjectsList = append(subjectsList, it)
+			}
+		}
+	}
+
+	if subjectsList == nil {
+		subjectsList = []SimpleItem{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"class_id":        classID,
+		"is_main_teacher": isMainTeacher || userRole == "ADMIN",
+		"subjects":        subjectsList,
 	})
 }
 

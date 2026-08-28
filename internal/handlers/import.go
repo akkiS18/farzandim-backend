@@ -85,9 +85,9 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 
 	if dateFilter != "" {
 		if _, err := time.Parse("2006-01-02", dateFilter); err == nil {
-			sDeletedCond = fmt.Sprintf("(s.is_deleted = false OR s.deleted_at::date >= '%s'::date)", dateFilter)
+			sDeletedCond = fmt.Sprintf("(s.is_deleted = false OR s.deleted_at::date >= '%s'::date) AND (s.enrollment_date IS NULL OR s.enrollment_date <= '%s'::date)", dateFilter, dateFilter)
 			uDeletedCond = fmt.Sprintf("(u.is_deleted = false OR u.deleted_at::date >= '%s'::date)", dateFilter)
-			suDeletedCond = fmt.Sprintf("(su.is_deleted = false OR su.deleted_at::date >= '%s'::date)", dateFilter)
+			suDeletedCond = fmt.Sprintf("(su.is_deleted = false OR su.deleted_at::date >= '%s'::date) AND (s.enrollment_date IS NULL OR s.enrollment_date <= '%s'::date)", dateFilter, dateFilter)
 		}
 	}
 

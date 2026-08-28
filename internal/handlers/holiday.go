@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -87,6 +88,25 @@ func (h *HolidayHandler) SaveHoliday(c *gin.Context) {
 	dbConn := tenantDBVal.(*sql.DB)
 
 	ensureHolidayColumns(dbConn)
+
+	// Check if active grades already exist on this holiday date
+	var gradeCount int
+	var sampleSubject, sampleClass string
+	err = dbConn.QueryRow(`
+		SELECT COUNT(g.id), COALESCE(MAX(s.name), ''), COALESCE(MAX(c.name), '')
+		FROM grades g
+		JOIN students st ON g.student_id = st.id
+		LEFT JOIN subjects s ON g.subject_id = s.id
+		LEFT JOIN classes c ON st.class_id = c.id
+		WHERE DATE(g.grade_date) = $1 AND g.is_deleted = false AND st.is_deleted = false
+	`, holidayDate.Format("2006-01-02")).Scan(&gradeCount, &sampleSubject, &sampleClass)
+
+	if err == nil && gradeCount > 0 {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": fmt.Sprintf("Diqqat! '%s' kunida allaqachon %d ta baho qo'yilgan (masalan: %s sinfi, %s fani). Ushbu sanaga dam olish kuni belgilab bo'lmaydi!", req.HolidayDate, gradeCount, sampleClass, sampleSubject),
+		})
+		return
+	}
 
 	tx, err := dbConn.Begin()
 	if err != nil {

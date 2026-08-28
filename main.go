@@ -205,6 +205,7 @@ func main() {
 		// Dars Ish Rejalari (Lesson Plans / Syllabus) APIs
 		authTenantGroup.GET("/lesson-plans", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.List)
 		authTenantGroup.GET("/lesson-plans/meta", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.GetMeta)
+		authTenantGroup.GET("/lesson-plans/class-subjects", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.GetClassSubjects)
 		authTenantGroup.POST("/lesson-plans", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.Create)
 		authTenantGroup.POST("/lesson-plans/batch", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.BatchSave)
 		authTenantGroup.PUT("/lesson-plans/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.Update)
@@ -276,7 +277,7 @@ func main() {
 		authTenantGroup.DELETE("/holidays/:id", middleware.RequireRole("ADMIN"), holidayHandler.DeleteHoliday)
 		authTenantGroup.POST("/import/holidays", middleware.RequireRole("ADMIN"), importHandler.ImportHolidays)
 		authTenantGroup.GET("/import/template/holidays", middleware.RequireRole("ADMIN"), importHandler.ExportHolidayTemplate)
-		authTenantGroup.POST("/import/students-smart", middleware.RequireRole("ADMIN"), importHandler.BatchImportStudentsSmart)
+		authTenantGroup.POST("/import/students-smart", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), importHandler.BatchImportStudentsSmart)
 		authTenantGroup.POST("/import/schedules-smart", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), scheduleHandler.BatchImportSchedulesSmart)
 		authTenantGroup.GET("/import/template/schedule", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), scheduleHandler.ExportScheduleTemplate)
 
@@ -333,6 +334,7 @@ func main() {
 		authTenantGroup.POST("/clubs/:id/schedules", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.CreateClubSchedule)
 		authTenantGroup.DELETE("/clubs/schedules/:schedule_id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.DeleteClubSchedule)
 		authTenantGroup.GET("/clubs/:id/grades", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER", "PARENT"), clubHandler.GetClubGradesByDate)
+		authTenantGroup.GET("/clubs/:id/grades/history", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER", "PARENT"), clubHandler.GetClubGradeHistory)
 		authTenantGroup.POST("/clubs/:id/grades", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), clubHandler.SaveClubGradesBatch)
 		authTenantGroup.GET("/student/club-grades", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER", "PARENT", "STUDENT"), clubHandler.GetStudentClubGrades)
 

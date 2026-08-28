@@ -120,6 +120,38 @@ func (h *TenantUserHandler) CreateClassStudent(c *gin.Context) {
 		}
 	}
 
+	// Check INA uniqueness if provided
+	if req.INA != nil {
+		cleanINA := strings.TrimSpace(*req.INA)
+		if cleanINA != "" && cleanINA != "-" && !strings.EqualFold(cleanINA, "yo'q") {
+			normINA := NormalizeDocumentNo(cleanINA)
+			reg, _ := regexp.Compile("[^a-z0-9]")
+			rawNorm := reg.ReplaceAllString(strings.ToLower(normINA), "")
+
+			var existingStudentName, existingClassName string
+			err = dbConn.QueryRow(`
+				SELECT COALESCE(u.first_name || ' ' || u.last_name, ''), COALESCE(c.name, 'Sinfatsiz')
+				FROM students s
+				JOIN users u ON s.user_id = u.id
+				LEFT JOIN classes c ON s.class_id = c.id
+				WHERE (
+					LOWER(TRIM(s.ina)) = LOWER($1)
+					OR LOWER(TRIM(s.ina)) = LOWER($2)
+					OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = $3
+					OR REGEXP_REPLACE(REGEXP_REPLACE(LOWER(s.ina), '^[l1]-', 'i-'), '[^a-z0-9]', '', 'g') = $3
+				)
+				  AND s.is_deleted = false AND u.is_deleted = false AND (c.id IS NULL OR c.is_deleted = false)
+				LIMIT 1
+			`, cleanINA, normINA, rawNorm).Scan(&existingStudentName, &existingClassName)
+			if err == nil {
+				c.JSON(http.StatusConflict, gin.H{
+					"error": fmt.Sprintf("Ushbu Guvohnoma (INA) raqami ('%s') bilan '%s' ismli o'quvchi '%s' sinfida allaqachon mavjud!", cleanINA, existingStudentName, existingClassName),
+				})
+				return
+			}
+		}
+	}
+
 	// Get role ID for STUDENT
 	var studentRoleID int
 	err = dbConn.QueryRow("SELECT id FROM roles WHERE name = 'STUDENT'").Scan(&studentRoleID)
@@ -1435,6 +1467,38 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 	if !authorized {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: ushbu o'quvchi ma'lumotlarini o'zgartirishga huquqingiz yo'q"})
 		return
+	}
+
+	// Check INA uniqueness if updating INA
+	if req.INA != nil {
+		cleanINA := strings.TrimSpace(*req.INA)
+		if cleanINA != "" && cleanINA != "-" && !strings.EqualFold(cleanINA, "yo'q") {
+			normINA := NormalizeDocumentNo(cleanINA)
+			reg, _ := regexp.Compile("[^a-z0-9]")
+			rawNorm := reg.ReplaceAllString(strings.ToLower(normINA), "")
+
+			var existingStudentName, existingClassName string
+			err = dbConn.QueryRow(`
+				SELECT COALESCE(u.first_name || ' ' || u.last_name, ''), COALESCE(c.name, 'Sinfatsiz')
+				FROM students s
+				JOIN users u ON s.user_id = u.id
+				LEFT JOIN classes c ON s.class_id = c.id
+				WHERE s.id != $1 AND (
+					LOWER(TRIM(s.ina)) = LOWER($2)
+					OR LOWER(TRIM(s.ina)) = LOWER($3)
+					OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = $4
+					OR REGEXP_REPLACE(REGEXP_REPLACE(LOWER(s.ina), '^[l1]-', 'i-'), '[^a-z0-9]', '', 'g') = $4
+				)
+				  AND s.is_deleted = false AND u.is_deleted = false AND (c.id IS NULL OR c.is_deleted = false)
+				LIMIT 1
+			`, studentID, cleanINA, normINA, rawNorm).Scan(&existingStudentName, &existingClassName)
+			if err == nil {
+				c.JSON(http.StatusConflict, gin.H{
+					"error": fmt.Sprintf("Ushbu Guvohnoma (INA) raqami ('%s') bilan boshqa o'quvchi ('%s', %s sinfi) allaqachon ro'yxatdan o'tgan!", cleanINA, existingStudentName, existingClassName),
+				})
+				return
+			}
+		}
 	}
 
 	tx, err := dbConn.Begin()

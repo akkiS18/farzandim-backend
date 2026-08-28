@@ -84,9 +84,10 @@ func (h *GradeHandler) CreateGrade(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	// 2. Validate Student exists and is not deleted, and retrieve class_id
+	// 2. Validate Student exists and is not deleted, and retrieve class_id and enrollment_date
 	var studentClassID int
-	err = tx.QueryRow("SELECT class_id FROM students WHERE id = $1 AND is_deleted = false", req.StudentID).Scan(&studentClassID)
+	var enrollmentDate sql.NullTime
+	err = tx.QueryRow("SELECT class_id, enrollment_date FROM students WHERE id = $1 AND is_deleted = false", req.StudentID).Scan(&studentClassID, &enrollmentDate)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Student profile not found or inactive"})
 		return
@@ -250,6 +251,15 @@ func (h *GradeHandler) CreateGrade(c *gin.Context) {
 			return
 		}
 		gradeDate = parsedDate
+	}
+
+	if enrollmentDate.Valid {
+		enrollDateOnly := time.Date(enrollmentDate.Time.Year(), enrollmentDate.Time.Month(), enrollmentDate.Time.Day(), 0, 0, 0, 0, time.UTC)
+		gradeDateOnly := time.Date(gradeDate.Year(), gradeDate.Month(), gradeDate.Day(), 0, 0, 0, 0, time.UTC)
+		if gradeDateOnly.Before(enrollDateOnly) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("O'quvchi ushbu sanada (%s) hali sinfga qo'shilmagan (sinfga qo'shilish sanasi: %s)", gradeDate.Format("2006-01-02"), enrollmentDate.Time.Format("2006-01-02"))})
+			return
+		}
 	}
 
 	// Check if this date falls on a holiday for this class
@@ -991,9 +1001,10 @@ func (h *GradeHandler) BatchCreateGrades(c *gin.Context) {
 	var insertedGrades []models.Grade
 
 	for _, gReq := range req.Grades {
-		// Validate Student exists and retrieve class_id
+		// Validate Student exists and retrieve class_id and enrollment_date
 		var studentClassID int
-		err = tx.QueryRow("SELECT class_id FROM students WHERE id = $1 AND is_deleted = false", gReq.StudentID).Scan(&studentClassID)
+		var enrollmentDate sql.NullTime
+		err = tx.QueryRow("SELECT class_id, enrollment_date FROM students WHERE id = $1 AND is_deleted = false", gReq.StudentID).Scan(&studentClassID, &enrollmentDate)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Student ID %d not found or inactive", gReq.StudentID)})
 			return
@@ -1151,6 +1162,15 @@ func (h *GradeHandler) BatchCreateGrades(c *gin.Context) {
 				return
 			}
 			gradeDate = parsedDate
+		}
+
+		if enrollmentDate.Valid {
+			enrollDateOnly := time.Date(enrollmentDate.Time.Year(), enrollmentDate.Time.Month(), enrollmentDate.Time.Day(), 0, 0, 0, 0, time.UTC)
+			gradeDateOnly := time.Date(gradeDate.Year(), gradeDate.Month(), gradeDate.Day(), 0, 0, 0, 0, time.UTC)
+			if gradeDateOnly.Before(enrollDateOnly) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("O'quvchi (ID %d) ushbu sanada (%s) hali sinfga qo'shilmagan (sinfga qo'shilish sanasi: %s)", gReq.StudentID, gradeDate.Format("2006-01-02"), enrollmentDate.Time.Format("2006-01-02"))})
+				return
+			}
 		}
 
 		// Check if grade date falls on a holiday for this student's class

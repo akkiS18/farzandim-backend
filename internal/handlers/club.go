@@ -929,6 +929,96 @@ func (h *ClubHandler) GetStudentClubGrades(c *gin.Context) {
 	c.JSON(http.StatusOK, grades)
 }
 
+// GetClubGradeHistory returns a grouped list of past graded club sessions for a club
+func (h *ClubHandler) GetClubGradeHistory(c *gin.Context) {
+	clubIDStr := c.Param("id")
+	clubID, err := strconv.Atoi(clubIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid club ID"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn, ok := tenantDBVal.(*sql.DB)
+	if !ok || dbConn == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Tenant database connection missing"})
+		return
+	}
+
+	rows, err := dbConn.Query(`
+		SELECT 
+			to_char(cg.lesson_date, 'YYYY-MM-DD') as date_str,
+			cg.id,
+			cg.student_id,
+			COALESCE(u.first_name || ' ' || u.last_name, '') as student_name,
+			COALESCE(cls.name, '') as class_name,
+			COALESCE(cg.attendance, 'PRESENT') as attendance,
+			cg.score_value,
+			COALESCE(cg.feedback, '') as feedback
+		FROM club_grades cg
+		JOIN students s ON cg.student_id = s.id
+		JOIN users u ON s.user_id = u.id
+		LEFT JOIN classes cls ON s.class_id = cls.id
+		WHERE cg.club_id = $1 AND cg.is_deleted = false AND s.is_deleted = false AND u.is_deleted = false
+		ORDER BY cg.lesson_date DESC, u.first_name ASC
+	`, clubID)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch club grade history", "details": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	type HistoryGradeItem struct {
+		ID          int    `json:"id"`
+		StudentID   int    `json:"student_id"`
+		StudentName string `json:"student_name"`
+		ClassName   string `json:"class_name"`
+		Attendance  string `json:"attendance"`
+		ScoreValue  *int   `json:"score_value"`
+		Feedback    string `json:"feedback"`
+	}
+
+	type HistorySession struct {
+		LessonDate string             `json:"lesson_date"`
+		Grades     []HistoryGradeItem `json:"grades"`
+	}
+
+	sessionMap := make(map[string]*HistorySession)
+	var sessionOrder []string
+
+	for rows.Next() {
+		var dateStr string
+		var g HistoryGradeItem
+		var scoreVal sql.NullInt64
+
+		if err := rows.Scan(&dateStr, &g.ID, &g.StudentID, &g.StudentName, &g.ClassName, &g.Attendance, &scoreVal, &g.Feedback); err == nil {
+			if scoreVal.Valid {
+				v := int(scoreVal.Int64)
+				g.ScoreValue = &v
+			}
+
+			sess, exists := sessionMap[dateStr]
+			if !exists {
+				sess = &HistorySession{
+					LessonDate: dateStr,
+					Grades:     []HistoryGradeItem{},
+				}
+				sessionMap[dateStr] = sess
+				sessionOrder = append(sessionOrder, dateStr)
+			}
+			sess.Grades = append(sess.Grades, g)
+		}
+	}
+
+	result := []HistorySession{}
+	for _, dateStr := range sessionOrder {
+		result = append(result, *sessionMap[dateStr])
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
 func resolveStudentID(db *sql.DB, idInput int) (int, error) {
 	var realStudentID int
 	err := db.QueryRow(`
