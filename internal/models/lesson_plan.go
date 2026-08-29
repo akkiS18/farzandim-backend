@@ -70,3 +70,25 @@ type BatchLessonPlanRequest struct {
 	Overwrite     bool                  `json:"overwrite"`
 	Items         []BatchLessonPlanItem `json:"items" binding:"required"`
 }
+
+type LessonPlanSlotItem struct {
+	ID           string `json:"id"`
+	Date         string `json:"date"`
+	DisplayDate  string `json:"display_date"`
+	DayLetter    string `json:"day_letter"`
+	DayOfWeek    int    `json:"day_of_week"`
+	LessonNumber int    `json:"lesson_number"`
+	TopicName    string `json:"topic_name"`
+	Notes        string `json:"notes"`
+	PlanID       *int   `json:"plan_id,omitempty"`
+	IsException  bool   `json:"is_exception"`
+}
+
+type LessonPlanSlotsResponse struct {
+	ClassID     int                  `json:"class_id"`
+	SubjectID   int                  `json:"subject_id"`
+	StartDate   string               `json:"start_date"`
+	EndDate     string               `json:"end_date"`
+	TotalSlots  int                  `json:"total_slots"`
+	Slots       []LessonPlanSlotItem `json:"slots"`
+}

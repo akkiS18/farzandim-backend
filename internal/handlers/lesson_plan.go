@@ -20,6 +20,274 @@ func NewLessonPlanHandler() *LessonPlanHandler {
 	return &LessonPlanHandler{}
 }
 
+// GetSlots returns dynamically generated and deduplicated schedule slots for a class & subject within a date range,
+// taking into account weekly schedule, holidays (matching class/level), schedule exceptions, and existing lesson plans.
+func (h *LessonPlanHandler) GetSlots(c *gin.Context) {
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn, ok := tenantDBVal.(*sql.DB)
+	if !ok || dbConn == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Tenant database connection missing"})
+		return
+	}
+
+	classIDStr := c.Query("class_id")
+	subjectIDStr := c.Query("subject_id")
+	startDateStr := c.Query("start_date")
+	endDateStr := c.Query("end_date")
+
+	classID, err := strconv.Atoi(classIDStr)
+	if err != nil || classID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Sinf tanlanmagan (class_id)"})
+		return
+	}
+	subjectID, err := strconv.Atoi(subjectIDStr)
+	if err != nil || subjectID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Fan tanlanmagan (subject_id)"})
+		return
+	}
+
+	startDate, err := parseFlexibleDate(startDateStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Boshlanish sanasi noto'g'ri (start_date)"})
+		return
+	}
+	endDate, err := parseFlexibleDate(endDateStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Tugash sanasi noto'g'ri (end_date)"})
+		return
+	}
+
+	if startDate.After(endDate) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Boshlanish sanasi tugash sanasidan katta bo'lishi mumkin emas"})
+		return
+	}
+
+	userRoleVal, _ := c.Get("role")
+	userRole, _ := userRoleVal.(string)
+	userIDVal, _ := c.Get("userID")
+	userIDStr, _ := userIDVal.(string)
+	currentUserID, _ := strconv.Atoi(userIDStr)
+
+	// Authorization check
+	if userRole != "ADMIN" {
+		var isAllowed bool
+		_ = dbConn.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM class_teachers 
+				WHERE (teacher_id = $1 AND subject_id = $2 AND class_id = $3 AND is_deleted = false)
+				   OR (teacher_id = $1 AND class_id = $3 AND is_main_teacher = true AND is_deleted = false)
+			)
+		`, currentUserID, subjectID, classID).Scan(&isAllowed)
+		if !isAllowed {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Siz ushbu sinf yoki fanga ruxsatga ega emassiz"})
+			return
+		}
+	}
+
+	// 1. Get class level
+	var classLevel int
+	_ = dbConn.QueryRow("SELECT level FROM classes WHERE id = $1 AND is_deleted = false", classID).Scan(&classLevel)
+
+	// 2. Fetch weekly recurring schedule for this class & subject active in date range
+	// Deduplicate by (day_of_week, lesson_number)
+	type weeklySlot struct {
+		dayOfWeek    int
+		lessonNumber int
+	}
+	weeklySlotSet := make(map[string]weeklySlot)
+
+	schedRows, err := dbConn.Query(`
+		SELECT day_of_week, lesson_number
+		FROM class_schedules
+		WHERE class_id = $1 AND subject_id = $2 AND is_deleted = false
+		  AND start_date <= $4 AND end_date >= $3
+		ORDER BY start_date DESC, day_of_week, lesson_number
+	`, classID, subjectID, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+	if err == nil {
+		defer schedRows.Close()
+		for schedRows.Next() {
+			var dow, ln int
+			if err := schedRows.Scan(&dow, &ln); err == nil {
+				k := fmt.Sprintf("%d_%d", dow, ln)
+				weeklySlotSet[k] = weeklySlot{dayOfWeek: dow, lessonNumber: ln}
+			}
+		}
+	}
+
+	// 3. Fetch holidays in date range matching this class / level
+	holidaysSet := make(map[string]bool)
+	holRows, err := dbConn.Query(`
+		SELECT holiday_date
+		FROM school_holidays
+		WHERE is_deleted = false
+		  AND holiday_date BETWEEN $1 AND $2
+		  AND (
+			(cardinality(target_levels) IS NULL OR cardinality(target_levels) = 0)
+			AND (cardinality(target_classes) IS NULL OR cardinality(target_classes) = 0)
+			OR $3 = ANY(target_levels)
+			OR $4 = ANY(target_classes)
+		  )
+	`, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"), classLevel, classID)
+	if err == nil {
+		defer holRows.Close()
+		for holRows.Next() {
+			var hDate time.Time
+			if err := holRows.Scan(&hDate); err == nil {
+				holidaysSet[hDate.Format("2006-01-02")] = true
+			}
+		}
+	}
+
+	// 4. Fetch schedule exceptions in date range for this class
+	type exceptionItem struct {
+		SubjectID *int
+	}
+	// key: "YYYY-MM-DD_lessonNumber"
+	exceptionsMap := make(map[string]exceptionItem)
+	excRows, err := dbConn.Query(`
+		SELECT date, lesson_number, subject_id
+		FROM class_schedule_exceptions
+		WHERE class_id = $1 AND is_deleted = false
+		  AND date BETWEEN $2 AND $3
+	`, classID, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+	if err == nil {
+		defer excRows.Close()
+		for excRows.Next() {
+			var eDate time.Time
+			var lNum int
+			var sID *int
+			if err := excRows.Scan(&eDate, &lNum, &sID); err == nil {
+				k := fmt.Sprintf("%s_%d", eDate.Format("2006-01-02"), lNum)
+				exceptionsMap[k] = exceptionItem{SubjectID: sID}
+			}
+		}
+	}
+
+	// 5. Fetch existing lesson plans in DB for this class & subject & date range
+	type savedPlan struct {
+		ID        int
+		TopicName string
+		Notes     string
+	}
+	// key: "YYYY-MM-DD_lessonNumber"
+	savedPlansMap := make(map[string]savedPlan)
+	planRows, err := dbConn.Query(`
+		SELECT id, start_date, lesson_number, topic_name, notes
+		FROM lesson_plans
+		WHERE class_id = $1 AND subject_id = $2 AND is_deleted = false
+		  AND start_date BETWEEN $3 AND $4
+	`, classID, subjectID, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+	if err == nil {
+		defer planRows.Close()
+		for planRows.Next() {
+			var pID, lNum int
+			var pDate time.Time
+			var tName, pNotes string
+			if err := planRows.Scan(&pID, &pDate, &lNum, &tName, &pNotes); err == nil {
+				k := fmt.Sprintf("%s_%d", pDate.Format("2006-01-02"), lNum)
+				savedPlansMap[k] = savedPlan{ID: pID, TopicName: tName, Notes: pNotes}
+			}
+		}
+	}
+
+	// 6. Generate date timeline day-by-day
+	dayLetters := map[int]string{
+		1: "D", 2: "S", 3: "Ch", 4: "P", 5: "J", 6: "Sh", 7: "Y",
+	}
+
+	slots := []models.LessonPlanSlotItem{}
+
+	cur := startDate
+	for !cur.After(endDate) {
+		dateStr := cur.Format("2006-01-02")
+		displayDate := cur.Format("02.01.2006")
+
+		if !holidaysSet[dateStr] {
+			dayOfWeek := int(cur.Weekday())
+			if dayOfWeek == 0 {
+				dayOfWeek = 7
+			}
+			letter := dayLetters[dayOfWeek]
+			if letter == "" {
+				letter = "D"
+			}
+
+			// Find all regular weekly slots for this weekday
+			dayLessonNumbers := make(map[int]bool)
+			for _, ws := range weeklySlotSet {
+				if ws.dayOfWeek == dayOfWeek {
+					dayLessonNumbers[ws.lessonNumber] = true
+				}
+			}
+
+			// Also check exceptions on this date for additional slots that got replaced WITH this subject
+			for k, exc := range exceptionsMap {
+				if strings.HasPrefix(k, dateStr+"_") && exc.SubjectID != nil && *exc.SubjectID == subjectID {
+					parts := strings.Split(k, "_")
+					if len(parts) == 2 {
+						if lNum, err := strconv.Atoi(parts[1]); err == nil {
+							dayLessonNumbers[lNum] = true
+						}
+					}
+				}
+			}
+
+			// Sort lesson numbers for this day (1..10)
+			for lNum := 1; lNum <= 10; lNum++ {
+				if !dayLessonNumbers[lNum] {
+					continue
+				}
+
+				excKey := fmt.Sprintf("%s_%d", dateStr, lNum)
+				isExc := false
+
+				if exc, hasExc := exceptionsMap[excKey]; hasExc {
+					// If exception canceled this lesson (SubjectID == nil) or changed to another subject
+					if exc.SubjectID == nil || *exc.SubjectID != subjectID {
+						continue
+					}
+					isExc = true
+				}
+
+				slotID := fmt.Sprintf("%s_%d", dateStr, lNum)
+				var planID *int
+				topicName := ""
+				notes := ""
+
+				if sp, hasPlan := savedPlansMap[slotID]; hasPlan {
+					planID = &sp.ID
+					topicName = sp.TopicName
+					notes = sp.Notes
+				}
+
+				slots = append(slots, models.LessonPlanSlotItem{
+					ID:           slotID,
+					Date:         dateStr,
+					DisplayDate:  displayDate,
+					DayLetter:    letter,
+					DayOfWeek:    dayOfWeek,
+					LessonNumber: lNum,
+					TopicName:    topicName,
+					Notes:        notes,
+					PlanID:       planID,
+					IsException:  isExc,
+				})
+			}
+		}
+
+		cur = cur.AddDate(0, 0, 1)
+	}
+
+	c.JSON(http.StatusOK, models.LessonPlanSlotsResponse{
+		ClassID:    classID,
+		SubjectID:  subjectID,
+		StartDate:  startDate.Format("2006-01-02"),
+		EndDate:    endDate.Format("2006-01-02"),
+		TotalSlots: len(slots),
+		Slots:      slots,
+	})
+}
+
 // List returns lesson plans with optional filters: class_id, subject_id, teacher_id, start_date range
 func (h *LessonPlanHandler) List(c *gin.Context) {
 	tenantDBVal, _ := c.Get("tenantDB")
@@ -46,9 +314,12 @@ func (h *LessonPlanHandler) List(c *gin.Context) {
 	args := []interface{}{}
 	argIdx := 1
 
-	// Teachers can ONLY view their own lesson plans even if they are MAIN_TEACHER (sinf rahbari)
+	// Teachers can view their own plans OR plans for classes where they are MAIN_TEACHER (sinf rahbari)
 	if userRole != "ADMIN" {
-		whereClauses = append(whereClauses, fmt.Sprintf("lp.teacher_id = $%d", argIdx))
+		whereClauses = append(whereClauses, fmt.Sprintf(`(lp.teacher_id = $%d OR EXISTS(
+			SELECT 1 FROM class_teachers ct 
+			WHERE ct.class_id = lp.class_id AND ct.teacher_id = $%d AND ct.is_main_teacher = true AND ct.is_deleted = false
+		))`, argIdx, argIdx))
 		args = append(args, currentUserID)
 		argIdx++
 	} else if teacherIDStr := c.Query("teacher_id"); teacherIDStr != "" {
@@ -373,12 +644,18 @@ func (h *LessonPlanHandler) Create(c *gin.Context) {
 		return
 	}
 
-	// Teacher can only add plans for subjects they teach
+	// Teacher can add plans for subjects they teach OR for classes where they are the Main Teacher
 	if userRole != "ADMIN" {
 		var isAllowed bool
-		_ = dbConn.QueryRow("SELECT EXISTS(SELECT 1 FROM class_teachers WHERE teacher_id = $1 AND subject_id = $2 AND is_deleted = false)", currentUserID, req.SubjectID).Scan(&isAllowed)
+		_ = dbConn.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM class_teachers 
+				WHERE (teacher_id = $1 AND subject_id = $2 AND class_id = $3 AND is_deleted = false)
+				   OR (teacher_id = $1 AND class_id = $3 AND is_main_teacher = true AND is_deleted = false)
+			)
+		`, currentUserID, req.SubjectID, req.ClassID).Scan(&isAllowed)
 		if !isAllowed {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Siz ushbu fandan dars bermaysiz. Faqat o'zingizning fanlaringiz rejasini kiritishingiz mumkin."})
+			c.JSON(http.StatusForbidden, gin.H{"error": "Siz ushbu sinf yoki fanga ruxsatga ega emassiz. Faqat o'zingiz dars beradigan yoki sinf rahbari bo'lgan sinflar rejasini kiritishingiz mumkin."})
 			return
 		}
 	}
@@ -448,12 +725,18 @@ func (h *LessonPlanHandler) BatchSave(c *gin.Context) {
 		return
 	}
 
-	// Teacher can only add plans for subjects they teach
+	// Teacher can save plans for subjects they teach OR for classes where they are the Main Teacher
 	if userRole != "ADMIN" {
 		var isAllowed bool
-		_ = dbConn.QueryRow("SELECT EXISTS(SELECT 1 FROM class_teachers WHERE teacher_id = $1 AND subject_id = $2 AND is_deleted = false)", currentUserID, req.SubjectID).Scan(&isAllowed)
+		_ = dbConn.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM class_teachers 
+				WHERE (teacher_id = $1 AND subject_id = $2 AND class_id = $3 AND is_deleted = false)
+				   OR (teacher_id = $1 AND class_id = $3 AND is_main_teacher = true AND is_deleted = false)
+			)
+		`, currentUserID, req.SubjectID, req.ClassID).Scan(&isAllowed)
 		if !isAllowed {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Siz ushbu fandan dars bermaysiz. Faqat o'zingizning fanlaringiz rejasini kiritishingiz mumkin."})
+			c.JSON(http.StatusForbidden, gin.H{"error": "Siz ushbu sinf yoki fanga ruxsatga ega emassiz. Faqat o'zingiz dars beradigan yoki sinf rahbari bo'lgan sinflar rejasini kiritishingiz mumkin."})
 			return
 		}
 	}
@@ -465,7 +748,7 @@ func (h *LessonPlanHandler) BatchSave(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	// If date range specified or overwrite is true, clean existing plans in this range for this teacher, class, subject
+	// If date range specified or overwrite is true, clean existing plans in this range for this class and subject
 	if req.StartDateFrom != "" && req.StartDateTo != "" {
 		parsedFrom, errFrom := parseFlexibleDate(req.StartDateFrom)
 		parsedTo, errTo := parseFlexibleDate(req.StartDateTo)
@@ -473,8 +756,8 @@ func (h *LessonPlanHandler) BatchSave(c *gin.Context) {
 			_, err = tx.Exec(`
 				UPDATE lesson_plans 
 				SET is_deleted = true, deleted_at = NOW(), updated_at = NOW() 
-				WHERE class_id = $1 AND subject_id = $2 AND teacher_id = $3 AND start_date >= $4 AND start_date <= $5 AND is_deleted = false
-			`, req.ClassID, req.SubjectID, currentUserID, parsedFrom.Format("2006-01-02"), parsedTo.Format("2006-01-02"))
+				WHERE class_id = $1 AND subject_id = $2 AND start_date >= $3 AND start_date <= $4 AND is_deleted = false
+			`, req.ClassID, req.SubjectID, parsedFrom.Format("2006-01-02"), parsedTo.Format("2006-01-02"))
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Eski rejalarni tozalashda xatolik", "details": err.Error()})
 				return
@@ -484,8 +767,8 @@ func (h *LessonPlanHandler) BatchSave(c *gin.Context) {
 		_, err = tx.Exec(`
 			UPDATE lesson_plans 
 			SET is_deleted = true, deleted_at = NOW(), updated_at = NOW() 
-			WHERE class_id = $1 AND subject_id = $2 AND teacher_id = $3 AND is_deleted = false
-		`, req.ClassID, req.SubjectID, currentUserID)
+			WHERE class_id = $1 AND subject_id = $2 AND is_deleted = false
+		`, req.ClassID, req.SubjectID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Eski rejalarni tozalashda xatolik", "details": err.Error()})
 			return
@@ -588,15 +871,18 @@ func (h *LessonPlanHandler) Update(c *gin.Context) {
 		return
 	}
 
-	// Permission check
+	// Permission check: owner teacher OR class main teacher OR admin
 	if userRole != "ADMIN" {
-		var ownerID int
-		err := dbConn.QueryRow("SELECT teacher_id FROM lesson_plans WHERE id = $1 AND is_deleted = false", id).Scan(&ownerID)
-		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Dars rejasi topilmadi"})
-			return
-		}
-		if ownerID != currentUserID {
+		var isAllowed bool
+		err := dbConn.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM lesson_plans lp
+				JOIN class_teachers ct ON ct.class_id = lp.class_id AND ct.teacher_id = $2 AND ct.is_deleted = false
+				WHERE lp.id = $1 AND lp.is_deleted = false
+				  AND (lp.teacher_id = $2 OR ct.is_main_teacher = true)
+			)
+		`, id, currentUserID).Scan(&isAllowed)
+		if err != nil || !isAllowed {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: siz bu rejani o'zgartira olmaysiz"})
 			return
 		}
@@ -656,15 +942,18 @@ func (h *LessonPlanHandler) Delete(c *gin.Context) {
 	userIDStr, _ := userIDVal.(string)
 	currentUserID, _ := strconv.Atoi(userIDStr)
 
-	// Permission check
+	// Permission check: owner teacher OR class main teacher OR admin
 	if userRole != "ADMIN" {
-		var ownerID int
-		err := dbConn.QueryRow("SELECT teacher_id FROM lesson_plans WHERE id = $1 AND is_deleted = false", id).Scan(&ownerID)
-		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Dars rejasi topilmadi"})
-			return
-		}
-		if ownerID != currentUserID {
+		var isAllowed bool
+		err := dbConn.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM lesson_plans lp
+				JOIN class_teachers ct ON ct.class_id = lp.class_id AND ct.teacher_id = $2 AND ct.is_deleted = false
+				WHERE lp.id = $1 AND lp.is_deleted = false
+				  AND (lp.teacher_id = $2 OR ct.is_main_teacher = true)
+			)
+		`, id, currentUserID).Scan(&isAllowed)
+		if err != nil || !isAllowed {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: siz bu rejani o'chira olmaysiz"})
 			return
 		}

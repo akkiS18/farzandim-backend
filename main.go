@@ -204,6 +204,7 @@ func main() {
 
 		// Dars Ish Rejalari (Lesson Plans / Syllabus) APIs
 		authTenantGroup.GET("/lesson-plans", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.List)
+		authTenantGroup.GET("/lesson-plans/slots", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.GetSlots)
 		authTenantGroup.GET("/lesson-plans/meta", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.GetMeta)
 		authTenantGroup.GET("/lesson-plans/class-subjects", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.GetClassSubjects)
 		authTenantGroup.POST("/lesson-plans", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), lessonPlanHandler.Create)
