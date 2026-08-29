@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -65,10 +67,21 @@ func (tm *TenantManager) GetTenantDB(schoolID string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to open tenant DB connection: %w", err)
 	}
 
-	// Tune connection pool settings for high concurrency
-	newDB.SetMaxOpenConns(15)
-	newDB.SetMaxIdleConns(15)
-	newDB.SetConnMaxLifetime(5 * time.Minute)
+	// Tune connection pool settings for high concurrency and resource protection
+	maxOpen := 35
+	if envMax := os.Getenv("DB_MAX_OPEN_CONNS"); envMax != "" {
+		if val, err := strconv.Atoi(envMax); err == nil && val > 0 {
+			maxOpen = val
+		}
+	}
+	maxIdle := maxOpen / 2
+	if maxIdle < 15 {
+		maxIdle = 15
+	}
+
+	newDB.SetMaxOpenConns(maxOpen)
+	newDB.SetMaxIdleConns(maxIdle)
+	newDB.SetConnMaxLifetime(10 * time.Minute)
 
 	if err := newDB.Ping(); err != nil {
 		newDB.Close()

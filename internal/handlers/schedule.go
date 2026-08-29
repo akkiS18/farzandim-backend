@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -9,11 +10,20 @@ import (
 	"time"
 
 	"github.com/farzandim/backend/internal/audit"
+	"github.com/farzandim/backend/internal/cache"
 	"github.com/farzandim/backend/internal/models"
 	"github.com/farzandim/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/xuri/excelize/v2"
 )
+
+func invalidateScheduleCache(c *gin.Context) {
+	if cache.GlobalCache != nil {
+		schoolIDVal, _ := c.Get("schoolID")
+		schoolID, _ := schoolIDVal.(string)
+		cache.GlobalCache.InvalidatePrefix("schedule:" + schoolID)
+	}
+}
 
 type ScheduleHandler struct{}
 
@@ -31,10 +41,70 @@ func (h *ScheduleHandler) GetSchedule(c *gin.Context) {
 	}
 
 	dateParam := c.Query("date")
+	startDateParam := c.Query("start_date")
+	ignoreHoliday := c.Query("ignore_holiday") == "true" || c.Query("raw") == "true" || c.Query("template") == "true" || startDateParam != ""
+	rawMode := c.Query("raw") == "true" || c.Query("template") == "true" || startDateParam != ""
+
+	roleVal, _ := c.Get("role")
+	role, _ := roleVal.(string)
+	schoolIDVal, _ := c.Get("schoolID")
+	schoolID, _ := schoolIDVal.(string)
+	cacheKey := fmt.Sprintf("schedule:%s:%d:%s", schoolID, classID, c.Request.URL.RequestURI())
+
+	if (role == "PARENT" || role == "STUDENT") && cache.GlobalCache != nil {
+		if cachedData, ok := cache.GlobalCache.Get(cacheKey); ok {
+			c.Data(http.StatusOK, "application/json; charset=utf-8", cachedData)
+			return
+		}
+	}
+
 	tenantDBVal, _ := c.Get("tenantDB")
 	dbConn := tenantDBVal.(*sql.DB)
 
 	var list []models.ClassScheduleResponse
+
+	if startDateParam != "" {
+		parsedStartDate, err := time.Parse("2006-01-02", startDateParam)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid start_date format. Use YYYY-MM-DD"})
+			return
+		}
+
+		query := `
+			SELECT cs.id, cs.class_id, cs.day_of_week, cs.lesson_number, cs.subject_id, s.name as subject_name, cs.start_date, cs.end_date
+			FROM class_schedules cs
+			JOIN subjects s ON cs.subject_id = s.id
+			WHERE cs.class_id = $1 AND cs.is_deleted = false AND s.is_deleted = false
+			  AND cs.start_date = $2::date
+			ORDER BY cs.day_of_week, cs.lesson_number`
+		rows, err := dbConn.Query(query, classID, parsedStartDate)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query class schedule", "details": err.Error()})
+			return
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var item models.ClassScheduleResponse
+			var startDate, endDate time.Time
+			err := rows.Scan(&item.ID, &item.ClassID, &item.DayOfWeek, &item.LessonNumber, &item.SubjectID, &item.SubjectName, &startDate, &endDate)
+			if err != nil {
+				rows.Close()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse schedule row", "details": err.Error()})
+				return
+			}
+			item.StartDate = startDate.Format("2006-01-02")
+			item.EndDate = endDate.Format("2006-01-02")
+			list = append(list, item)
+		}
+		rows.Close()
+
+		if list == nil {
+			list = []models.ClassScheduleResponse{}
+		}
+		c.JSON(http.StatusOK, list)
+		return
+	}
 
 	if dateParam != "" {
 		parsedQueryDate, err := time.Parse("2006-01-02", dateParam)
@@ -43,25 +113,27 @@ func (h *ScheduleHandler) GetSchedule(c *gin.Context) {
 			return
 		}
 
-		// Check if this date is a holiday for this class
-		var classLevel int
-		_ = dbConn.QueryRow("SELECT level FROM classes WHERE id = $1 AND is_deleted = false", classID).Scan(&classLevel)
+		if !ignoreHoliday {
+			// Check if this date is a holiday for this class
+			var classLevel int
+			_ = dbConn.QueryRow("SELECT level FROM classes WHERE id = $1 AND is_deleted = false", classID).Scan(&classLevel)
 
-		var isHoliday bool
-		err = dbConn.QueryRow(`
-			SELECT EXISTS(
-				SELECT 1 FROM school_holidays 
-				WHERE holiday_date = $1 AND is_deleted = false
-				  AND (
-					(cardinality(target_levels) IS NULL OR cardinality(target_levels) = 0)
-					AND (cardinality(target_classes) IS NULL OR cardinality(target_classes) = 0)
-					OR $2 = ANY(target_levels)
-					OR $3 = ANY(target_classes)
-				  )
-			)`, parsedQueryDate, classLevel, classID).Scan(&isHoliday)
-		if err == nil && isHoliday {
-			c.JSON(http.StatusOK, []models.ClassScheduleResponse{})
-			return
+			var isHoliday bool
+			err = dbConn.QueryRow(`
+				SELECT EXISTS(
+					SELECT 1 FROM school_holidays 
+					WHERE holiday_date = $1 AND is_deleted = false
+					  AND (
+						(cardinality(target_levels) IS NULL OR cardinality(target_levels) = 0)
+						AND (cardinality(target_classes) IS NULL OR cardinality(target_classes) = 0)
+						OR $2 = ANY(target_levels)
+						OR $3 = ANY(target_classes)
+					  )
+				)`, parsedQueryDate, classLevel, classID).Scan(&isHoliday)
+			if err == nil && isHoliday {
+				c.JSON(http.StatusOK, []models.ClassScheduleResponse{})
+				return
+			}
 		}
 
 		query := `
@@ -99,72 +171,74 @@ func (h *ScheduleHandler) GetSchedule(c *gin.Context) {
 		}
 		rows.Close()
 
-		// Fetch exceptions for this specific date
-		excRows, err := dbConn.Query(`
-			SELECT ce.id, ce.lesson_number, ce.subject_id, s.name as subject_name
-			FROM class_schedule_exceptions ce
-			LEFT JOIN subjects s ON ce.subject_id = s.id
-			WHERE ce.class_id = $1 AND ce.date = $2 AND ce.is_deleted = false
-		`, classID, parsedQueryDate)
-		if err == nil {
-			type excData struct {
-				ID          int
-				SubjectID   *int
-				SubjectName *string
-			}
-			exceptions := make(map[int]excData)
-			for excRows.Next() {
-				var id, lessonNum int
-				var subID *int
-				var subName *string
-				if errScan := excRows.Scan(&id, &lessonNum, &subID, &subName); errScan == nil {
-					exceptions[lessonNum] = excData{ID: id, SubjectID: subID, SubjectName: subName}
+		if !rawMode {
+			// Fetch exceptions for this specific date
+			excRows, err := dbConn.Query(`
+				SELECT ce.id, ce.lesson_number, ce.subject_id, s.name as subject_name
+				FROM class_schedule_exceptions ce
+				LEFT JOIN subjects s ON ce.subject_id = s.id
+				WHERE ce.class_id = $1 AND ce.date = $2 AND ce.is_deleted = false
+			`, classID, parsedQueryDate)
+			if err == nil {
+				type excData struct {
+					ID          int
+					SubjectID   *int
+					SubjectName *string
 				}
-			}
-			excRows.Close()
+				exceptions := make(map[int]excData)
+				for excRows.Next() {
+					var id, lessonNum int
+					var subID *int
+					var subName *string
+					if errScan := excRows.Scan(&id, &lessonNum, &subID, &subName); errScan == nil {
+						exceptions[lessonNum] = excData{ID: id, SubjectID: subID, SubjectName: subName}
+					}
+				}
+				excRows.Close()
 
-			targetDayOfWeek := int(parsedQueryDate.Weekday())
-			if targetDayOfWeek == 0 {
-				targetDayOfWeek = 7
-			}
+				targetDayOfWeek := int(parsedQueryDate.Weekday())
+				if targetDayOfWeek == 0 {
+					targetDayOfWeek = 7
+				}
 
-			for i, item := range list {
-				if item.DayOfWeek == targetDayOfWeek {
-					if exc, found := exceptions[item.LessonNumber]; found {
-						if exc.SubjectID == nil {
-							list[i].SubjectID = 0
-							list[i].SubjectName = "Bekor qilingan"
-						} else {
-							list[i].SubjectID = *exc.SubjectID
-							if exc.SubjectName != nil {
-								list[i].SubjectName = *exc.SubjectName
+				for i, item := range list {
+					if item.DayOfWeek == targetDayOfWeek {
+						if exc, found := exceptions[item.LessonNumber]; found {
+							if exc.SubjectID == nil {
+								list[i].SubjectID = 0
+								list[i].SubjectName = "Bekor qilingan"
+							} else {
+								list[i].SubjectID = *exc.SubjectID
+								if exc.SubjectName != nil {
+									list[i].SubjectName = *exc.SubjectName
+								}
 							}
+							delete(exceptions, item.LessonNumber)
 						}
-						delete(exceptions, item.LessonNumber)
 					}
 				}
-			}
 
-			for lessonNum, exc := range exceptions {
-				if exc.SubjectID != nil {
-					weekday := int(parsedQueryDate.Weekday())
-					if weekday == 0 {
-						weekday = 7
+				for lessonNum, exc := range exceptions {
+					if exc.SubjectID != nil {
+						weekday := int(parsedQueryDate.Weekday())
+						if weekday == 0 {
+							weekday = 7
+						}
+						var subName string
+						if exc.SubjectName != nil {
+							subName = *exc.SubjectName
+						}
+						list = append(list, models.ClassScheduleResponse{
+							ID:           exc.ID,
+							ClassID:      classID,
+							DayOfWeek:    weekday,
+							LessonNumber: lessonNum,
+							SubjectID:    *exc.SubjectID,
+							SubjectName:  subName,
+							StartDate:    dateParam,
+							EndDate:      dateParam,
+						})
 					}
-					var subName string
-					if exc.SubjectName != nil {
-						subName = *exc.SubjectName
-					}
-					list = append(list, models.ClassScheduleResponse{
-						ID:           exc.ID,
-						ClassID:      classID,
-						DayOfWeek:    weekday,
-						LessonNumber: lessonNum,
-						SubjectID:    *exc.SubjectID,
-						SubjectName:  subName,
-						StartDate:    dateParam,
-						EndDate:      dateParam,
-					})
 				}
 			}
 		}
@@ -195,6 +269,12 @@ func (h *ScheduleHandler) GetSchedule(c *gin.Context) {
 			item.StartDate = startDate.Format("2006-01-02")
 			item.EndDate = endDate.Format("2006-01-02")
 			list = append(list, item)
+		}
+	}
+
+	if (role == "PARENT" || role == "STUDENT") && cache.GlobalCache != nil {
+		if data, err := json.Marshal(list); err == nil {
+			cache.GlobalCache.Set(cacheKey, data, 30*time.Second)
 		}
 	}
 
@@ -371,6 +451,8 @@ func (h *ScheduleHandler) SaveSchedule(c *gin.Context) {
 		return
 	}
 
+	invalidateScheduleCache(c)
+
 	c.JSON(http.StatusOK, gin.H{"message": "Dars jadvali muvaffaqiyatli saqlandi", "schedules": newSchedules})
 }
 
@@ -387,7 +469,7 @@ func (h *ScheduleHandler) ListScheduleExceptions(c *gin.Context) {
 	dbConn := tenantDBVal.(*sql.DB)
 
 	query := `
-		SELECT ce.id, ce.class_id, ce.date, ce.lesson_number, ce.subject_id, s.name as subject_name, ce.is_deleted, ce.created_at
+		SELECT ce.id, ce.class_id, ce.date, ce.lesson_number, ce.subject_id, COALESCE(s.name, '') as subject_name, ce.is_deleted, ce.created_at
 		FROM class_schedule_exceptions ce
 		LEFT JOIN subjects s ON ce.subject_id = s.id
 		WHERE ce.class_id = $1
@@ -404,13 +486,16 @@ func (h *ScheduleHandler) ListScheduleExceptions(c *gin.Context) {
 	for rows.Next() {
 		var item models.ScheduleExceptionResponse
 		var overrideDate time.Time
-		err := rows.Scan(&item.ID, &item.ClassID, &overrideDate, &item.LessonNumber, &item.SubjectID, &item.SubjectName, &item.IsDeleted, &item.CreatedAt)
+		var subName sql.NullString
+		err := rows.Scan(&item.ID, &item.ClassID, &overrideDate, &item.LessonNumber, &item.SubjectID, &subName, &item.IsDeleted, &item.CreatedAt)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse exception history row", "details": err.Error()})
 			return
 		}
 		item.Date = overrideDate.Format("2006-01-02")
-		if item.SubjectID == nil {
+		if subName.Valid && subName.String != "" {
+			item.SubjectName = subName.String
+		} else {
 			item.SubjectName = "Bekor qilingan"
 		}
 		list = append(list, item)
@@ -538,6 +623,8 @@ func (h *ScheduleHandler) SaveScheduleException(c *gin.Context) {
 		return
 	}
 
+	invalidateScheduleCache(c)
+
 	c.JSON(http.StatusOK, gin.H{"message": "Dars o'zgarishi muvaffaqiyatli saqlandi", "exception": newException})
 }
 
@@ -660,6 +747,8 @@ func (h *ScheduleHandler) DeleteScheduleException(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit changes"})
 		return
 	}
+
+	invalidateScheduleCache(c)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Dars o'zgarishi muvaffaqiyatli o'chirildi"})
 }
@@ -991,9 +1080,11 @@ func (h *ScheduleHandler) BatchImportSchedulesSmart(c *gin.Context) {
 	}
 
 	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit database transaction", "details": err.Error()})
 		return
 	}
+
+	invalidateScheduleCache(c)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": fmt.Sprintf("Muvaffaqiyatli! %d ta dars jadvali yoppasiga saqlandi va yangilandi.", insertedCount),

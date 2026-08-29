@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/farzandim/backend/internal/cache"
 	"github.com/farzandim/backend/internal/config"
 	"github.com/farzandim/backend/internal/db"
 	"github.com/farzandim/backend/internal/handlers"
@@ -27,6 +28,10 @@ func main() {
 	db.InitCentralDB(cfg.CentralDBURL)
 	db.MigrateCentralDB()
 	db.InitTenantManager()
+
+	// Initialize In-Memory Fast Cache & QoS Limiter to isolate teacher performance
+	cache.InitFastCache(5000)
+	middleware.InitQoS()
 
 	// Load and start telegram bots for all configured schools from central database
 	log.Println("Starting Telegram Bots for schools...")
@@ -159,6 +164,7 @@ func main() {
 	authTenantGroup := r.Group("/api/schools")
 	authTenantGroup.Use(middleware.AuthMiddleware(cfg.JWTSecret))
 	authTenantGroup.Use(middleware.TenantMiddleware())
+	authTenantGroup.Use(middleware.QoSMiddleware())
 	{
 		authTenantGroup.GET("/classes", classHandler.ListClasses)
 		authTenantGroup.POST("/classes", middleware.RequireRole("ADMIN"), classHandler.CreateClass)

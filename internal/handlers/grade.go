@@ -10,9 +10,18 @@ import (
 	"time"
 
 	"github.com/farzandim/backend/internal/audit"
+	"github.com/farzandim/backend/internal/cache"
 	"github.com/farzandim/backend/internal/models"
 	"github.com/gin-gonic/gin"
 )
+
+func invalidateGradeCache(c *gin.Context) {
+	if cache.GlobalCache != nil {
+		schoolIDVal, _ := c.Get("schoolID")
+		schoolID, _ := schoolIDVal.(string)
+		cache.GlobalCache.InvalidatePrefix("grades:" + schoolID)
+	}
+}
 
 type GradeHandler struct{}
 
@@ -335,6 +344,8 @@ func (h *GradeHandler) CreateGrade(c *gin.Context) {
 		return
 	}
 
+	invalidateGradeCache(c)
+
 	c.JSON(http.StatusCreated, newGrade)
 }
 
@@ -346,6 +357,17 @@ func (h *GradeHandler) ListGrades(c *gin.Context) {
 	userIDVal, _ := c.Get("userID")
 	userIDStr := userIDVal.(string)
 	currentUserID, _ := strconv.Atoi(userIDStr)
+
+	schoolIDVal, _ := c.Get("schoolID")
+	schoolID, _ := schoolIDVal.(string)
+	cacheKey := fmt.Sprintf("grades:%s:%s:%s", schoolID, userIDStr, c.Request.URL.RawQuery)
+
+	if (userRole == "PARENT" || userRole == "STUDENT") && cache.GlobalCache != nil {
+		if cachedData, ok := cache.GlobalCache.Get(cacheKey); ok {
+			c.Data(http.StatusOK, "application/json; charset=utf-8", cachedData)
+			return
+		}
+	}
 
 	// Filter query params
 	studentIDParam := c.Query("student_id")
@@ -492,6 +514,12 @@ func (h *GradeHandler) ListGrades(c *gin.Context) {
 		r.UpdatedAt = updatedAtTime
 
 		grades = append(grades, r)
+	}
+
+	if (userRole == "PARENT" || userRole == "STUDENT") && cache.GlobalCache != nil {
+		if data, err := json.Marshal(grades); err == nil {
+			cache.GlobalCache.Set(cacheKey, data, 15*time.Second)
+		}
 	}
 
 	c.JSON(http.StatusOK, grades)
@@ -818,6 +846,8 @@ func (h *GradeHandler) UpdateGrade(c *gin.Context) {
 		return
 	}
 
+	invalidateGradeCache(c)
+
 	c.JSON(http.StatusOK, updatedGrade)
 }
 
@@ -933,6 +963,8 @@ func (h *GradeHandler) DeleteGrade(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit database transaction", "details": err.Error()})
 		return
 	}
+
+	invalidateGradeCache(c)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Grade deleted successfully"})
 }
@@ -1251,6 +1283,8 @@ func (h *GradeHandler) BatchCreateGrades(c *gin.Context) {
 		return
 	}
 
+	invalidateGradeCache(c)
+
 	c.JSON(http.StatusCreated, insertedGrades)
 }
 
@@ -1363,6 +1397,8 @@ func (h *GradeHandler) ChangeGradeStatus(c *gin.Context) {
 		return
 	}
 
+	invalidateGradeCache(c)
+
 	c.JSON(http.StatusOK, gin.H{"message": "Statuses updated successfully", "updated_count": updatedCount})
 }
 
@@ -1450,6 +1486,8 @@ func (h *GradeHandler) ParentApproveGrade(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction", "details": err.Error()})
 		return
 	}
+
+	invalidateGradeCache(c)
 
 	c.JSON(http.StatusOK, newGrade)
 }

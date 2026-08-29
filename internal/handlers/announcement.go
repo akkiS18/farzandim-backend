@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -9,10 +10,19 @@ import (
 	"time"
 
 	"github.com/farzandim/backend/internal/audit"
+	"github.com/farzandim/backend/internal/cache"
 	"github.com/farzandim/backend/internal/models"
 	"github.com/farzandim/backend/internal/services"
 	"github.com/gin-gonic/gin"
 )
+
+func invalidateAnnouncementCache(c *gin.Context) {
+	if cache.GlobalCache != nil {
+		schoolIDVal, _ := c.Get("schoolID")
+		schoolID, _ := schoolIDVal.(string)
+		cache.GlobalCache.InvalidatePrefix("announcements:" + schoolID)
+	}
+}
 
 type AnnouncementHandler struct{}
 
@@ -306,6 +316,8 @@ func (h *AnnouncementHandler) CreateAnnouncement(c *gin.Context) {
 		return
 	}
 
+	invalidateAnnouncementCache(c)
+
 	// Fetch current school ID for sending notification
 	currentSchoolID := c.GetString("currentSchoolID")
 
@@ -319,8 +331,6 @@ func (h *AnnouncementHandler) ListAnnouncements(c *gin.Context) {
 	tenantDBVal, _ := c.Get("tenantDB")
 	dbConn := tenantDBVal.(*sql.DB)
 
-	ensureAnnouncementPollColumns(dbConn)
-
 	roleVal, exists := c.Get("role")
 	role := ""
 	if exists {
@@ -332,6 +342,19 @@ func (h *AnnouncementHandler) ListAnnouncements(c *gin.Context) {
 	if exists {
 		userIDStr = userIDVal.(string)
 	}
+
+	schoolIDVal, _ := c.Get("schoolID")
+	schoolID, _ := schoolIDVal.(string)
+	cacheKey := fmt.Sprintf("announcements:%s:%s", schoolID, userIDStr)
+
+	if (role == "PARENT" || role == "STUDENT") && cache.GlobalCache != nil {
+		if cachedData, ok := cache.GlobalCache.Get(cacheKey); ok {
+			c.Data(http.StatusOK, "application/json; charset=utf-8", cachedData)
+			return
+		}
+	}
+
+	ensureAnnouncementPollColumns(dbConn)
 	currentUserID, _ := strconv.Atoi(userIDStr)
 
 	var rows *sql.Rows
@@ -508,6 +531,12 @@ func (h *AnnouncementHandler) ListAnnouncements(c *gin.Context) {
 		announcements = append(announcements, ann)
 	}
 
+	if (role == "PARENT" || role == "STUDENT") && cache.GlobalCache != nil {
+		if data, err := json.Marshal(announcements); err == nil {
+			cache.GlobalCache.Set(cacheKey, data, 30*time.Second)
+		}
+	}
+
 	c.JSON(http.StatusOK, announcements)
 }
 
@@ -594,6 +623,8 @@ func (h *AnnouncementHandler) DeleteAnnouncement(c *gin.Context) {
 		return
 	}
 
+	invalidateAnnouncementCache(c)
+
 	c.JSON(http.StatusOK, gin.H{"message": "Announcement successfully deleted"})
 }
 
@@ -654,6 +685,8 @@ func (h *AnnouncementHandler) VotePoll(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Ovoz berishda xatolik", "details": err.Error()})
 		return
 	}
+
+	invalidateAnnouncementCache(c)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Ovozingiz muvaffaqiyatli qabul qilindi"})
 }
