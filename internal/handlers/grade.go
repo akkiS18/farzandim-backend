@@ -48,6 +48,7 @@ type GradeResponse struct {
 	ID               int       `json:"id"`
 	StudentID        int       `json:"student_id"`
 	StudentName      string    `json:"student_name"`
+	ClassID          int       `json:"class_id"`
 	ClassName        string    `json:"class_name"`
 	SubjectID        int       `json:"subject_id"`
 	SubjectName      string    `json:"subject_name"`
@@ -377,7 +378,7 @@ func (h *GradeHandler) ListGrades(c *gin.Context) {
 
 	// Base SQL Query for retrieval with rich metadata
 	query := `
-		SELECT g.id, g.student_id, u_student.first_name || ' ' || u_student.last_name as student_name, cl.name as class_name,
+		SELECT g.id, g.student_id, u_student.first_name || ' ' || u_student.last_name as student_name, st.class_id, cl.name as class_name,
 		       g.subject_id, s.name as subject_name, g.teacher_id, u_teacher.first_name || ' ' || u_teacher.last_name as teacher_name,
 		       g.value, g.numeric_value, g.grade_date, g.status, g.approved_by_parent, g.grading_system_id,
 		       g.grade_type, g.grade_category, g.lesson_number, g.created_at, g.updated_at
@@ -471,6 +472,20 @@ func (h *GradeHandler) ListGrades(c *gin.Context) {
 		argCount++
 	}
 
+	startDateParam := c.Query("start_date")
+	if startDateParam != "" {
+		query += fmt.Sprintf(" AND DATE(g.grade_date) >= $%d", argCount)
+		args = append(args, startDateParam)
+		argCount++
+	}
+
+	endDateParam := c.Query("end_date")
+	if endDateParam != "" {
+		query += fmt.Sprintf(" AND DATE(g.grade_date) <= $%d", argCount)
+		args = append(args, endDateParam)
+		argCount++
+	}
+
 	query += " ORDER BY g.grade_date DESC, g.created_at DESC"
 
 	rows, err := dbConn.Query(query, args...)
@@ -490,7 +505,7 @@ func (h *GradeHandler) ListGrades(c *gin.Context) {
 		var updatedAtTime time.Time
 
 		err := rows.Scan(
-			&r.ID, &r.StudentID, &r.StudentName, &r.ClassName,
+			&r.ID, &r.StudentID, &r.StudentName, &r.ClassID, &r.ClassName,
 			&r.SubjectID, &r.SubjectName, &r.TeacherID, &r.TeacherName,
 			&r.Value, &numVal, &r.GradeDate, &r.Status, &r.ApprovedByParent, &gsIDNull,
 			&r.GradeType, &r.GradeCategory, &lessonNumNull, &r.CreatedAt, &updatedAtTime,

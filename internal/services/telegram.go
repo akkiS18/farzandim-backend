@@ -282,21 +282,159 @@ func (bm *BotManager) authenticateAndRegisterForSchool(schoolID string, chatID i
 	return true, nil
 }
 
+type RateLimiter struct {
+	mu           sync.Mutex
+	lastRequest  time.Time
+	minInterval  time.Duration
+	blockedUntil time.Time
+}
+
+type GlobalTelegramLimiter struct {
+	mu       sync.Mutex
+	limiters map[string]*RateLimiter
+}
+
+var TokenLimiter = &GlobalTelegramLimiter{
+	limiters: make(map[string]*RateLimiter),
+}
+
+// Wait enforces Telegram's global limit (max 30 msgs/sec = ~36ms minimum interval between API calls)
+func (gtl *GlobalTelegramLimiter) Wait(token string) {
+	if token == "" {
+		return
+	}
+	gtl.mu.Lock()
+	limiter, exists := gtl.limiters[token]
+	if !exists {
+		limiter = &RateLimiter{
+			minInterval: 36 * time.Millisecond, // ~27.7 requests per second (safe margin below 30/sec Telegram rule)
+		}
+		gtl.limiters[token] = limiter
+	}
+	gtl.mu.Unlock()
+
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+
+	now := time.Now()
+	if now.Before(limiter.blockedUntil) {
+		sleepDur := limiter.blockedUntil.Sub(now)
+		log.Printf("[Telegram RateLimiter] Token paused due to 429 Retry-After. Waiting for %v...", sleepDur)
+		time.Sleep(sleepDur)
+		now = time.Now()
+	}
+
+	elapsed := now.Sub(limiter.lastRequest)
+	if elapsed < limiter.minInterval {
+		time.Sleep(limiter.minInterval - elapsed)
+	}
+	limiter.lastRequest = time.Now()
+}
+
+// BlockToken pauses requests for a specific token when a 429 Retry-After is encountered
+func (gtl *GlobalTelegramLimiter) BlockToken(token string, duration time.Duration) {
+	if token == "" {
+		return
+	}
+	gtl.mu.Lock()
+	limiter, exists := gtl.limiters[token]
+	if !exists {
+		limiter = &RateLimiter{
+			minInterval: 36 * time.Millisecond,
+		}
+		gtl.limiters[token] = limiter
+	}
+	gtl.mu.Unlock()
+
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	limiter.blockedUntil = time.Now().Add(duration)
+}
+
+type TelegramAPIResponse struct {
+	Ok          bool            `json:"ok"`
+	Description string          `json:"description"`
+	ErrorCode   int             `json:"error_code"`
+	Result      json.RawMessage `json:"result"`
+	Parameters  *struct {
+		RetryAfter int `json:"retry_after"`
+	} `json:"parameters"`
+}
+
+// sendTelegramRequestRaw executes a POST request to Telegram API with rate limiting and 429 Retry-After handling
+func sendTelegramRequestRaw(token string, method string, payload interface{}) ([]byte, error) {
+	if token == "" {
+		return nil, fmt.Errorf("empty bot token")
+	}
+
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/%s", token, method)
+	jsonBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	maxAttempts := 3
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		TokenLimiter.Wait(token)
+
+		resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
+		if err != nil {
+			log.Printf("[Telegram API Error] POST %s failed: %v (Attempt %d/%d)", method, err, attempt, maxAttempts)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		bodyBytes, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			log.Printf("[Telegram API Error] Read body failed: %v", err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		var apiResp TelegramAPIResponse
+		_ = json.Unmarshal(bodyBytes, &apiResp)
+
+		if resp.StatusCode == 429 || apiResp.ErrorCode == 429 {
+			retryAfter := 3
+			if apiResp.Parameters != nil && apiResp.Parameters.RetryAfter > 0 {
+				retryAfter = apiResp.Parameters.RetryAfter
+			}
+			blockDuration := time.Duration(retryAfter+1) * time.Second
+			log.Printf("[Telegram 429 Rate Limit] Method: %s, Retry After: %d sec. Pausing token...", method, retryAfter)
+			TokenLimiter.BlockToken(token, blockDuration)
+			time.Sleep(blockDuration)
+			continue
+		}
+
+		if resp.StatusCode == http.StatusOK && apiResp.Ok {
+			return bodyBytes, nil
+		}
+
+		log.Printf("[Telegram API Response Warning] Method: %s, Status: %d, Response: %s", method, resp.StatusCode, string(bodyBytes))
+		return bodyBytes, fmt.Errorf("telegram API error: status %d", resp.StatusCode)
+	}
+
+	return nil, fmt.Errorf("failed to send telegram request to %s after retries", method)
+}
+
 func (bm *BotManager) sendTextMessage(token string, chatID int64, text string) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
 	payload := map[string]interface{}{
 		"chat_id":    chatID,
 		"text":       text,
 		"parse_mode": "Markdown",
 	}
 
-	jsonBytes, _ := json.Marshal(payload)
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
+	_, err := sendTelegramRequestRaw(token, "sendMessage", payload)
 	if err != nil {
-		log.Printf("Failed to send telegram message: %v", err)
-		return
+		plainPayload := map[string]interface{}{
+			"chat_id": chatID,
+			"text":    text,
+		}
+		_, _ = sendTelegramRequestRaw(token, "sendMessage", plainPayload)
 	}
-	defer resp.Body.Close()
 }
 
 func isValidTelegramButtonURL(urlStr string) bool {
@@ -311,7 +449,6 @@ func isValidTelegramButtonURL(urlStr string) bool {
 }
 
 func (bm *BotManager) sendTextMessageWithButton(token string, chatID interface{}, text string, buttonText string, buttonURL string) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
 	payload := map[string]interface{}{
 		"chat_id":    chatID,
 		"text":       text,
@@ -328,19 +465,8 @@ func (bm *BotManager) sendTextMessageWithButton(token string, chatID interface{}
 		}
 	}
 
-	jsonBytes, _ := json.Marshal(payload)
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
+	_, err := sendTelegramRequestRaw(token, "sendMessage", payload)
 	if err != nil {
-		log.Printf("Failed to send telegram message: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBytes, _ := io.ReadAll(resp.Body)
-		log.Printf("[Telegram API Error] chatID %v Status %d: %s. Retrying with safe plain text payload...", chatID, resp.StatusCode, string(respBytes))
-
-		// Fallback retry without parse_mode and without reply_markup
 		plainPayload := map[string]interface{}{
 			"chat_id": chatID,
 			"text":    text,
@@ -354,17 +480,11 @@ func (bm *BotManager) sendTextMessageWithButton(token string, chatID interface{}
 				},
 			}
 		}
-		pBytes, _ := json.Marshal(plainPayload)
-		respFallback, errF := http.Post(url, "application/json", bytes.NewBuffer(pBytes))
-		if errF == nil {
-			respFallback.Body.Close()
-		}
+		_, _ = sendTelegramRequestRaw(token, "sendMessage", plainPayload)
 	}
 }
 
 func (bm *BotManager) sendPollMessage(token string, chatID interface{}, question string, options []string) string {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendPoll", token)
-
 	if len(question) > 290 {
 		question = question[:287] + "..."
 	}
@@ -376,23 +496,20 @@ func (bm *BotManager) sendPollMessage(token string, chatID interface{}, question
 		"is_anonymous": false,
 	}
 
-	jsonBytes, _ := json.Marshal(payload)
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
+	respBytes, err := sendTelegramRequestRaw(token, "sendPoll", payload)
 	if err != nil {
-		log.Printf("Failed to send telegram poll: %v", err)
 		return ""
 	}
-	defer resp.Body.Close()
 
 	var res struct {
 		Ok     bool `json:"ok"`
 		Result struct {
 			Poll struct {
-				ID string `json:"id"`
+				ID string `json:"poll"`
 			} `json:"poll"`
 		} `json:"result"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err == nil && res.Ok {
+	if err := json.Unmarshal(respBytes, &res); err == nil && res.Ok {
 		return res.Result.Poll.ID
 	}
 	return ""
@@ -685,7 +802,7 @@ func SendAnnouncementNotification(schoolID string, ann *models.Announcement) {
 		if telegramChannelID != "" {
 			Manager.sendTextMessageWithButton(token, telegramChannelID, msgText, btnLabel, fmt.Sprintf("%s/parents", frontendURL))
 			if ann.IsPoll && len(optTexts) >= 2 {
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(1000 * time.Millisecond) // Respect Telegram 1 msg/sec per chat rule
 				pollQuestion := fmt.Sprintf("📊 %s", ann.Title)
 				tgPollID := Manager.sendPollMessage(token, telegramChannelID, pollQuestion, optTexts)
 				if tgPollID != "" {
@@ -703,7 +820,7 @@ func SendAnnouncementNotification(schoolID string, ann *models.Announcement) {
 				Manager.sendTextMessageWithButton(token, chatID, msgText, btnLabel, fmt.Sprintf("%s/parents", frontendURL))
 
 				if ann.IsPoll && len(optTexts) >= 2 {
-					time.Sleep(100 * time.Millisecond)
+					time.Sleep(1000 * time.Millisecond) // Respect Telegram 1 msg/sec per chat rule
 					pollQuestion := fmt.Sprintf("📊 %s", ann.Title)
 					tgPollID := Manager.sendPollMessage(token, chatID, pollQuestion, optTexts)
 					if tgPollID != "" {
@@ -711,7 +828,6 @@ func SendAnnouncementNotification(schoolID string, ann *models.Announcement) {
 						_, _ = tenantDB.Exec("UPDATE announcements SET telegram_poll_id = $1 WHERE id = $2", tgPollID, ann.ID)
 					}
 				}
-				time.Sleep(35 * time.Millisecond)
 			}
 		}
 	}()

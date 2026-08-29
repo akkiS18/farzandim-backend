@@ -163,8 +163,8 @@ func buildGeminiPrompt(data StudentWeeklyDataContext) string {
 	hasPrevWeek := data.PrevAverageGrade > 0
 	hasBooks := len(data.BooksRead) > 0
 
-	prompt := fmt.Sprintf(`Siz 'Farzandim' maktab o'quvchilarini baholash tizimining tajribali, mehribon va samimiy Pedagogik Maslahatchi AI yordamchisiz.
-Murojaatingiz ota-onaga nisbatan juda hurmatli, iliq va qo'llab-quvvatlovchi bo'lsin. Hech qanday rasmiy ravishda '0', '0.00' yoki 'yo'q' kabi sovuq iboralarni ishlatmang.
+	prompt := fmt.Sprintf(`Siz 'Farzandim' tizimining g'amxo'r va tajribali ustozisiz. Ota-onaga ularning farzandi haqida xuddi maktabda yuzma-yuz suhbatlashayotgandek, juda samimiy va jonli tilda xat yozing. 
+Sizning vazifangiz quruq raqamlar va baholarni sanab o'tish emas, balki bu baholar va o'qilgan kitoblar ortidagi mehnatni tahlil qilib, ota-onaga tushunarli tilda yetkazishdir. "Robot" yoki "avtomatlashtirilgan tizim" kabi taassurot qoldirmang.
 
 Farzand ismi: %s (%s sinf o'quvchisi).
 Hafta sanasi: %s dan %s gacha.
@@ -176,20 +176,22 @@ Haftalik ko'rsatkichlar:
 - O'qilgan kitoblar: %v (Kitoblar borligi: %v)
 - O'tgan haftalik o'rtacha baho: %.2f (Oldingi hafta borligi: %v)
 
-MUHIM TASHKILIY QOIDALAR:
+MUHIM QOIDALAR:
 1. Hech qanday emojilardan foydalanmang.
-2. Javobingizni aniq belgilangan sarlavhalar bilan taqdim eting:
+2. Murakkab atamalarsiz, ota-ona qalbini isitadigan va to'g'ri yo'l ko'rsatadigan tildan foydalaning.
+
+Javobingizni quyidagi qismlarga ajrating:
 
 ---SECTION: HAFTALIK XULOSA---
-(Farzandning haftalik o'quv faoliyati va holati bo'yicha 2-3 jumlali samimiy va ilhomlantiruvchi xulosa. %s)
+(Farzandning joriy haftadagi umumiy holati va kayfiyati haqida 2-3 jumlali samimiy kirish so'zi. Agar baholar bo'lmasa, buni tabiiy ravishda tushuntiring: %s)
 
 %s
 
 ---SECTION: FANLAR VA KITOBXONLIK TAHLILI---
-(Qaysi fanlarda a'lo o'zlashtiryapti va %s)
+(O'quvchining baholari va o'qigan kitoblarini o'zaro bog'lab, butunlay jonli matn ko'rinishida tahlil qiling. Masalan: "Uning adabiyotdan olgan baholari va o'qiyotgan kitoblari fikrlash doirasi kengayayotganini ko'rsatadi". Ro'yxat qilmang, faqat chiroyli gaplar bilan tushuntiring. %s)
 
 ---SECTION: OTA-ONAGA AMALIY TAVSIYA---
-(Uydan turib farzandiga yordam berish bo'yicha yagona, qisqa va eng muhim bitta pedagogik maslahat. Ro'yxat qilmang, faqat 1-2 jumlada.)`,
+(Shu haftadagi natijalarga asoslanib, ota-ona dam olish kunlari farzandi bilan nima qilishi kerakligi haqida faqat bitta, lekin juda foydali amaliy maslahat bering).`,
 		data.StudentName, data.ClassName, data.WeekStartDate, data.WeekEndDate,
 		data.CurrentAverageGrade, hasGrades, data.Grades, data.TeacherComments,
 		data.BooksRead, hasBooks, data.PrevAverageGrade, hasPrevWeek,
@@ -225,32 +227,31 @@ func generateFallbackReport(data StudentWeeklyDataContext) string {
 
 	builder.WriteString("---SECTION: HAFTALIK XULOSA---\n")
 	if hasGrades {
-		builder.WriteString(fmt.Sprintf("%s joriy haftada (%s - %s) o'z o me'yorida faoliyat olib bordi. O'rtacha o'zlashtirish ko'rsatkichi %.1f ballni tashkil etdi.", data.StudentName, data.WeekStartDate, data.WeekEndDate, data.CurrentAverageGrade))
+		builder.WriteString(fmt.Sprintf("%s joriy haftada (%s - %s) o'z o'rnida harakat qildi. O'rtacha o'zlashtirish ko'rsatkichi %.1f ballni tashkil etdi.", data.StudentName, data.WeekStartDate, data.WeekEndDate, data.CurrentAverageGrade))
 	} else {
-		builder.WriteString(fmt.Sprintf("%s joriy haftada (%s - %s) dars jarayonlarida ishtirok etdi. Ushbu haftada rasmiy baholash ishlari o'tkazilmadi.", data.StudentName, data.WeekStartDate, data.WeekEndDate))
+		builder.WriteString(fmt.Sprintf("%s joriy haftada (%s - %s) dars jarayonlarida ishtirok etdi. Ushbu haftada baholash ishlari o'tkazilmadi.", data.StudentName, data.WeekStartDate, data.WeekEndDate))
 	}
 
 	if hasPrevWeek {
 		builder.WriteString("\n\n---SECTION: DINAMIKA TAHLILI---\n")
 		if data.CurrentAverageGrade > data.PrevAverageGrade {
-			builder.WriteString(fmt.Sprintf("Farzandingiz o'tgan haftaga nisbatan sezilarli o'sish ko'rsatib, o'rtacha bali %.1f ballga etdi.", data.CurrentAverageGrade))
+			builder.WriteString(fmt.Sprintf("Farzandingiz o'tgan haftaga nisbatan yaxshi o'sish ko'rsatib, o'rtacha bali %.1f ballga etdi.", data.CurrentAverageGrade))
 		} else if data.CurrentAverageGrade < data.PrevAverageGrade {
-			builder.WriteString(fmt.Sprintf("Farzandingiz ko'rsatkichi o'tgan haftaga nisbatan ozgina o'zgardi. Birgalikda takrorlash foydali bo'ladi."))
+			builder.WriteString("Farzandingiz ko'rsatkichi o'tgan haftaga nisbatan biroz pasaydi. Ba'zi mavzularda qo'shimcha yordam kerak bo'lishi mumkin.")
 		} else {
-			builder.WriteString(fmt.Sprintf("Farzandingiz barqaror natija ko'rsatib kelmoqda."))
+			builder.WriteString("Farzandingiz barqaror natija ko'rsatib kelmoqda.")
 		}
 	}
 
 	builder.WriteString("\n\n---SECTION: FANLAR VA KITOBXONLIK TAHLILI---\n")
 	if hasBooks {
-		builder.WriteString(fmt.Sprintf("Bu hafta o'quvchi fanlar va kitobxonlik bo'yicha faollik ko'rsatdi. O'qilgan kitoblar: %s.", strings.Join(data.BooksRead, ", ")))
+		builder.WriteString(fmt.Sprintf("Bu hafta o'quvchi mutolaaga vaqt ajratdi. O'qilgan kitoblar: %s. Kitobxonlik tafakkurni kengaytirishga katta xizmat qiladi.", strings.Join(data.BooksRead, ", ")))
 	} else {
-		builder.WriteString("Bu hafta o'quvchi fanlar bo'yicha bilimlarini namoyish etdi. Yangi yakunlangan kitoblar mutolaasi qayd etilmadi, uydan turib kitob o'qishga qiziqtirish tavsiya etiladi.")
+		builder.WriteString("Bu hafta davomida fanlar bo'yicha o'z bilimlarini namoyish etdi. Bo'sh vaqtlarda yangi kitoblar mutolaasiga qiziqtirish foydali bo'ladi.")
 	}
 
-	builder.WriteString("\n\n---SECTION: OTA-ONAGA AMALIY TAVSIYALAR---\n")
-	builder.WriteString("- Farzandingiz bilan har kuni 15 daqiqa dars muhokamasini o'tkazing.\n")
-	builder.WriteString("- Farzandingizning kichik yutuqlarini ham chin dildan e'tirof etib, ruhiy qo'llab-quvvatlang.")
+	builder.WriteString("\n\n---SECTION: OTA-ONAGA AMALIY TAVSIYA---\n")
+	builder.WriteString("Farzandingizning har qanday kichik yutug'ini e'tirof eting va uni kelgusi haftada yangi bilimlarni o'zlashtirishga ruhlantiring.")
 
 	return builder.String()
 }
