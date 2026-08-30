@@ -11,6 +11,7 @@ import (
 
 	"github.com/farzandim/backend/internal/audit"
 	"github.com/farzandim/backend/internal/models"
+	"github.com/farzandim/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
@@ -94,22 +95,49 @@ func (h *ParentHandler) CreateAndLinkParent(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	// 3. Check if parent user already exists by phone
+	var normalizedPassport *string
+	if req.Passport != nil {
+		cleanPass := strings.TrimSpace(*req.Passport)
+		if cleanPass != "" && cleanPass != "-" {
+			normPass := NormalizeDocumentNo(cleanPass)
+			normalizedPassport = &normPass
+		}
+	}
+
 	var parentID int
 	var existingRoleName string
-	err = tx.QueryRow(`
-		SELECT u.id, r.name FROM users u
-		JOIN roles r ON u.role_id = r.id
-		WHERE u.phone = $1 AND u.is_deleted = false
-	`, req.Phone).Scan(&parentID, &existingRoleName)
+	found := false
 
-	if err != nil && err != sql.ErrNoRows {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing parent user", "details": err.Error()})
-		return
+	// 3. Check if parent user already exists by passport first (to avoid duplicate accounts with different phone formatting)
+	if normalizedPassport != nil {
+		err = tx.QueryRow(`
+			SELECT u.id, r.name FROM users u
+			JOIN roles r ON u.role_id = r.id
+			WHERE r.name = 'PARENT' AND u.is_deleted = false
+			  AND (UPPER(TRIM(u.passport)) = UPPER($1) OR UPPER(TRIM(u.document_no)) = UPPER($1))
+			LIMIT 1
+		`, *normalizedPassport).Scan(&parentID, &existingRoleName)
+		if err == nil {
+			found = true
+		}
+	}
+
+	cleanPhone := utils.NormalizePhone(req.Phone)
+
+	// Check if parent user already exists by phone if not found by passport
+	if !found {
+		err = tx.QueryRow(`
+			SELECT u.id, r.name FROM users u
+			JOIN roles r ON u.role_id = r.id
+			WHERE u.phone = $1 AND u.is_deleted = false
+		`, cleanPhone).Scan(&parentID, &existingRoleName)
+		if err == nil {
+			found = true
+		}
 	}
 
 	isNewUser := false
-	if err == sql.ErrNoRows {
+	if !found {
 		// Create new parent user
 		isNewUser = true
 
@@ -128,10 +156,10 @@ func (h *ParentHandler) CreateAndLinkParent(c *gin.Context) {
 		}
 
 		insertUserQuery := `
-			INSERT INTO users (first_name, last_name, middle_name, passport, phone, email, password_hash, role_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			INSERT INTO users (first_name, last_name, middle_name, passport, document_no, phone, email, password_hash, role_id, password_reset_required)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
 			RETURNING id`
-		err = tx.QueryRow(insertUserQuery, req.FirstName, req.LastName, req.MiddleName, req.Passport, req.Phone, req.Email, string(hashedPassword), parentRoleID).Scan(&parentID)
+		err = tx.QueryRow(insertUserQuery, req.FirstName, req.LastName, req.MiddleName, normalizedPassport, normalizedPassport, cleanPhone, req.Email, string(hashedPassword), parentRoleID).Scan(&parentID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create parent user profile", "details": err.Error()})
 			return
@@ -147,8 +175,8 @@ func (h *ParentHandler) CreateAndLinkParent(c *gin.Context) {
 				FirstName:  req.FirstName,
 				LastName:   req.LastName,
 				MiddleName: req.MiddleName,
-				Passport:   req.Passport,
-				Phone:      &req.Phone,
+				Passport:   normalizedPassport,
+				Phone:      &cleanPhone,
 				Email:      req.Email,
 				RoleID:     parentRoleID,
 				IsDeleted:  false,
@@ -157,8 +185,12 @@ func (h *ParentHandler) CreateAndLinkParent(c *gin.Context) {
 	} else {
 		// Existing user found. Verify that they have the PARENT role.
 		if existingRoleName != "PARENT" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Telefon raqamli foydalanuvchi tizimda mavjud, lekin roli '%s'. Faqat PARENT roldagi foydalanuvchini bog'lash mumkin.", existingRoleName)})
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Telefon raqamli yoki pasportli foydalanuvchi tizimda mavjud, lekin roli '%s'. Faqat PARENT roldagi foydalanuvchini bog'lash mumkin.", existingRoleName)})
 			return
+		}
+		// Backfill passport and document_no if they are empty
+		if normalizedPassport != nil {
+			_, _ = tx.Exec("UPDATE users SET passport = $1, document_no = $1 WHERE id = $2 AND (document_no IS NULL OR document_no = '')", *normalizedPassport, parentID)
 		}
 	}
 
@@ -521,9 +553,15 @@ func (h *ParentHandler) UpdateParent(c *gin.Context) {
 		middleName = req.MiddleName
 	}
 
-	passport := oldUser.Passport
+	var normalizedPassport *string
 	if req.Passport != nil {
-		passport = req.Passport
+		cleanPass := strings.TrimSpace(*req.Passport)
+		if cleanPass != "" && cleanPass != "-" {
+			normPass := NormalizeDocumentNo(cleanPass)
+			normalizedPassport = &normPass
+		}
+	} else {
+		normalizedPassport = oldUser.Passport
 	}
 
 	phone := ""
@@ -531,11 +569,11 @@ func (h *ParentHandler) UpdateParent(c *gin.Context) {
 		phone = *oldUser.Phone
 	}
 	if req.Phone != nil && *req.Phone != "" {
-		phone = *req.Phone
+		phone = utils.NormalizePhone(*req.Phone)
 	}
 
-	setClauses := []string{"first_name = $1", "last_name = $2", "middle_name = $3", "passport = $4", "phone = $5", "updated_at = NOW()"}
-	args := []interface{}{firstName, lastName, middleName, passport, phone}
+	setClauses := []string{"first_name = $1", "last_name = $2", "middle_name = $3", "passport = $4", "document_no = $4", "phone = $5", "updated_at = NOW()"}
+	args := []interface{}{firstName, lastName, middleName, normalizedPassport, phone}
 
 	if req.Password != nil && *req.Password != "" {
 		hashed, hashErr := bcrypt.GenerateFromPassword([]byte(*req.Password), bcrypt.DefaultCost)
@@ -564,7 +602,7 @@ func (h *ParentHandler) UpdateParent(c *gin.Context) {
 		TableName: "users",
 		RecordID:  strconv.Itoa(parentID),
 		OldValues: oldUser,
-		NewValues: map[string]interface{}{"first_name": firstName, "last_name": lastName, "middle_name": middleName, "passport": passport, "phone": phone},
+		NewValues: map[string]interface{}{"first_name": firstName, "last_name": lastName, "middle_name": middleName, "passport": normalizedPassport, "phone": phone},
 	})
 
 	if err := tx.Commit(); err != nil {
@@ -577,7 +615,7 @@ func (h *ParentHandler) UpdateParent(c *gin.Context) {
 		"first_name":  firstName,
 		"last_name":   lastName,
 		"middle_name": middleName,
-		"passport":    passport,
+		"passport":    normalizedPassport,
 		"phone":       phone,
 	})
 }

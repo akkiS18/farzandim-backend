@@ -11,6 +11,7 @@ import (
 
 	"github.com/farzandim/backend/internal/audit"
 	"github.com/farzandim/backend/internal/models"
+	"github.com/farzandim/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
@@ -121,10 +122,12 @@ func (h *TenantUserHandler) CreateClassStudent(c *gin.Context) {
 	}
 
 	// Check INA uniqueness if provided
+	var normalizedINA *string
 	if req.INA != nil {
 		cleanINA := strings.TrimSpace(*req.INA)
 		if cleanINA != "" && cleanINA != "-" && !strings.EqualFold(cleanINA, "yo'q") {
 			normINA := NormalizeDocumentNo(cleanINA)
+			normalizedINA = &normINA
 			reg, _ := regexp.Compile("[^a-z0-9]")
 			rawNorm := reg.ReplaceAllString(strings.ToLower(normINA), "")
 
@@ -149,6 +152,9 @@ func (h *TenantUserHandler) CreateClassStudent(c *gin.Context) {
 				})
 				return
 			}
+		} else {
+			norm := cleanINA
+			normalizedINA = &norm
 		}
 	}
 
@@ -178,12 +184,12 @@ func (h *TenantUserHandler) CreateClassStudent(c *gin.Context) {
 	// Insert User
 	var userID int
 	insertUserQuery := `
-		INSERT INTO users (first_name, last_name, middle_name, phone, email, password_hash, role_id)
-		VALUES ($1, $2, $3, NULL, $4, $5, $6)
+		INSERT INTO users (first_name, last_name, middle_name, passport, document_no, phone, email, password_hash, role_id)
+		VALUES ($1, $2, $3, $4, $4, NULL, $5, $6, $7)
 		RETURNING id`
-	err = tx.QueryRow(insertUserQuery, req.FirstName, req.LastName, req.MiddleName, req.Email, string(hashedPassword), studentRoleID).Scan(&userID)
+	err = tx.QueryRow(insertUserQuery, req.FirstName, req.LastName, req.MiddleName, normalizedINA, req.Email, string(hashedPassword), studentRoleID).Scan(&userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write user profile", "details": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write student user profile", "details": err.Error()})
 		return
 	}
 
@@ -211,7 +217,7 @@ func (h *TenantUserHandler) CreateClassStudent(c *gin.Context) {
 		INSERT INTO students (user_id, class_id, address, birthdate, ina, enrollment_date)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id`
-	err = tx.QueryRow(insertStudentQuery, userID, classID, req.Address, birthdateVal, req.INA, enrollmentDateVal).Scan(&studentID)
+	err = tx.QueryRow(insertStudentQuery, userID, classID, req.Address, birthdateVal, normalizedINA, enrollmentDateVal).Scan(&studentID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to map student profile", "details": err.Error()})
 		return
@@ -1470,10 +1476,12 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 	}
 
 	// Check INA uniqueness if updating INA
+	var normalizedINA *string
 	if req.INA != nil {
 		cleanINA := strings.TrimSpace(*req.INA)
 		if cleanINA != "" && cleanINA != "-" && !strings.EqualFold(cleanINA, "yo'q") {
 			normINA := NormalizeDocumentNo(cleanINA)
+			normalizedINA = &normINA
 			reg, _ := regexp.Compile("[^a-z0-9]")
 			rawNorm := reg.ReplaceAllString(strings.ToLower(normINA), "")
 
@@ -1498,6 +1506,9 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 				})
 				return
 			}
+		} else {
+			norm := cleanINA
+			normalizedINA = &norm
 		}
 	}
 
@@ -1543,7 +1554,20 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 	}
 	if req.Phone != nil {
 		setClauses = append(setClauses, fmt.Sprintf("phone = $%d", argIdx))
-		args = append(args, req.Phone)
+		var cleanPhone *string
+		if *req.Phone != "" {
+			norm := utils.NormalizePhone(*req.Phone)
+			cleanPhone = &norm
+		}
+		args = append(args, cleanPhone)
+		argIdx++
+	}
+	if req.INA != nil {
+		setClauses = append(setClauses, fmt.Sprintf("passport = $%d", argIdx))
+		args = append(args, normalizedINA)
+		argIdx++
+		setClauses = append(setClauses, fmt.Sprintf("document_no = $%d", argIdx))
+		args = append(args, normalizedINA)
 		argIdx++
 	}
 
@@ -1598,13 +1622,13 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 			UPDATE students 
 			SET address = $1, birthdate = $2, ina = $3, enrollment_date = $4 
 			WHERE id = $5`, 
-			req.Address, birthdate, req.INA, enrollmentDate, studentID)
+			req.Address, birthdate, normalizedINA, enrollmentDate, studentID)
 	} else {
 		_, err = tx.Exec(`
 			UPDATE students 
 			SET address = $1, birthdate = $2, ina = $3 
 			WHERE id = $4`, 
-			req.Address, birthdate, req.INA, studentID)
+			req.Address, birthdate, normalizedINA, studentID)
 	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "O'quvchi qo'shimcha ma'lumotlarini yangilashda xatolik", "details": err.Error()})
@@ -1793,7 +1817,8 @@ func (h *TenantUserHandler) CheckStudentDocuments(c *gin.Context) {
 			SET ina = REGEXP_REPLACE(ina, '^[lL1]-', 'I-') 
 			WHERE ina ~* '^[lL1]-[a-zA-Z]{2}';
 			UPDATE users 
-			SET passport = REGEXP_REPLACE(passport, '^[lL1]-', 'I-') 
+			SET passport = REGEXP_REPLACE(passport, '^[lL1]-', 'I-'),
+			    document_no = REGEXP_REPLACE(passport, '^[lL1]-', 'I-') 
 			WHERE passport ~* '^[lL1]-[a-zA-Z]{2}';
 		`)
 	}(dbConn)
@@ -1911,6 +1936,9 @@ func (h *TenantUserHandler) TransferStudentByDocument(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Sinfni yangilashda xatolik", "details": err.Error()})
 		return
 	}
+
+	// Sync INA change to user profile
+	_, err = tx.Exec("UPDATE users SET passport = $1, document_no = $1 WHERE id = $2", normINA, userID)
 
 	audit.LogChange(c, tx, audit.LogData{
 		Action:    "UPDATE",

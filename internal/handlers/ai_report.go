@@ -202,9 +202,28 @@ func (h *AIReportHandler) AdminBatchGenerateAIReports(c *gin.Context) {
 
 	targetStudentIDs := req.StudentIDs
 
-	// If class_id is provided and student_ids is empty, fetch all students in that class
+	targetTime := time.Now()
+	if req.TargetDate != "" {
+		if parsedTime, err := time.Parse("2006-01-02", req.TargetDate); err == nil {
+			targetTime = parsedTime
+		}
+	}
+
+	// Determine Sunday of the target week to evaluate student enrollment eligibility
+	wd := targetTime.Weekday()
+	if wd == time.Sunday {
+		wd = 7
+	}
+	monday := targetTime.AddDate(0, 0, -int(wd-time.Monday))
+	sunday := monday.AddDate(0, 0, 6)
+	sundayStr := sunday.Format("2006-01-02")
+
+	// If class_id is provided and student_ids is empty, fetch all students in that class who were enrolled during/before report week
 	if len(targetStudentIDs) == 0 && req.ClassID != nil && *req.ClassID > 0 {
-		rows, err := dbConn.Query(`SELECT id FROM students WHERE class_id = $1 AND is_deleted = false`, *req.ClassID)
+		rows, err := dbConn.Query(`
+			SELECT id FROM students 
+			WHERE class_id = $1 AND is_deleted = false 
+			  AND (enrollment_date IS NULL OR enrollment_date <= $2::date)`, *req.ClassID, sundayStr)
 		if err == nil {
 			for rows.Next() {
 				var sid int
@@ -216,9 +235,12 @@ func (h *AIReportHandler) AdminBatchGenerateAIReports(c *gin.Context) {
 		}
 	}
 
-	// If still empty, fetch ALL active students in the school
+	// If still empty, fetch ALL active students in the school who were enrolled during/before report week
 	if len(targetStudentIDs) == 0 {
-		rows, err := dbConn.Query(`SELECT id FROM students WHERE is_deleted = false`)
+		rows, err := dbConn.Query(`
+			SELECT id FROM students 
+			WHERE is_deleted = false 
+			  AND (enrollment_date IS NULL OR enrollment_date <= $1::date)`, sundayStr)
 		if err == nil {
 			for rows.Next() {
 				var sid int
@@ -238,12 +260,6 @@ func (h *AIReportHandler) AdminBatchGenerateAIReports(c *gin.Context) {
 	generatedCount := 0
 	errorCount := 0
 	var lastError string
-	targetTime := time.Now()
-	if req.TargetDate != "" {
-		if parsedTime, err := time.Parse("2006-01-02", req.TargetDate); err == nil {
-			targetTime = parsedTime
-		}
-	}
 
 	for _, sID := range targetStudentIDs {
 		// Enforce Rate Limiting delay (400ms sleep = max ~15 requests per minute for Gemini Free Tier)
@@ -519,17 +535,25 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 		return &existing, nil
 	}
 
-	// 2. Fetch Student Name & Class Name
+	// 2. Fetch Student Details and Enrollment Date
 	var studentName, className string
+	var enrollmentDate sql.NullTime
 	err = dbConn.QueryRow(`
-		SELECT u.first_name || ' ' || u.last_name, COALESCE(c.name, 'Sinf belgilanmagan')
+		SELECT u.first_name || ' ' || u.last_name, COALESCE(c.name, 'Sinf belgilanmagan'), s.enrollment_date
 		FROM students s
 		JOIN users u ON s.user_id = u.id
 		LEFT JOIN classes c ON s.class_id = c.id
-		WHERE s.id = $1`, studentID).Scan(&studentName, &className)
+		WHERE s.id = $1 AND s.is_deleted = false AND u.is_deleted = false`, studentID).Scan(&studentName, &className, &enrollmentDate)
 	if err != nil {
-		studentName = "O'quvchi"
-		className = "Sinf"
+		return nil, fmt.Errorf("o'quvchi topilmadi yoki o'chirilgan (student ID %d)", studentID)
+	}
+
+	if enrollmentDate.Valid {
+		enrollDateOnly := time.Date(enrollmentDate.Time.Year(), enrollmentDate.Time.Month(), enrollmentDate.Time.Day(), 0, 0, 0, 0, time.UTC)
+		sundayOnly := time.Date(sunday.Year(), sunday.Month(), sunday.Day(), 0, 0, 0, 0, time.UTC)
+		if sundayOnly.Before(enrollDateOnly) {
+			return nil, fmt.Errorf("o'quvchi ushbu hisobot haftasida (%s dan %s gacha) hali maktabga kirmagan (maktabga kirish sanasi: %s)", startStr, endStr, enrollmentDate.Time.Format("2006-01-02"))
+		}
 	}
 
 	// 3. Fetch Grades for Current Week

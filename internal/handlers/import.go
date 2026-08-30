@@ -12,6 +12,7 @@ import (
 
 	"github.com/farzandim/backend/internal/audit"
 	"github.com/farzandim/backend/internal/models"
+	"github.com/farzandim/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/xuri/excelize/v2"
 	"golang.org/x/crypto/bcrypt"
@@ -679,7 +680,7 @@ func (h *ImportHandler) ImportTeachers(c *gin.Context) {
 		ism := getCell(row, "ism")
 		familiya := getCell(row, "familiya")
 		sharif := getCell(row, "sharif")
-		telefon := getCell(row, "telefon")
+		telefon := utils.NormalizePhone(getCell(row, "telefon"))
 		rolName := strings.ToUpper(getCell(row, "rol"))
 		parol := getCell(row, "parol")
 
@@ -736,8 +737,8 @@ func (h *ImportHandler) ImportTeachers(c *gin.Context) {
 		}
 
 		insertUserQuery := `
-			INSERT INTO users (first_name, last_name, middle_name, phone, password_hash, role_id)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			INSERT INTO users (first_name, last_name, middle_name, phone, password_hash, role_id, password_reset_required)
+			VALUES ($1, $2, $3, $4, $5, $6, true)
 			RETURNING id`
 		err = tx.QueryRow(insertUserQuery, ism, familiya, middleNamePtr, telefon, string(hashedPassword), roleID).Scan(&userID)
 		if err != nil {
@@ -1056,7 +1057,7 @@ func (h *ImportHandler) ImportParents(c *gin.Context) {
 		parentFamiliya := getCell(row, "parent familiya")
 		parentSharif := getCell(row, "parent sharif")
 		parentTuri := getCell(row, "parent turi")
-		nomer := getCell(row, "nomer")
+		nomer := utils.NormalizePhone(getCell(row, "nomer"))
 		parol := getCell(row, "parol")
 
 		rowNum := rIdx + 1
@@ -1170,11 +1171,17 @@ func (h *ImportHandler) ImportParents(c *gin.Context) {
 				passportPtr = &passport
 			}
 
+			var normalizedPassport *string
+			if passportPtr != nil && *passportPtr != "" {
+				norm := NormalizeDocumentNo(*passportPtr)
+				normalizedPassport = &norm
+			}
+
 			insertUserQuery := `
-				INSERT INTO users (first_name, last_name, middle_name, passport, phone, password_hash, role_id)
-				VALUES ($1, $2, $3, $4, $5, $6, $7)
+				INSERT INTO users (first_name, last_name, middle_name, passport, document_no, phone, password_hash, role_id, password_reset_required)
+				VALUES ($1, $2, $3, $4, $4, $5, $6, $7, true)
 				RETURNING id`
-			err = tx.QueryRow(insertUserQuery, parentIsm, parentFamiliya, middleNamePtr, passportPtr, nomer, string(hashedPassword), parentRoleID).Scan(&parentID)
+			err = tx.QueryRow(insertUserQuery, parentIsm, parentFamiliya, middleNamePtr, normalizedPassport, nomer, string(hashedPassword), parentRoleID).Scan(&parentID)
 			if err != nil {
 				tx.Rollback()
 				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Ota-ona profilini yaratib bo'lmadi: %v", err)})
@@ -2173,7 +2180,7 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 		// Helper to add parent
 		createOrGetParent := func(fullName, passport, phone, relType string) error {
 			cleanName := strings.TrimSpace(fullName)
-			cleanPhone := strings.TrimSpace(phone)
+			cleanPhone := utils.NormalizePhone(phone)
 			cleanDoc := NormalizeDocumentNo(passport)
 
 			if cleanName == "" || cleanName == "-" {
@@ -2189,7 +2196,7 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 			found := false
 			var parentUserID int
 
-			if cleanPhone != "" && cleanPhone != "-" && !strings.Contains(strings.ToLower(cleanPhone), "yo'q") {
+			if cleanPhone != "" {
 				// 1. Check if exact parent profile (same phone AND same name) already exists
 				var existingID int
 				err := tx.QueryRow(`
@@ -2242,8 +2249,8 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 				pHashed, _ := bcrypt.GenerateFromPassword([]byte(pPass), bcrypt.DefaultCost)
 
 				err := tx.QueryRow(`
-					INSERT INTO users (first_name, last_name, middle_name, phone, passport, document_no, password_hash, role_id)
-					VALUES ($1, $2, $3, $4, $5, $5, $6, $7)
+					INSERT INTO users (first_name, last_name, middle_name, phone, passport, document_no, password_hash, role_id, password_reset_required)
+					VALUES ($1, $2, $3, $4, $5, $5, $6, $7, true)
 					RETURNING id`, pFirst, pLast, pMiddlePtr, pPhonePtr, pDocPtr, string(pHashed), parentRoleID).Scan(&parentUserID)
 
 				if err != nil {

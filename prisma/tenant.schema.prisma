@@ -29,6 +29,7 @@ model User {
 
   // Soft Delete fields
   is_deleted Boolean   @default(false)
+  password_reset_required Boolean @default(false)
   deleted_at DateTime?
 
   created_at DateTime @default(now())

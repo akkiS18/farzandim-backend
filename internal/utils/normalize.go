@@ -19,3 +19,17 @@ func NormalizeClassName(name string) string {
 	s = multipleSpaceRegex.ReplaceAllString(s, "")
 	return s
 }
+
+// NormalizePhone cleans phone numbers to a standard digits-only format with 998 prefix.
+// e.g. "+998 (90) 123-45-67" -> "998901234567", "90 123-45-67" -> "998901234567"
+func NormalizePhone(phone string) string {
+	// Remove all non-digits
+	reg := regexp.MustCompile(`\D`)
+	cleaned := reg.ReplaceAllString(phone, "")
+
+	// If it is 9 digits, prepend 998 country code
+	if len(cleaned) == 9 {
+		cleaned = "998" + cleaned
+	}
+	return cleaned
+}

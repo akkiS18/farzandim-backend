@@ -12,6 +12,7 @@ import (
 	"github.com/farzandim/backend/internal/audit"
 	"github.com/farzandim/backend/internal/db"
 	"github.com/farzandim/backend/internal/middleware"
+	"github.com/farzandim/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -157,7 +158,7 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 	}
 
 	_, err = tx.Exec(
-		"UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
+		"UPDATE users SET password_hash = $1, password_reset_required = false, updated_at = NOW() WHERE id = $2",
 		string(newHash), userID,
 	)
 	if err != nil {
@@ -296,6 +297,7 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 	var firstName, lastName string
 	var roleName string
 	var passportNull, phoneNull, docNoNull sql.NullString
+	var passwordResetRequired bool
 
 	docNoClean := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(req.DocumentNo), " ", ""))
 	phoneClean := strings.TrimSpace(req.Phone)
@@ -308,14 +310,14 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 	var err error
 	if docNoClean != "" {
 		query := `
-			SELECT u.id, u.password_hash, u.first_name, u.last_name, r.name, u.passport, u.phone, u.document_no 
+			SELECT u.id, u.password_hash, u.first_name, u.last_name, r.name, u.passport, u.phone, u.document_no, u.password_reset_required 
 			FROM users u 
 			JOIN roles r ON u.role_id = r.id 
 			WHERE (
 				UPPER(TRIM(u.document_no)) = $1 
 				OR UPPER(TRIM(u.passport)) = $1 
 			) AND u.is_deleted = false`
-		err = tenantDB.QueryRow(query, docNoClean).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull, &docNoNull)
+		err = tenantDB.QueryRow(query, docNoClean).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull, &docNoNull, &passwordResetRequired)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				c.JSON(http.StatusNotFound, gin.H{
@@ -328,12 +330,13 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 			return
 		}
 	} else if phoneClean != "" {
+		normPhone := utils.NormalizePhone(phoneClean)
 		query := `
-			SELECT u.id, u.password_hash, u.first_name, u.last_name, r.name, u.passport, u.phone, u.document_no 
+			SELECT u.id, u.password_hash, u.first_name, u.last_name, r.name, u.passport, u.phone, u.document_no, u.password_reset_required 
 			FROM users u 
 			JOIN roles r ON u.role_id = r.id 
-			WHERE (u.phone = $1 OR REGEXP_REPLACE(u.phone, '\D', '', 'g') = REGEXP_REPLACE($1, '\D', '', 'g')) AND u.is_deleted = false`
-		err = tenantDB.QueryRow(query, phoneClean).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull, &docNoNull)
+			WHERE (u.phone = $1 OR REGEXP_REPLACE(u.phone, '\D', '', 'g') = $1) AND u.is_deleted = false`
+		err = tenantDB.QueryRow(query, normPhone).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull, &docNoNull, &passwordResetRequired)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				c.JSON(http.StatusNotFound, gin.H{
@@ -399,13 +402,14 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 		"token":         token,
 		"refresh_token": refreshToken,
 		"user": gin.H{
-			"id":         userID,
-			"first_name": firstName,
-			"last_name":  lastName,
-			"role":       roleName,
-			"school_id":  schoolID,
-			"passport":   passport,
-			"phone":      phone,
+			"id":                      userID,
+			"first_name":              firstName,
+			"last_name":               lastName,
+			"role":                    roleName,
+			"school_id":               schoolID,
+			"passport":                passport,
+			"phone":                   phone,
+			"password_reset_required": passwordResetRequired,
 		},
 	})
 }

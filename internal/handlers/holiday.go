@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/farzandim/backend/internal/audit"
@@ -102,14 +103,36 @@ func (h *HolidayHandler) SaveHoliday(c *gin.Context) {
 	if !req.ForceOverwrite {
 		var gradeCount int
 		var sampleSubject, sampleClass string
-		err = dbConn.QueryRow(`
+
+		query := `
 			SELECT COUNT(g.id), COALESCE(MAX(s.name), ''), COALESCE(MAX(c.name), '')
 			FROM grades g
 			JOIN students st ON g.student_id = st.id
 			LEFT JOIN subjects s ON g.subject_id = s.id
 			LEFT JOIN classes c ON st.class_id = c.id
 			WHERE DATE(g.grade_date) = $1 AND g.is_deleted = false AND st.is_deleted = false
-		`, holidayDate.Format("2006-01-02")).Scan(&gradeCount, &sampleSubject, &sampleClass)
+		`
+		var args []interface{}
+		args = append(args, holidayDate.Format("2006-01-02"))
+
+		if len(req.TargetLevels) > 0 || len(req.TargetClasses) > 0 {
+			query += " AND ("
+			conditions := []string{}
+			argIndex := 2
+			if len(req.TargetLevels) > 0 {
+				conditions = append(conditions, fmt.Sprintf("c.level = ANY($%d)", argIndex))
+				args = append(args, pq.Array(req.TargetLevels))
+				argIndex++
+			}
+			if len(req.TargetClasses) > 0 {
+				conditions = append(conditions, fmt.Sprintf("st.class_id = ANY($%d)", argIndex))
+				args = append(args, pq.Array(req.TargetClasses))
+				argIndex++
+			}
+			query += strings.Join(conditions, " OR ") + ")"
+		}
+
+		err = dbConn.QueryRow(query, args...).Scan(&gradeCount, &sampleSubject, &sampleClass)
 
 		if err == nil && gradeCount > 0 {
 			c.JSON(http.StatusConflict, gin.H{
@@ -132,11 +155,36 @@ func (h *HolidayHandler) SaveHoliday(c *gin.Context) {
 
 	// If force_overwrite is true, soft-delete existing grades on this holiday date
 	if req.ForceOverwrite {
-		_, err = tx.Exec(`
+		updateQuery := `
 			UPDATE grades 
 			SET is_deleted = true, deleted_at = NOW(), updated_at = NOW() 
 			WHERE DATE(grade_date) = $1 AND is_deleted = false
-		`, holidayDate.Format("2006-01-02"))
+		`
+		var updateArgs []interface{}
+		updateArgs = append(updateArgs, holidayDate.Format("2006-01-02"))
+
+		if len(req.TargetLevels) > 0 || len(req.TargetClasses) > 0 {
+			updateQuery += ` AND student_id IN (
+				SELECT s.id FROM students s
+				LEFT JOIN classes c ON s.class_id = c.id
+				WHERE s.is_deleted = false AND (`
+			
+			conditions := []string{}
+			argIndex := 2
+			if len(req.TargetLevels) > 0 {
+				conditions = append(conditions, fmt.Sprintf("c.level = ANY($%d)", argIndex))
+				updateArgs = append(updateArgs, pq.Array(req.TargetLevels))
+				argIndex++
+			}
+			if len(req.TargetClasses) > 0 {
+				conditions = append(conditions, fmt.Sprintf("s.class_id = ANY($%d)", argIndex))
+				updateArgs = append(updateArgs, pq.Array(req.TargetClasses))
+				argIndex++
+			}
+			updateQuery += strings.Join(conditions, " OR ") + "))"
+		}
+
+		_, err = tx.Exec(updateQuery, updateArgs...)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to overwrite grades for holiday", "details": err.Error()})
 			return

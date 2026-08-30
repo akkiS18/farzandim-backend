@@ -299,6 +299,7 @@ var TokenLimiter = &GlobalTelegramLimiter{
 }
 
 // Wait enforces Telegram's global limit (max 30 msgs/sec = ~36ms minimum interval between API calls)
+// It uses a slot reservation pattern so that goroutines do not hold the mutex lock during time.Sleep
 func (gtl *GlobalTelegramLimiter) Wait(token string) {
 	if token == "" {
 		return
@@ -314,21 +315,34 @@ func (gtl *GlobalTelegramLimiter) Wait(token string) {
 	gtl.mu.Unlock()
 
 	limiter.mu.Lock()
-	defer limiter.mu.Unlock()
-
 	now := time.Now()
-	if now.Before(limiter.blockedUntil) {
-		sleepDur := limiter.blockedUntil.Sub(now)
-		log.Printf("[Telegram RateLimiter] Token paused due to 429 Retry-After. Waiting for %v...", sleepDur)
-		time.Sleep(sleepDur)
-		now = time.Now()
+
+	// Determine the earliest time this request can proceed
+	targetTime := now
+
+	// Check if token is blocked (e.g., waiting out a 429 Retry-After)
+	if targetTime.Before(limiter.blockedUntil) {
+		targetTime = limiter.blockedUntil
 	}
 
-	elapsed := now.Sub(limiter.lastRequest)
-	if elapsed < limiter.minInterval {
-		time.Sleep(limiter.minInterval - elapsed)
+	// Check min interval since the last reserved request
+	earliestNext := limiter.lastRequest.Add(limiter.minInterval)
+	if targetTime.Before(earliestNext) {
+		targetTime = earliestNext
 	}
-	limiter.lastRequest = time.Now()
+
+	// Reserve the slot
+	limiter.lastRequest = targetTime
+	limiter.mu.Unlock() // Release lock immediately!
+
+	// Sleep outside the lock context if necessary
+	sleepDur := targetTime.Sub(now)
+	if sleepDur > 0 {
+		if sleepDur > limiter.minInterval {
+			log.Printf("[Telegram RateLimiter] Token paused. Waiting for %v outside the lock...", sleepDur)
+		}
+		time.Sleep(sleepDur)
+	}
 }
 
 // BlockToken pauses requests for a specific token when a 429 Retry-After is encountered
@@ -361,6 +375,10 @@ type TelegramAPIResponse struct {
 	} `json:"parameters"`
 }
 
+var telegramHTTPClient = &http.Client{
+	Timeout: 15 * time.Second,
+}
+
 // sendTelegramRequestRaw executes a POST request to Telegram API with rate limiting and 429 Retry-After handling
 func sendTelegramRequestRaw(token string, method string, payload interface{}) ([]byte, error) {
 	if token == "" {
@@ -373,13 +391,12 @@ func sendTelegramRequestRaw(token string, method string, payload interface{}) ([
 		return nil, err
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
 	maxAttempts := 3
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		TokenLimiter.Wait(token)
 
-		resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
+		resp, err := telegramHTTPClient.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
 		if err != nil {
 			log.Printf("[Telegram API Error] POST %s failed: %v (Attempt %d/%d)", method, err, attempt, maxAttempts)
 			time.Sleep(1 * time.Second)

@@ -50,6 +50,10 @@ type StudentWeeklyDataContext struct {
 	CurrentAverageGrade float64
 }
 
+var geminiHTTPClient = &http.Client{
+	Timeout: 30 * time.Second,
+}
+
 // GenerateAIWeeklyReport calls Google Gemini API with fallback DB query
 func GenerateAIWeeklyReport(data StudentWeeklyDataContext) (string, error) {
 	return GenerateAIWeeklyReportWithDB(nil, data)
@@ -97,9 +101,8 @@ func GenerateAIWeeklyReportWithDB(dbConn *sql.DB, data StudentWeeklyDataContext)
 	}
 
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=%s", apiKey)
-	client := &http.Client{Timeout: 30 * time.Second}
 
-	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
+	resp, err := geminiHTTPClient.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
 	if err != nil {
 		return generateFallbackReport(data), nil
 	}
