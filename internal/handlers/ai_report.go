@@ -66,6 +66,45 @@ func ensureAITable(db *sql.DB) {
 
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_ai_weekly_reports_student ON ai_weekly_reports(student_id);`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_ai_weekly_reports_year_week ON ai_weekly_reports(year, week_number);`)
+
+	// Ensure ai_generation_jobs table for asynchronous batch processing
+	_, errJob := db.Exec(`
+		CREATE TABLE IF NOT EXISTS ai_generation_jobs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			target_date DATE NOT NULL,
+			class_id INT,
+			status TEXT NOT NULL DEFAULT 'STARTED',
+			total_students INT NOT NULL DEFAULT 0,
+			processed_students INT NOT NULL DEFAULT 0,
+			generated_count INT NOT NULL DEFAULT 0,
+			error_count INT NOT NULL DEFAULT 0,
+			current_student_name TEXT,
+			error_message TEXT,
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			finished_at TIMESTAMP WITH TIME ZONE
+		);
+	`)
+	if errJob != nil {
+		_, _ = db.Exec(`
+			CREATE TABLE IF NOT EXISTS ai_generation_jobs (
+				id TEXT PRIMARY KEY DEFAULT md5(random()::text || clock_timestamp()::text),
+				target_date DATE NOT NULL,
+				class_id INT,
+				status TEXT NOT NULL DEFAULT 'STARTED',
+				total_students INT NOT NULL DEFAULT 0,
+				processed_students INT NOT NULL DEFAULT 0,
+				generated_count INT NOT NULL DEFAULT 0,
+				error_count INT NOT NULL DEFAULT 0,
+				current_student_name TEXT,
+				error_message TEXT,
+				created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+				updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+				finished_at TIMESTAMP WITH TIME ZONE
+			);
+		`)
+	}
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_ai_generation_jobs_status ON ai_generation_jobs(status, created_at DESC);`)
 }
 
 func getTenantDB(c *gin.Context) (*sql.DB, error) {
@@ -186,11 +225,99 @@ type AdminBatchGenerateRequest struct {
 	TargetDate string `json:"target_date"`
 }
 
-// AdminBatchGenerateAIReports allows Admin to manually generate AI reports for selected students or classes
+func runBatchGenerationJob(dbConn *sql.DB, jobID string, targetStudentIDs []int, targetTime time.Time) {
+	// Mark status as IN_PROGRESS
+	_, _ = dbConn.Exec(`UPDATE ai_generation_jobs SET status = 'IN_PROGRESS', updated_at = NOW() WHERE id = $1`, jobID)
+
+	generatedCount := 0
+	errorCount := 0
+	var lastError string
+
+	for idx, sID := range targetStudentIDs {
+		// Check if job was cancelled
+		var currentStatus string
+		err := dbConn.QueryRow(`SELECT status FROM ai_generation_jobs WHERE id = $1`, jobID).Scan(&currentStatus)
+		if err == nil && currentStatus == "CANCELLED" {
+			log.Printf("[AI Batch Job] Job %s bekor qilindi (CANCELLED). Fon jarayoni to'xtatildi.", jobID)
+			return
+		}
+
+		// Fetch student name for live UI progress
+		var studentName string
+		_ = dbConn.QueryRow(`
+			SELECT u.first_name || ' ' || u.last_name 
+			FROM students s 
+			JOIN users u ON s.user_id = u.id 
+			WHERE s.id = $1`, sID).Scan(&studentName)
+		if studentName == "" {
+			studentName = fmt.Sprintf("O'quvchi #%d", sID)
+		}
+
+		// Update currently processing student in DB
+		_, _ = dbConn.Exec(`
+			UPDATE ai_generation_jobs 
+			SET current_student_name = $1, processed_students = $2, generated_count = $3, error_count = $4, updated_at = NOW() 
+			WHERE id = $5`, studentName, idx, generatedCount, errorCount, jobID)
+
+		// Throttling / Rate Limit safety delay (350ms)
+		time.Sleep(350 * time.Millisecond)
+
+		_, err = generateReportForStudent(dbConn, sID, targetTime)
+		if err != nil {
+			log.Printf("[AI Batch Error] Job %s Student %d error: %v", jobID, sID, err)
+			lastError = err.Error()
+			errorCount++
+		} else {
+			generatedCount++
+		}
+
+		// Update counters after student processing
+		_, _ = dbConn.Exec(`
+			UPDATE ai_generation_jobs 
+			SET processed_students = $1, generated_count = $2, error_count = $3, updated_at = NOW() 
+			WHERE id = $4`, idx+1, generatedCount, errorCount, jobID)
+	}
+
+	finalStatus := "FINISHED"
+	var errMsg *string
+	if generatedCount == 0 && errorCount > 0 {
+		finalStatus = "FAILED"
+		errMsg = &lastError
+	}
+
+	_, _ = dbConn.Exec(`
+		UPDATE ai_generation_jobs 
+		SET status = $1, processed_students = $2, generated_count = $3, error_count = $4, current_student_name = NULL, error_message = $5, finished_at = NOW(), updated_at = NOW() 
+		WHERE id = $6`, finalStatus, len(targetStudentIDs), generatedCount, errorCount, errMsg, jobID)
+}
+
+// AdminBatchGenerateAIReports asynchronously starts AI reports generation in the background
 func (h *AIReportHandler) AdminBatchGenerateAIReports(c *gin.Context) {
 	dbConn, err := getTenantDB(c)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 1. Check if there's already an active job in progress (created/updated within last 15 minutes)
+	var activeJobID, activeStatus string
+	var activeTotal, activeProcessed int
+	activeErr := dbConn.QueryRow(`
+		SELECT id, status, total_students, processed_students 
+		FROM ai_generation_jobs 
+		WHERE status IN ('STARTED', 'IN_PROGRESS') AND updated_at >= NOW() - INTERVAL '15 minutes'
+		ORDER BY created_at DESC LIMIT 1
+	`).Scan(&activeJobID, &activeStatus, &activeTotal, &activeProcessed)
+
+	if activeErr == nil && activeJobID != "" {
+		c.JSON(http.StatusOK, gin.H{
+			"message":            "AI hisobot generatsiyasi allaqachon fonda ishlamoqda",
+			"job_id":             activeJobID,
+			"status":             activeStatus,
+			"total_students":     activeTotal,
+			"processed_students": activeProcessed,
+			"is_existing":        true,
+		})
 		return
 	}
 
@@ -203,9 +330,11 @@ func (h *AIReportHandler) AdminBatchGenerateAIReports(c *gin.Context) {
 	targetStudentIDs := req.StudentIDs
 
 	targetTime := time.Now()
+	targetDateStr := targetTime.Format("2006-01-02")
 	if req.TargetDate != "" {
 		if parsedTime, err := time.Parse("2006-01-02", req.TargetDate); err == nil {
 			targetTime = parsedTime
+			targetDateStr = req.TargetDate
 		}
 	}
 
@@ -257,46 +386,168 @@ func (h *AIReportHandler) AdminBatchGenerateAIReports(c *gin.Context) {
 		return
 	}
 
-	generatedCount := 0
-	errorCount := 0
-	var lastError string
-
-	for _, sID := range targetStudentIDs {
-		// Enforce Rate Limiting delay (400ms sleep = max ~15 requests per minute for Gemini Free Tier)
-		time.Sleep(400 * time.Millisecond)
-
-		_, err := generateReportForStudent(dbConn, sID, targetTime)
-		if err != nil {
-			log.Printf("[AI Batch Error] Student %d error: %v", sID, err)
-			lastError = err.Error()
-			errorCount++
-		} else {
-			generatedCount++
-		}
-	}
-
-	if generatedCount == 0 && errorCount > 0 {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":           fmt.Sprintf("AI hisobot yaratishda xatolik: %s", lastError),
-			"details":         lastError,
-			"generated_count": 0,
-			"error_count":     errorCount,
-			"total_requested": len(targetStudentIDs),
-		})
+	// Insert Job Record
+	var jobID string
+	var createdAt, updatedAt time.Time
+	err = dbConn.QueryRow(`
+		INSERT INTO ai_generation_jobs (target_date, class_id, status, total_students, processed_students, generated_count, error_count)
+		VALUES ($1, $2, 'STARTED', $3, 0, 0, 0)
+		RETURNING id, created_at, updated_at`,
+		targetDateStr, req.ClassID, len(targetStudentIDs)).Scan(&jobID, &createdAt, &updatedAt)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Job yaratishda xatolik: " + err.Error()})
 		return
 	}
 
-	msg := fmt.Sprintf("%d ta o'quvchi uchun AI hisobot muvaffaqiyatli yaratildi", generatedCount)
-	if errorCount > 0 {
-		msg += fmt.Sprintf(" (%d ta o'quvchida xatolik)", errorCount)
-	}
+	// Launch background goroutine
+	go runBatchGenerationJob(dbConn, jobID, targetStudentIDs, targetTime)
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":          msg,
-		"generated_count": generatedCount,
-		"error_count":     errorCount,
-		"total_requested": len(targetStudentIDs),
+		"message":            "AI hisobot generatsiyasi boshlandi (fonda ishlamoqda)",
+		"job_id":             jobID,
+		"status":             "STARTED",
+		"total_students":     len(targetStudentIDs),
+		"processed_students": 0,
+		"is_existing":        false,
 	})
+}
+
+// GetActiveGenerationJob returns the active job if currently running or completed very recently
+func (h *AIReportHandler) GetActiveGenerationJob(c *gin.Context) {
+	dbConn, err := getTenantDB(c)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Clean up stale orphaned jobs stuck in STARTED or IN_PROGRESS for > 15 minutes
+	_, _ = dbConn.Exec(`
+		UPDATE ai_generation_jobs 
+		SET status = 'FAILED', error_message = 'Vaqt limiti oshib ketdi yoki server qayta yuklandi', updated_at = NOW(), finished_at = NOW() 
+		WHERE status IN ('STARTED', 'IN_PROGRESS') AND updated_at < NOW() - INTERVAL '15 minutes'
+	`)
+
+	var job models.AIGenerationJob
+	var classIDNull sql.NullInt64
+	var currentStudentNull sql.NullString
+	var errorMsgNull sql.NullString
+	var finishedAtNull sql.NullTime
+
+	err = dbConn.QueryRow(`
+		SELECT id, target_date::text, class_id, status, total_students, processed_students, generated_count, error_count, current_student_name, error_message, created_at, updated_at, finished_at
+		FROM ai_generation_jobs
+		WHERE status IN ('STARTED', 'IN_PROGRESS') 
+		   OR (status IN ('FINISHED', 'FAILED', 'CANCELLED') AND finished_at >= NOW() - INTERVAL '20 seconds')
+		ORDER BY created_at DESC LIMIT 1
+	`).Scan(
+		&job.ID, &job.TargetDate, &classIDNull, &job.Status, &job.TotalStudents,
+		&job.ProcessedStudents, &job.GeneratedCount, &job.ErrorCount,
+		&currentStudentNull, &errorMsgNull, &job.CreatedAt, &job.UpdatedAt, &finishedAtNull,
+	)
+
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"has_active_job": false, "job": nil})
+		return
+	}
+
+	if classIDNull.Valid {
+		val := int(classIDNull.Int64)
+		job.ClassID = &val
+	}
+	if currentStudentNull.Valid {
+		job.CurrentStudentName = &currentStudentNull.String
+	}
+	if errorMsgNull.Valid {
+		job.ErrorMessage = &errorMsgNull.String
+	}
+	if finishedAtNull.Valid {
+		job.FinishedAt = &finishedAtNull.Time
+	}
+
+	c.JSON(http.StatusOK, gin.H{"has_active_job": true, "job": job})
+}
+
+// GetGenerationJobStatus returns full status of a specific job
+func (h *AIReportHandler) GetGenerationJobStatus(c *gin.Context) {
+	dbConn, err := getTenantDB(c)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	jobID := c.Param("id")
+	if jobID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "job_id majburiy"})
+		return
+	}
+
+	var job models.AIGenerationJob
+	var classIDNull sql.NullInt64
+	var currentStudentNull sql.NullString
+	var errorMsgNull sql.NullString
+	var finishedAtNull sql.NullTime
+
+	err = dbConn.QueryRow(`
+		SELECT id, target_date::text, class_id, status, total_students, processed_students, generated_count, error_count, current_student_name, error_message, created_at, updated_at, finished_at
+		FROM ai_generation_jobs
+		WHERE id = $1`, jobID).Scan(
+		&job.ID, &job.TargetDate, &classIDNull, &job.Status, &job.TotalStudents,
+		&job.ProcessedStudents, &job.GeneratedCount, &job.ErrorCount,
+		&currentStudentNull, &errorMsgNull, &job.CreatedAt, &job.UpdatedAt, &finishedAtNull,
+	)
+
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Job topilmadi"})
+		return
+	}
+
+	if classIDNull.Valid {
+		val := int(classIDNull.Int64)
+		job.ClassID = &val
+	}
+	if currentStudentNull.Valid {
+		job.CurrentStudentName = &currentStudentNull.String
+	}
+	if errorMsgNull.Valid {
+		job.ErrorMessage = &errorMsgNull.String
+	}
+	if finishedAtNull.Valid {
+		job.FinishedAt = &finishedAtNull.Time
+	}
+
+	c.JSON(http.StatusOK, gin.H{"job": job})
+}
+
+// CancelGenerationJob stops an in-progress generation job
+func (h *AIReportHandler) CancelGenerationJob(c *gin.Context) {
+	dbConn, err := getTenantDB(c)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	jobID := c.Param("id")
+	if jobID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "job_id majburiy"})
+		return
+	}
+
+	res, err := dbConn.Exec(`
+		UPDATE ai_generation_jobs 
+		SET status = 'CANCELLED', finished_at = NOW(), updated_at = NOW() 
+		WHERE id = $1 AND status IN ('STARTED', 'IN_PROGRESS')`, jobID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Jobni bekor qilishda xatolik: " + err.Error()})
+		return
+	}
+
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Bekor qilish uchun faol jarayon topilmadi"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Jarayon muvaffaqiyatli to'xtatildi"})
 }
 
 // GetGroupedAIReports returns list of weeks with count of generated reports
@@ -556,24 +807,51 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 		}
 	}
 
-	// 3. Fetch Grades for Current Week
+	// 3. Fetch Grades for Current Week (Strict DATE boundary check + parse numeric/string values)
 	var gradeStrings []string
 	var totalGradeSum float64
 	var totalGradeCount int
 
 	gRows, err := dbConn.Query(`
-		SELECT sub.name, COALESCE(g.numeric_value, 0.0)
+		SELECT sub.name, COALESCE(g.value, ''), COALESCE(g.numeric_value, 0.0)
 		FROM grades g
 		JOIN subjects sub ON g.subject_id = sub.id
-		WHERE g.student_id = $1 AND g.grade_date >= $2 AND g.grade_date <= $3 AND g.is_deleted = false`, studentID, startStr, endStr)
+		WHERE g.student_id = $1 
+		  AND DATE(g.grade_date) >= $2::date 
+		  AND DATE(g.grade_date) <= $3::date 
+		  AND g.is_deleted = false
+		  AND (g.grade_type IS NULL OR g.grade_type != 'ATTENDANCE')
+		ORDER BY g.grade_date ASC`, studentID, startStr, endStr)
 	if err == nil {
 		for gRows.Next() {
-			var subName string
-			var val float64
-			if err := gRows.Scan(&subName, &val); err == nil {
-				gradeStrings = append(gradeStrings, fmt.Sprintf("%s: %.0f", subName, val))
-				totalGradeSum += val
-				totalGradeCount++
+			var subName, rawVal string
+			var numVal float64
+			if err := gRows.Scan(&subName, &rawVal, &numVal); err == nil {
+				if numVal == 0.0 && rawVal != "" {
+					if parsed, errP := strconv.ParseFloat(rawVal, 64); errP == nil {
+						numVal = parsed
+					} else if rawVal == "5" || rawVal == "A" || rawVal == "A'" || rawVal == "+" {
+						numVal = 5.0
+					} else if rawVal == "4" || rawVal == "B" {
+						numVal = 4.0
+					} else if rawVal == "3" || rawVal == "C" {
+						numVal = 3.0
+					} else if rawVal == "2" || rawVal == "D" {
+						numVal = 2.0
+					}
+				}
+
+				displayVal := rawVal
+				if displayVal == "" && numVal > 0 {
+					displayVal = fmt.Sprintf("%.0f", numVal)
+				}
+				if displayVal != "" {
+					gradeStrings = append(gradeStrings, fmt.Sprintf("%s: %s", subName, displayVal))
+				}
+				if numVal > 0 {
+					totalGradeSum += numVal
+					totalGradeCount++
+				}
 			}
 		}
 		gRows.Close()
@@ -584,7 +862,7 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 		currentAvg = totalGradeSum / float64(totalGradeCount)
 	}
 
-	// 4. Fetch Teacher Comments
+	// 4. Fetch Teacher Comments for Current Week
 	var comments []string
 	cRows, err := dbConn.Query(`
 		SELECT gc.content
@@ -593,8 +871,8 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 		JOIN users u ON gc.author_id = u.id
 		JOIN roles r ON u.role_id = r.id
 		WHERE g.student_id = $1
-		  AND gc.created_at >= $2
-		  AND gc.created_at <= $3
+		  AND DATE(gc.created_at) >= $2::date
+		  AND DATE(gc.created_at) <= $3::date
 		  AND r.name IN ('ADMIN', 'MAIN_TEACHER', 'SUBJECT_TEACHER')`, studentID, startStr, endStr)
 	if err == nil {
 		for cRows.Next() {
@@ -604,6 +882,29 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 			}
 		}
 		cRows.Close()
+	}
+
+	// 4.5 Fetch Attendance for Current Week
+	var absentCount, lateCount int
+	_ = dbConn.QueryRow(`
+		SELECT 
+			COUNT(CASE WHEN value IN ('NB', 'Q', '-', 'ABSENT') THEN 1 END),
+			COUNT(CASE WHEN value IN ('K', 'LATE') THEN 1 END)
+		FROM grades 
+		WHERE student_id = $1 
+		  AND grade_type = 'ATTENDANCE' 
+		  AND DATE(grade_date) >= $2::date 
+		  AND DATE(grade_date) <= $3::date 
+		  AND is_deleted = false
+	`, studentID, startStr, endStr).Scan(&absentCount, &lateCount)
+
+	attendanceInfo := "Darslarga to'liq va faol qatnashdi"
+	if absentCount > 0 && lateCount > 0 {
+		attendanceInfo = fmt.Sprintf("Hafta davomida %d ta dars qoldirildi va %d ta darsga kechikildi", absentCount, lateCount)
+	} else if absentCount > 0 {
+		attendanceInfo = fmt.Sprintf("Hafta davomida %d ta dars qoldirildi", absentCount)
+	} else if lateCount > 0 {
+		attendanceInfo = fmt.Sprintf("Hafta davomida %d ta darsga kechikildi", lateCount)
 	}
 
 	// 5. Fetch Books Read / Reading Assignments
@@ -658,9 +959,9 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 		Grades:              gradeStrings,
 		TeacherComments:     comments,
 		BooksRead:           booksRead,
-		AttendanceInfo:      "Darslarga qatnashish ko'rsatkichi a'lo",
-		PreviousReportText: prevReportText,
-		PrevAverageGrade:   prevAvgGrade,
+		AttendanceInfo:      attendanceInfo,
+		PreviousReportText:  prevReportText,
+		PrevAverageGrade:    prevAvgGrade,
 		CurrentAverageGrade: currentAvg,
 	}
 

@@ -25,3 +25,19 @@ type AIReportSummaryData struct {
 	BooksReadCount   int     `json:"books_read_count"`
 	PositiveFeedback int     `json:"positive_feedback_count"`
 }
+
+type AIGenerationJob struct {
+	ID                 string     `json:"id"`
+	TargetDate         string     `json:"target_date"`
+	ClassID            *int       `json:"class_id,omitempty"`
+	Status             string     `json:"status"` // "STARTED", "IN_PROGRESS", "FINISHED", "FAILED", "CANCELLED"
+	TotalStudents      int        `json:"total_students"`
+	ProcessedStudents  int        `json:"processed_students"`
+	GeneratedCount     int        `json:"generated_count"`
+	ErrorCount         int        `json:"error_count"`
+	CurrentStudentName *string    `json:"current_student_name,omitempty"`
+	ErrorMessage       *string    `json:"error_message,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	FinishedAt         *time.Time `json:"finished_at,omitempty"`
+}

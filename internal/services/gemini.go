@@ -100,29 +100,37 @@ func GenerateAIWeeklyReportWithDB(dbConn *sql.DB, data StudentWeeklyDataContext)
 		return "", fmt.Errorf("failed to marshal gemini request: %v", err)
 	}
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=%s", apiKey)
+	// Try models in priority order
+	modelsToTry := []string{"gemini-2.5-flash", "gemini-3.6-flash", "gemini-2.0-flash", "gemini-1.5-flash"}
+	var lastStatusErr string
 
-	resp, err := geminiHTTPClient.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
-	if err != nil {
-		return generateFallbackReport(data), nil
+	for _, modelName := range modelsToTry {
+		url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", modelName, apiKey)
+
+		resp, err := geminiHTTPClient.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
+		if err != nil {
+			lastStatusErr = err.Error()
+			continue
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			var geminiResp GeminiResponse
+			if err := json.NewDecoder(resp.Body).Decode(&geminiResp); err == nil {
+				resp.Body.Close()
+				if len(geminiResp.Candidates) > 0 && len(geminiResp.Candidates[0].Content.Parts) > 0 {
+					return geminiResp.Candidates[0].Content.Parts[0].Text, nil
+				}
+			}
+			resp.Body.Close()
+		} else {
+			respBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastStatusErr = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(respBytes))
+			fmt.Printf("[Gemini Model %s Warning] %s\n", modelName, lastStatusErr)
+		}
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		respBytes, _ := io.ReadAll(resp.Body)
-		fmt.Printf("[Gemini API Warning] HTTP %d: %s. Using pedagogical fallback report.\n", resp.StatusCode, string(respBytes))
-		return generateFallbackReport(data), nil
-	}
-
-	var geminiResp GeminiResponse
-	if err := json.NewDecoder(resp.Body).Decode(&geminiResp); err != nil {
-		return "", fmt.Errorf("failed to decode gemini response: %v", err)
-	}
-
-	if len(geminiResp.Candidates) > 0 && len(geminiResp.Candidates[0].Content.Parts) > 0 {
-		return geminiResp.Candidates[0].Content.Parts[0].Text, nil
-	}
-
+	fmt.Printf("[Gemini API Fallback] Failed calling Gemini API (%s). Using fallback template.\n", lastStatusErr)
 	return generateFallbackReport(data), nil
 }
 
