@@ -71,7 +71,7 @@ func (h *ParentHandler) CreateAndLinkParent(c *gin.Context) {
 
 	// 2. Authorization check: Admin or assigned main teacher of student's class
 	if userRole != "ADMIN" {
-		if userRole != "MAIN_TEACHER" {
+		if userRole != "MAIN_TEACHER" && userRole != "SUBJECT_TEACHER" {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: faqat admin va ushbu sinf rahbari ota-onani bog'lay oladi"})
 			return
 		}
@@ -269,7 +269,7 @@ func (h *ParentHandler) ListStudentParents(c *gin.Context) {
 
 	// 2. Authorization check: Admin or assigned main teacher of student's class
 	if userRole != "ADMIN" {
-		if userRole != "MAIN_TEACHER" {
+		if userRole != "MAIN_TEACHER" && userRole != "SUBJECT_TEACHER" {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: faqat admin va ushbu sinf rahbari ota-onalarni ko'ra oladi"})
 			return
 		}
@@ -382,7 +382,7 @@ func (h *ParentHandler) UnlinkParent(c *gin.Context) {
 
 	// 2. Authorization check: Admin or assigned main teacher of student's class
 	if userRole != "ADMIN" {
-		if userRole != "MAIN_TEACHER" {
+		if userRole != "MAIN_TEACHER" && userRole != "SUBJECT_TEACHER" {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: faqat admin va ushbu sinf rahbari ota-onani o'chira oladi"})
 			return
 		}
