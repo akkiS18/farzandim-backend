@@ -39,3 +39,29 @@ type ScheduleLessonInput struct {
 	LessonNumber int `json:"lesson_number" binding:"required,min=1,max=10"`
 	SubjectID    int `json:"subject_id" binding:"required"`
 }
+
+type TeacherTodayLessonItem struct {
+	LessonNumber        int    `json:"lesson_number"`
+	Time                string `json:"time"`
+	ClassID             int    `json:"class_id"`
+	ClassName           string `json:"class_name"`
+	SubjectID           int    `json:"subject_id"`
+	SubjectName         string `json:"subject_name"`
+	IsMarked            bool   `json:"is_marked"`
+	IsFullyMarked       bool   `json:"is_fully_marked"`
+	MarkedStudentsCount int    `json:"marked_students_count"`
+	TotalStudentsCount  int    `json:"total_students_count"`
+}
+
+type TeacherTodayLessonsResponse struct {
+	Date           string                   `json:"date"`
+	DayOfWeek      int                      `json:"day_of_week"`
+	IsWeekend      bool                     `json:"is_weekend"`
+	IsHoliday      bool                     `json:"is_holiday"`
+	HolidayName    *string                  `json:"holiday_name"`
+	TotalLessons   int                      `json:"total_lessons"`
+	PendingCount   int                      `json:"pending_count"`
+	CompletedCount int                      `json:"completed_count"`
+	Lessons        []TeacherTodayLessonItem `json:"lessons"`
+}
+

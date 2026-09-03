@@ -246,6 +246,7 @@ func main() {
 		authTenantGroup.POST("/students/transfer-by-doc", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), tenantUserHandler.TransferStudentByDocument)
 		authTenantGroup.POST("/teachers", middleware.RequireRole("ADMIN"), tenantUserHandler.CreateTeacher)
 		authTenantGroup.GET("/teachers", tenantUserHandler.ListTeachers)
+		authTenantGroup.GET("/teachers/today-lessons", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), scheduleHandler.GetTeacherTodayLessons)
 		authTenantGroup.PUT("/teachers/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), tenantUserHandler.UpdateTeacher)
 		authTenantGroup.DELETE("/teachers/:id", middleware.RequireRole("ADMIN"), tenantUserHandler.DeleteTeacher)
 		authTenantGroup.GET("/classes/:id/teachers", tenantUserHandler.ListClassTeachers)

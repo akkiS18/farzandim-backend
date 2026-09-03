@@ -14,6 +14,7 @@ import (
 	"github.com/farzandim/backend/internal/models"
 	"github.com/farzandim/backend/internal/utils"
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -1091,3 +1092,472 @@ func (h *ScheduleHandler) BatchImportSchedulesSmart(c *gin.Context) {
 		"count":   insertedCount,
 	})
 }
+
+func formatLessonTime(lessonNumber int) string {
+	startHour := 7 + lessonNumber
+	endHour := 8 + lessonNumber
+	return fmt.Sprintf("%02d:30 - %02d:15", startHour, endHour)
+}
+
+// GetTeacherTodayLessons returns today's lessons for the logged-in teacher with grading/marking status
+func (h *ScheduleHandler) GetTeacherTodayLessons(c *gin.Context) {
+	tenantDBVal, exists := c.Get("tenantDB")
+	if !exists || tenantDBVal == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Tenant database context missing"})
+		return
+	}
+	dbConn := tenantDBVal.(*sql.DB)
+
+	userIDVal, _ := c.Get("userID")
+	userIDStr, _ := userIDVal.(string)
+	currentUserID, _ := strconv.Atoi(userIDStr)
+
+	roleVal, _ := c.Get("role")
+	userRole, _ := roleVal.(string)
+
+	targetTeacherID := currentUserID
+	if userRole == "ADMIN" && c.Query("teacher_id") != "" {
+		if tid, err := strconv.Atoi(c.Query("teacher_id")); err == nil && tid > 0 {
+			targetTeacherID = tid
+		}
+	}
+
+	dateParam := strings.TrimSpace(c.Query("date"))
+	if dateParam == "" {
+		dateParam = time.Now().Format("2006-01-02")
+	}
+	parsedDate, err := time.Parse("2006-01-02", dateParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Noto'g'ri sana formati. YYYY-MM-DD ko'rinishida yuboring"})
+		return
+	}
+
+	weekday := int(parsedDate.Weekday())
+	dayOfWeek := weekday
+	if dayOfWeek == 0 {
+		dayOfWeek = 7
+	}
+
+	// 1. Weekend check (Sunday)
+	if dayOfWeek == 7 {
+		c.JSON(http.StatusOK, models.TeacherTodayLessonsResponse{
+			Date:           dateParam,
+			DayOfWeek:      7,
+			IsWeekend:      true,
+			IsHoliday:      false,
+			TotalLessons:   0,
+			PendingCount:   0,
+			CompletedCount: 0,
+			Lessons:        []models.TeacherTodayLessonItem{},
+		})
+		return
+	}
+
+	// 2. Global holiday check
+	var globalHolidayName string
+	err = dbConn.QueryRow(`
+		SELECT name FROM school_holidays 
+		WHERE holiday_date = $1 AND is_deleted = false
+		  AND (cardinality(target_levels) IS NULL OR cardinality(target_levels) = 0)
+		  AND (cardinality(target_classes) IS NULL OR cardinality(target_classes) = 0)
+		LIMIT 1
+	`, parsedDate).Scan(&globalHolidayName)
+	if err == nil && globalHolidayName != "" {
+		c.JSON(http.StatusOK, models.TeacherTodayLessonsResponse{
+			Date:           dateParam,
+			DayOfWeek:      dayOfWeek,
+			IsWeekend:      false,
+			IsHoliday:      true,
+			HolidayName:    &globalHolidayName,
+			TotalLessons:   0,
+			PendingCount:   0,
+			CompletedCount: 0,
+			Lessons:        []models.TeacherTodayLessonItem{},
+		})
+		return
+	}
+
+	// 3. Find assigned classes & subjects for teacher
+	type classAssignment struct {
+		classID       int
+		className     string
+		classLevel    int
+		subjectIDs    map[int]bool
+		isMainTeacher bool
+	}
+	assignmentsMap := make(map[int]*classAssignment)
+	var classIDs []int
+
+	if userRole == "ADMIN" && c.Query("teacher_id") == "" {
+		ctRows, err := dbConn.Query(`
+			SELECT ct.class_id, cl.name, COALESCE(cl.level, 0), COALESCE(ct.subject_id, 0), ct.is_main_teacher
+			FROM class_teachers ct
+			JOIN classes cl ON ct.class_id = cl.id AND cl.is_deleted = false
+			WHERE ct.teacher_id = $1 AND ct.is_deleted = false
+		`, currentUserID)
+		hasAssignments := false
+		if err == nil {
+			for ctRows.Next() {
+				hasAssignments = true
+				var cid, lvl, sid int
+				var cname string
+				var isMain bool
+				if err := ctRows.Scan(&cid, &cname, &lvl, &sid, &isMain); err == nil {
+					if _, ok := assignmentsMap[cid]; !ok {
+						assignmentsMap[cid] = &classAssignment{
+							classID:       cid,
+							className:     cname,
+							classLevel:    lvl,
+							subjectIDs:    make(map[int]bool),
+							isMainTeacher: isMain,
+						}
+						classIDs = append(classIDs, cid)
+					}
+					if isMain {
+						assignmentsMap[cid].isMainTeacher = true
+					}
+					if sid > 0 {
+						assignmentsMap[cid].subjectIDs[sid] = true
+					}
+				}
+			}
+			ctRows.Close()
+		}
+
+		if !hasAssignments {
+			clRows, err := dbConn.Query(`
+				SELECT id, name, COALESCE(level, 0) FROM classes WHERE is_deleted = false ORDER BY name
+			`)
+			if err == nil {
+				for clRows.Next() {
+					var cid, lvl int
+					var cname string
+					if err := clRows.Scan(&cid, &cname, &lvl); err == nil {
+						assignmentsMap[cid] = &classAssignment{
+							classID:       cid,
+							className:     cname,
+							classLevel:    lvl,
+							subjectIDs:    make(map[int]bool),
+							isMainTeacher: true,
+						}
+						classIDs = append(classIDs, cid)
+					}
+				}
+				clRows.Close()
+			}
+		}
+	} else {
+		ctRows, err := dbConn.Query(`
+			SELECT ct.class_id, cl.name, COALESCE(cl.level, 0), COALESCE(ct.subject_id, 0), ct.is_main_teacher
+			FROM class_teachers ct
+			JOIN classes cl ON ct.class_id = cl.id AND cl.is_deleted = false
+			WHERE ct.teacher_id = $1 AND ct.is_deleted = false
+		`, targetTeacherID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query teacher assignments", "details": err.Error()})
+			return
+		}
+		defer ctRows.Close()
+
+		for ctRows.Next() {
+			var cid, lvl, sid int
+			var cname string
+			var isMain bool
+			if err := ctRows.Scan(&cid, &cname, &lvl, &sid, &isMain); err == nil {
+				if _, ok := assignmentsMap[cid]; !ok {
+					assignmentsMap[cid] = &classAssignment{
+						classID:       cid,
+						className:     cname,
+						classLevel:    lvl,
+						subjectIDs:    make(map[int]bool),
+						isMainTeacher: isMain,
+					}
+					classIDs = append(classIDs, cid)
+				}
+				if isMain {
+					assignmentsMap[cid].isMainTeacher = true
+				}
+				if sid > 0 {
+					assignmentsMap[cid].subjectIDs[sid] = true
+				}
+			}
+		}
+		ctRows.Close()
+	}
+
+	if len(classIDs) == 0 {
+		c.JSON(http.StatusOK, models.TeacherTodayLessonsResponse{
+			Date:           dateParam,
+			DayOfWeek:      dayOfWeek,
+			IsWeekend:      false,
+			IsHoliday:      false,
+			TotalLessons:   0,
+			PendingCount:   0,
+			CompletedCount: 0,
+			Lessons:        []models.TeacherTodayLessonItem{},
+		})
+		return
+	}
+
+	// 4. Class-specific holiday check
+	holidayClassRows, err := dbConn.Query(`
+		SELECT target_levels, target_classes 
+		FROM school_holidays 
+		WHERE holiday_date = $1 AND is_deleted = false
+	`, parsedDate)
+	holidayClasses := make(map[int]bool)
+	if err == nil {
+		for holidayClassRows.Next() {
+			var tLevels, tClasses []int64
+			if err := holidayClassRows.Scan(pq.Array(&tLevels), pq.Array(&tClasses)); err == nil {
+				for _, cid := range classIDs {
+					asgn := assignmentsMap[cid]
+					isHoliday := false
+					for _, tc := range tClasses {
+						if int(tc) == cid {
+							isHoliday = true
+							break
+						}
+					}
+					if !isHoliday && asgn != nil {
+						for _, tl := range tLevels {
+							if int(tl) == asgn.classLevel {
+								isHoliday = true
+								break
+							}
+						}
+					}
+					if isHoliday {
+						holidayClasses[cid] = true
+					}
+				}
+			}
+		}
+		holidayClassRows.Close()
+	}
+
+	// Filter out holiday classes
+	var activeClassIDs []int
+	for _, cid := range classIDs {
+		if !holidayClasses[cid] {
+			activeClassIDs = append(activeClassIDs, cid)
+		}
+	}
+
+	if len(activeClassIDs) == 0 {
+		c.JSON(http.StatusOK, models.TeacherTodayLessonsResponse{
+			Date:           dateParam,
+			DayOfWeek:      dayOfWeek,
+			IsWeekend:      false,
+			IsHoliday:      true,
+			TotalLessons:   0,
+			PendingCount:   0,
+			CompletedCount: 0,
+			Lessons:        []models.TeacherTodayLessonItem{},
+		})
+		return
+	}
+
+	// 5. Query active schedules for these classes
+	schQuery := `
+		SELECT cs.id, cs.class_id, cl.name as class_name, cs.lesson_number, cs.subject_id, s.name as subject_name
+		FROM class_schedules cs
+		JOIN classes cl ON cs.class_id = cl.id AND cl.is_deleted = false
+		JOIN subjects s ON cs.subject_id = s.id AND s.is_deleted = false
+		WHERE cs.class_id = ANY($1) AND cs.is_deleted = false
+		  AND cs.day_of_week = $2
+		  AND $3::date BETWEEN cs.start_date AND cs.end_date
+		  AND cs.start_date = (
+			  SELECT MAX(cs2.start_date)
+			  FROM class_schedules cs2
+			  WHERE cs2.class_id = cs.class_id AND cs2.is_deleted = false
+				AND $3::date BETWEEN cs2.start_date AND cs2.end_date
+		  )
+		ORDER BY cs.lesson_number, cl.name`
+
+	schRows, err := dbConn.Query(schQuery, pq.Array(activeClassIDs), dayOfWeek, parsedDate)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query class schedules", "details": err.Error()})
+		return
+	}
+	defer schRows.Close()
+
+	type rawLesson struct {
+		classID      int
+		className    string
+		lessonNumber int
+		subjectID    int
+		subjectName  string
+	}
+	var scheduledLessons []rawLesson
+	for schRows.Next() {
+		var id int
+		var rl rawLesson
+		if err := schRows.Scan(&id, &rl.classID, &rl.className, &rl.lessonNumber, &rl.subjectID, &rl.subjectName); err == nil {
+			scheduledLessons = append(scheduledLessons, rl)
+		}
+	}
+	schRows.Close()
+
+	// 6. Query schedule exceptions for these classes on this date
+	excRows, err := dbConn.Query(`
+		SELECT ce.class_id, ce.lesson_number, ce.subject_id, s.name as subject_name
+		FROM class_schedule_exceptions ce
+		LEFT JOIN subjects s ON ce.subject_id = s.id AND s.is_deleted = false
+		WHERE ce.class_id = ANY($1) AND ce.date = $2::date AND ce.is_deleted = false
+	`, pq.Array(activeClassIDs), parsedDate)
+
+	type excInfo struct {
+		subjectID   *int
+		subjectName *string
+	}
+	exceptions := make(map[string]excInfo) // key: "classID-lessonNumber"
+	if err == nil {
+		for excRows.Next() {
+			var cid, lNum int
+			var sID *int
+			var sName *string
+			if err := excRows.Scan(&cid, &lNum, &sID, &sName); err == nil {
+				key := fmt.Sprintf("%d-%d", cid, lNum)
+				exceptions[key] = excInfo{subjectID: sID, subjectName: sName}
+			}
+		}
+		excRows.Close()
+	}
+
+	// 7. Filter lessons for this teacher and apply exceptions
+	var finalTeacherLessons []rawLesson
+	for _, l := range scheduledLessons {
+		asgn := assignmentsMap[l.classID]
+		if asgn == nil {
+			continue
+		}
+
+		key := fmt.Sprintf("%d-%d", l.classID, l.lessonNumber)
+		if exc, hasExc := exceptions[key]; hasExc {
+			if exc.subjectID == nil {
+				// Cancelled lesson
+				continue
+			}
+			l.subjectID = *exc.subjectID
+			if exc.subjectName != nil {
+				l.subjectName = *exc.subjectName
+			}
+		}
+
+		// Check if lesson belongs to teacher
+		isMyLesson := false
+		if userRole == "ADMIN" && c.Query("teacher_id") == "" && len(asgn.subjectIDs) == 0 {
+			isMyLesson = true
+		} else if asgn.subjectIDs[l.subjectID] {
+			isMyLesson = true
+		} else if asgn.isMainTeacher && len(asgn.subjectIDs) == 0 {
+			isMyLesson = true
+		}
+
+		if isMyLesson {
+			finalTeacherLessons = append(finalTeacherLessons, l)
+		}
+	}
+
+	if len(finalTeacherLessons) == 0 {
+		c.JSON(http.StatusOK, models.TeacherTodayLessonsResponse{
+			Date:           dateParam,
+			DayOfWeek:      dayOfWeek,
+			IsWeekend:      false,
+			IsHoliday:      false,
+			TotalLessons:   0,
+			PendingCount:   0,
+			CompletedCount: 0,
+			Lessons:        []models.TeacherTodayLessonItem{},
+		})
+		return
+	}
+
+	// 8. Batch query student counts per class
+	studentCountMap := make(map[int]int)
+	stuCountRows, err := dbConn.Query(`
+		SELECT class_id, COUNT(*) 
+		FROM students 
+		WHERE class_id = ANY($1) AND is_deleted = false
+		GROUP BY class_id
+	`, pq.Array(activeClassIDs))
+	if err == nil {
+		for stuCountRows.Next() {
+			var cid, cnt int
+			if err := stuCountRows.Scan(&cid, &cnt); err == nil {
+				studentCountMap[cid] = cnt
+			}
+		}
+		stuCountRows.Close()
+	}
+
+	// 9. Batch query marked students per (class_id, subject_id, lesson_number)
+	markedCountMap := make(map[string]int) // key: "classID-subjectID-lessonNumber"
+	gradeMarkRows, err := dbConn.Query(`
+		SELECT st.class_id, g.subject_id, g.lesson_number, COUNT(DISTINCT g.student_id)
+		FROM grades g
+		JOIN students st ON g.student_id = st.id AND st.is_deleted = false
+		WHERE st.class_id = ANY($1)
+		  AND g.grade_date::date = $2::date
+		  AND g.is_deleted = false
+		  AND g.lesson_number IS NOT NULL
+		GROUP BY st.class_id, g.subject_id, g.lesson_number
+	`, pq.Array(activeClassIDs), parsedDate)
+	if err == nil {
+		for gradeMarkRows.Next() {
+			var cid, sid, lNum, markedCnt int
+			if err := gradeMarkRows.Scan(&cid, &sid, &lNum, &markedCnt); err == nil {
+				key := fmt.Sprintf("%d-%d-%d", cid, sid, lNum)
+				markedCountMap[key] = markedCnt
+			}
+		}
+		gradeMarkRows.Close()
+	}
+
+	// 10. Assemble response items
+	var lessonItems []models.TeacherTodayLessonItem
+	completedCount := 0
+
+	for _, fl := range finalTeacherLessons {
+		totalStudents := studentCountMap[fl.classID]
+		markKey := fmt.Sprintf("%d-%d-%d", fl.classID, fl.subjectID, fl.lessonNumber)
+		markedStudents := markedCountMap[markKey]
+
+		isMarked := markedStudents > 0
+		isFullyMarked := totalStudents > 0 && markedStudents >= totalStudents
+
+		if isFullyMarked {
+			completedCount++
+		}
+
+		lessonItems = append(lessonItems, models.TeacherTodayLessonItem{
+			LessonNumber:        fl.lessonNumber,
+			Time:                formatLessonTime(fl.lessonNumber),
+			ClassID:             fl.classID,
+			ClassName:           fl.className,
+			SubjectID:           fl.subjectID,
+			SubjectName:         fl.subjectName,
+			IsMarked:            isMarked,
+			IsFullyMarked:       isFullyMarked,
+			MarkedStudentsCount: markedStudents,
+			TotalStudentsCount:  totalStudents,
+		})
+	}
+
+	totalLessons := len(lessonItems)
+	pendingCount := totalLessons - completedCount
+
+	c.JSON(http.StatusOK, models.TeacherTodayLessonsResponse{
+		Date:           dateParam,
+		DayOfWeek:      dayOfWeek,
+		IsWeekend:      false,
+		IsHoliday:      false,
+		HolidayName:    nil,
+		TotalLessons:   totalLessons,
+		PendingCount:   pendingCount,
+		CompletedCount: completedCount,
+		Lessons:        lessonItems,
+	})
+}
+
