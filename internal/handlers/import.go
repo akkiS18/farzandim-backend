@@ -2085,35 +2085,7 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 			continue
 		}
 
-		// 2. Create Student User
-		studentPass := "STUDENT_NO_LOGIN_" + fmt.Sprintf("%d_%d", time.Now().UnixNano(), rowNum)
-		hashedStudentPass, _ := bcrypt.GenerateFromPassword([]byte(studentPass), bcrypt.DefaultCost)
-
-		var middleNamePtr *string
-		if middleName != "" {
-			middleNamePtr = &middleName
-		}
-
-		var studentUserID int
-		err = tx.QueryRow(`
-			INSERT INTO users (first_name, last_name, middle_name, phone, password_hash, role_id)
-			VALUES ($1, $2, $3, NULL, $4, $5)
-			RETURNING id`, firstName, lastName, middleNamePtr, string(hashedStudentPass), studentRoleID).Scan(&studentUserID)
-
-		if err != nil {
-			tx.Rollback()
-			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("O'quvchi accountini yaratishda xatolik: %v", err)})
-			failedCount++
-			continue
-		}
-
-		// 3. Create Student profile
-		var addressPtr *string
-		if strings.TrimSpace(st.Address) != "" && st.Address != "-" {
-			a := strings.TrimSpace(st.Address)
-			addressPtr = &a
-		}
-
+		// Helper to parse dates
 		var birthdatePtr *time.Time
 		if strings.TrimSpace(st.StudentBirthdate) != "" && st.StudentBirthdate != "-" {
 			bdStr := strings.TrimSpace(st.StudentBirthdate)
@@ -2135,9 +2107,15 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 		}
 
 		var inaPtr *string
-		if strings.TrimSpace(st.StudentDocumentNo) != "" && st.StudentDocumentNo != "-" {
+		if strings.TrimSpace(st.StudentDocumentNo) != "" && st.StudentDocumentNo != "-" && !strings.EqualFold(st.StudentDocumentNo, "yo'q") {
 			d := NormalizeDocumentNo(st.StudentDocumentNo)
 			inaPtr = &d
+		}
+
+		var addressPtr *string
+		if strings.TrimSpace(st.Address) != "" && st.Address != "-" {
+			a := strings.TrimSpace(st.Address)
+			addressPtr = &a
 		}
 
 		var enrollmentDatePtr *time.Time
@@ -2164,27 +2142,119 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 			enrollmentDatePtr = &now
 		}
 
+		// 2. Check if student already exists by Document No (INA or Passport)
 		var studentID int
-		err = tx.QueryRow(`
-			INSERT INTO students (user_id, class_id, address, birthdate, ina, enrollment_date)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			RETURNING id`, studentUserID, classID, addressPtr, birthdatePtr, inaPtr, enrollmentDatePtr).Scan(&studentID)
+		studentFound := false
+		var existingStudentID, existingUserID, existingClassID int
+		var existingFirstName, existingLastName, existingClassName string
 
-		if err != nil {
-			tx.Rollback()
-			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("O'quvchi profilida xatolik: %v", err)})
-			failedCount++
-			continue
+		if inaPtr != nil {
+			err := tx.QueryRow(`
+				SELECT s.id, s.user_id, COALESCE(s.class_id, 0), u.first_name, u.last_name, COALESCE(c.name, 'Sinfatsiz')
+				FROM students s
+				JOIN users u ON s.user_id = u.id
+				LEFT JOIN classes c ON s.class_id = c.id
+				WHERE (
+					LOWER(TRIM(s.ina)) = LOWER($1)
+					OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = REGEXP_REPLACE(LOWER($1), '[^a-z0-9]', '', 'g')
+					OR REGEXP_REPLACE(REGEXP_REPLACE(LOWER(s.ina), '^[l1]-', 'i-'), '[^a-z0-9]', '', 'g') = REGEXP_REPLACE(REGEXP_REPLACE(LOWER($1), '^[l1]-', 'i-'), '[^a-z0-9]', '', 'g')
+				)
+				  AND s.is_deleted = false AND u.is_deleted = false
+				LIMIT 1
+			`, *inaPtr).Scan(&existingStudentID, &existingUserID, &existingClassID, &existingFirstName, &existingLastName, &existingClassName)
+			if err == nil {
+				studentFound = true
+			}
 		}
 
-		// Helper to add parent
+		if studentFound {
+			// Typo check: verify names don't conflict completely
+			nameMatches := strings.EqualFold(existingLastName, lastName) || strings.EqualFold(existingFirstName, firstName) ||
+				strings.Contains(strings.ToLower(lastName), strings.ToLower(existingLastName)) ||
+				strings.Contains(strings.ToLower(firstName), strings.ToLower(existingFirstName))
+			if !nameMatches && existingLastName != "" && lastName != "" && !strings.HasPrefix(lastName, "Nomalum") {
+				tx.Rollback()
+				rowErrors = append(rowErrors, RowError{
+					Row:   rowNum,
+					Error: fmt.Sprintf("Hujjat raqami '%s' bazada boshqa o'quvchiga (%s %s) tegishli", *inaPtr, existingFirstName, existingLastName),
+				})
+				failedCount++
+				continue
+			}
+
+			studentID = existingStudentID
+
+			if existingClassID != classID {
+				// Student is in another class: create a transfer request for current class teacher
+				userIDVal, _ := c.Get("userID")
+				currentUserID := 0
+				if idStr, ok := userIDVal.(string); ok {
+					currentUserID, _ = strconv.Atoi(idStr)
+				}
+
+				var targetTeacherID *int
+				_ = tx.QueryRow(`SELECT teacher_id FROM class_teachers WHERE class_id = $1 AND is_main_teacher = true AND is_deleted = false LIMIT 1`, existingClassID).Scan(&targetTeacherID)
+
+				_, _ = tx.Exec(`
+					INSERT INTO student_transfer_requests (student_id, from_class_id, to_class_id, requested_by, target_teacher_id, status, message)
+					SELECT $1, $2, $3, $4, $5, 'PENDING', $6
+					WHERE NOT EXISTS (
+						SELECT 1 FROM student_transfer_requests 
+						WHERE student_id = $1 AND to_class_id = $3 AND status = 'PENDING'
+					)
+				`, existingStudentID, existingClassID, classID, currentUserID, targetTeacherID, fmt.Sprintf("%s sinfiga o'tkazish so'rovi", sinfName))
+			} else {
+				// Same class: enrich missing address / birthdate if needed
+				if addressPtr != nil {
+					_, _ = tx.Exec("UPDATE students SET address = $1 WHERE id = $2 AND (address IS NULL OR address = '')", *addressPtr, studentID)
+				}
+				if birthdatePtr != nil {
+					_, _ = tx.Exec("UPDATE students SET birthdate = $1 WHERE id = $2 AND birthdate IS NULL", *birthdatePtr, studentID)
+				}
+			}
+		} else {
+			// Create Student User and Student profile
+			studentPass := "STUDENT_NO_LOGIN_" + fmt.Sprintf("%d_%d", time.Now().UnixNano(), rowNum)
+			hashedStudentPass, _ := bcrypt.GenerateFromPassword([]byte(studentPass), bcrypt.DefaultCost)
+
+			var middleNamePtr *string
+			if middleName != "" {
+				middleNamePtr = &middleName
+			}
+
+			var studentUserID int
+			err = tx.QueryRow(`
+				INSERT INTO users (first_name, last_name, middle_name, phone, password_hash, role_id)
+				VALUES ($1, $2, $3, NULL, $4, $5)
+				RETURNING id`, firstName, lastName, middleNamePtr, string(hashedStudentPass), studentRoleID).Scan(&studentUserID)
+
+			if err != nil {
+				tx.Rollback()
+				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("O'quvchi accountini yaratishda xatolik: %v", err)})
+				failedCount++
+				continue
+			}
+
+			err = tx.QueryRow(`
+				INSERT INTO students (user_id, class_id, address, birthdate, ina, enrollment_date)
+				VALUES ($1, $2, $3, $4, $5, $6)
+				RETURNING id`, studentUserID, classID, addressPtr, birthdatePtr, inaPtr, enrollmentDatePtr).Scan(&studentID)
+
+			if err != nil {
+				tx.Rollback()
+				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("O'quvchi profilida xatolik: %v", err)})
+				failedCount++
+				continue
+			}
+		}
+
+		// Helper to add or link parent (Passport-first identification)
 		createOrGetParent := func(fullName, passport, phone, relType string) error {
 			cleanName := strings.TrimSpace(fullName)
-			cleanPhone := utils.NormalizePhone(phone)
-			cleanDoc := NormalizeDocumentNo(passport)
-
-			if cleanName == "" || cleanName == "-" {
-				return nil // Skip if parent not provided
+			lowerName := strings.ToLower(cleanName)
+			if cleanName == "" || cleanName == "-" || strings.EqualFold(cleanName, "yo'q") ||
+				strings.Contains(lowerName, "vafot") || strings.Contains(lowerName, "ajrash") {
+				return nil // Skip if parent not provided, deceased, or divorced
 			}
 
 			pLast, pFirst, pMiddle := splitFIO(cleanName)
@@ -2192,50 +2262,62 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 				pFirst = "Vasiy"
 			}
 
-			var pPhonePtr *string
-			found := false
-			var parentUserID int
+			cleanPhone := utils.NormalizePhone(phone)
+			cleanDoc := NormalizeDocumentNo(passport)
 
+			var pPhonePtr *string
 			if cleanPhone != "" {
-				// 1. Check if exact parent profile (same phone AND same name) already exists
-				var existingID int
-				err := tx.QueryRow(`
-					SELECT id FROM users 
-					WHERE phone = $1 AND LOWER(first_name) = LOWER($2) AND LOWER(last_name) = LOWER($3) AND role_id = $4 AND is_deleted = false`, 
-					cleanPhone, pFirst, pLast, parentRoleID).Scan(&existingID)
-				if err == nil {
-					parentUserID = existingID
-					found = true
-				} else {
-					// 2. Check if phone is already taken by another user
-					var phoneCount int
-					_ = tx.QueryRow("SELECT COUNT(1) FROM users WHERE phone = $1 AND is_deleted = false", cleanPhone).Scan(&phoneCount)
-					if phoneCount == 0 {
-						pPhonePtr = &cleanPhone
-					} else {
-						// Phone taken by spouse/relative: pass NULL to avoid unique constraint conflict
-						pPhonePtr = nil
-					}
-				}
+				pPhonePtr = &cleanPhone
 			}
 
 			var pDocPtr *string
-			if cleanDoc != "" && cleanDoc != "-" && !strings.Contains(strings.ToLower(cleanDoc), "vafot") {
+			if cleanDoc != "" && cleanDoc != "-" && !strings.EqualFold(cleanDoc, "yo'q") && !strings.Contains(strings.ToLower(cleanDoc), "vafot") {
 				pDocPtr = &cleanDoc
 			}
 
-			if !found && pDocPtr != nil {
+			found := false
+			var parentUserID int
+
+			// 1. Primary lookup: by Passport Serial Number
+			if pDocPtr != nil {
 				var existingPassID int
 				err := tx.QueryRow(`
 					SELECT u.id FROM users u
 					JOIN roles r ON u.role_id = r.id
-					WHERE r.name = 'PARENT' AND (LOWER(TRIM(u.passport)) = LOWER($1) OR REGEXP_REPLACE(LOWER(u.passport), '[^a-z0-9]', '', 'g') = REGEXP_REPLACE(LOWER($1), '[^a-z0-9]', '', 'g'))
+					WHERE r.name = 'PARENT' 
+					  AND (UPPER(TRIM(u.passport)) = UPPER(TRIM($1)) OR REGEXP_REPLACE(UPPER(u.passport), '[^A-Z0-9]', '', 'g') = REGEXP_REPLACE(UPPER($1), '[^A-Z0-9]', '', 'g'))
 					  AND u.is_deleted = false
 					LIMIT 1
 				`, *pDocPtr).Scan(&existingPassID)
 				if err == nil {
 					parentUserID = existingPassID
 					found = true
+					// Update phone if parent had none
+					if pPhonePtr != nil {
+						_, _ = tx.Exec("UPDATE users SET phone = $1 WHERE id = $2 AND (phone IS NULL OR phone = '')", *pPhonePtr, parentUserID)
+					}
+				}
+			}
+
+			// 2. Secondary lookup: by Phone + Name if passport was not provided
+			if !found && pPhonePtr != nil {
+				var existingID int
+				err := tx.QueryRow(`
+					SELECT u.id FROM users u
+					JOIN roles r ON u.role_id = r.id
+					WHERE r.name = 'PARENT' 
+					  AND u.phone = $1 
+					  AND LOWER(u.first_name) = LOWER($2) 
+					  AND LOWER(u.last_name) = LOWER($3)
+					  AND u.is_deleted = false
+					LIMIT 1
+				`, *pPhonePtr, pFirst, pLast).Scan(&existingID)
+				if err == nil {
+					parentUserID = existingID
+					found = true
+					if pDocPtr != nil {
+						_, _ = tx.Exec("UPDATE users SET passport = $1, document_no = $1 WHERE id = $2 AND (passport IS NULL OR passport = '')", *pDocPtr, parentUserID)
+					}
 				}
 			}
 
@@ -2244,6 +2326,7 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 				pMiddlePtr = &pMiddle
 			}
 
+			// 3. Create parent if not found
 			if !found {
 				pPass := "123"
 				pHashed, _ := bcrypt.GenerateFromPassword([]byte(pPass), bcrypt.DefaultCost)
@@ -2256,14 +2339,13 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 				if err != nil {
 					return fmt.Errorf("Vasiy accountida xatolik: %v", err)
 				}
-			} else if pDocPtr != nil {
-				_, _ = tx.Exec("UPDATE users SET passport = $1, document_no = $1 WHERE id = $2 AND (document_no IS NULL OR document_no = '')", *pDocPtr, parentUserID)
 			}
 
+			// 4. Link parent to student (re-usable for siblings)
 			_, err = tx.Exec(`
 				INSERT INTO student_parents (student_id, parent_id, relation_type)
 				VALUES ($1, $2, $3)
-				ON CONFLICT (student_id, parent_id) DO NOTHING`, studentID, parentUserID, relType)
+				ON CONFLICT (student_id, parent_id) DO UPDATE SET relation_type = EXCLUDED.relation_type`, studentID, parentUserID, relType)
 			if err != nil {
 				return fmt.Errorf("Vasiyni o'quvchiga bog'lashda xatolik: %v", err)
 			}

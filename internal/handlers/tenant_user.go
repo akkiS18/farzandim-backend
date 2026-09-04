@@ -1763,14 +1763,16 @@ type CheckStudentDocumentsRequest struct {
 }
 
 type ExistingStudentDocInfo struct {
-	StudentID  int    `json:"student_id"`
-	UserID     int    `json:"user_id"`
-	FirstName  string `json:"first_name"`
-	LastName   string `json:"last_name"`
-	MiddleName string `json:"middle_name"`
-	ClassID    int    `json:"class_id"`
-	ClassName  string `json:"class_name"`
-	INA        string `json:"ina"`
+	StudentID        int    `json:"student_id"`
+	UserID           int    `json:"user_id"`
+	FirstName        string `json:"first_name"`
+	LastName         string `json:"last_name"`
+	MiddleName       string `json:"middle_name"`
+	ClassID          int    `json:"class_id"`
+	ClassName        string `json:"class_name"`
+	INA              string `json:"ina"`
+	ClassTeacherName string `json:"class_teacher_name"`
+	ClassTeacherID   int    `json:"class_teacher_id"`
 }
 
 // CheckStudentDocuments checks if any document numbers (INA) already exist in tenant database
@@ -1824,7 +1826,20 @@ func (h *TenantUserHandler) CheckStudentDocuments(c *gin.Context) {
 	}(dbConn)
 
 	rows, err := dbConn.Query(`
-		SELECT s.id, s.user_id, u.first_name, u.last_name, COALESCE(u.middle_name, ''), COALESCE(s.class_id, 0), COALESCE(c.name, 'Sinfatsiz'), COALESCE(s.ina, '')
+		SELECT s.id, s.user_id, u.first_name, u.last_name, COALESCE(u.middle_name, ''), COALESCE(s.class_id, 0), COALESCE(c.name, 'Sinfatsiz'), COALESCE(s.ina, ''),
+		       COALESCE((
+		           SELECT CONCAT(tu.last_name, ' ', tu.first_name)
+		           FROM class_teachers ct
+		           JOIN users tu ON ct.teacher_id = tu.id
+		           WHERE ct.class_id = s.class_id AND ct.is_main_teacher = true AND ct.is_deleted = false AND tu.is_deleted = false
+		           LIMIT 1
+		       ), 'Tayinlanmagan') AS class_teacher_name,
+		       COALESCE((
+		           SELECT ct.teacher_id
+		           FROM class_teachers ct
+		           WHERE ct.class_id = s.class_id AND ct.is_main_teacher = true AND ct.is_deleted = false
+		           LIMIT 1
+		       ), 0) AS class_teacher_id
 		FROM students s
 		JOIN users u ON s.user_id = u.id
 		LEFT JOIN classes c ON s.class_id = c.id
@@ -1844,7 +1859,7 @@ func (h *TenantUserHandler) CheckStudentDocuments(c *gin.Context) {
 	result := make(map[string]ExistingStudentDocInfo)
 	for rows.Next() {
 		var info ExistingStudentDocInfo
-		if err := rows.Scan(&info.StudentID, &info.UserID, &info.FirstName, &info.LastName, &info.MiddleName, &info.ClassID, &info.ClassName, &info.INA); err == nil {
+		if err := rows.Scan(&info.StudentID, &info.UserID, &info.FirstName, &info.LastName, &info.MiddleName, &info.ClassID, &info.ClassName, &info.INA, &info.ClassTeacherName, &info.ClassTeacherID); err == nil {
 			info.INA = NormalizeDocumentNo(info.INA)
 			normINA := reg.ReplaceAllString(strings.ToLower(info.INA), "")
 			result[normINA] = info
@@ -1960,3 +1975,365 @@ func (h *TenantUserHandler) TransferStudentByDocument(c *gin.Context) {
 		"new_class_name": targetClassName,
 	})
 }
+
+type CreateTransferReqInput struct {
+	INA             string `json:"ina"`
+	TargetClassName string `json:"target_class_name"`
+	Message         string `json:"message"`
+}
+
+type RespondTransferReqInput struct {
+	Action       string `json:"action"` // "APPROVE" or "REJECT"
+	RejectReason string `json:"reject_reason"`
+}
+
+type TransferRequestItem struct {
+	ID                int        `json:"id"`
+	StudentID         int        `json:"student_id"`
+	StudentName       string     `json:"student_name"`
+	StudentDocumentNo string     `json:"student_document_no"`
+	FromClassID       int        `json:"from_class_id"`
+	FromClassName     string     `json:"from_class_name"`
+	ToClassID         int        `json:"to_class_id"`
+	ToClassName       string     `json:"to_class_name"`
+	RequestedBy       int        `json:"requested_by"`
+	RequesterName     string     `json:"requester_name"`
+	TargetTeacherID   *int       `json:"target_teacher_id"`
+	TargetTeacherName string     `json:"target_teacher_name"`
+	Status            string     `json:"status"`
+	Message           string     `json:"message"`
+	RejectReason      string     `json:"reject_reason"`
+	CreatedAt         time.Time  `json:"created_at"`
+	RespondedAt       *time.Time `json:"responded_at"`
+}
+
+// CreateTransferRequest allows a teacher to request transferring a student from another class
+func (h *TenantUserHandler) CreateTransferRequest(c *gin.Context) {
+	var req CreateTransferReqInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body", "details": err.Error()})
+		return
+	}
+
+	cleanINA := strings.TrimSpace(req.INA)
+	targetClassName := strings.TrimSpace(req.TargetClassName)
+	if cleanINA == "" || targetClassName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ina va target_class_name to'ldirilishi shart"})
+		return
+	}
+
+	userIDVal, _ := c.Get("userID")
+	currentUserID := 0
+	if idStr, ok := userIDVal.(string); ok {
+		currentUserID, _ = strconv.Atoi(idStr)
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	// 1. Resolve Target Class ID
+	var targetClassID int
+	err := dbConn.QueryRow(`
+		SELECT id FROM classes 
+		WHERE (
+			LOWER(name) = LOWER($1) 
+			OR REGEXP_REPLACE(UPPER(TRIM(name)), '\s*-\s*', '-', 'g') = REGEXP_REPLACE(UPPER(TRIM($1)), '\s*-\s*', '-', 'g')
+		) AND is_deleted = false`, targetClassName).Scan(&targetClassID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Sinf '%s' topilmadi", targetClassName)})
+		return
+	}
+
+	// 2. Find Student by INA
+	normINA := NormalizeDocumentNo(cleanINA)
+	var studentID, currentClassID int
+	var firstName, lastName, currentClassName string
+	err = dbConn.QueryRow(`
+		SELECT s.id, COALESCE(s.class_id, 0), u.first_name, u.last_name, COALESCE(c.name, 'Sinfatsiz')
+		FROM students s
+		JOIN users u ON s.user_id = u.id
+		LEFT JOIN classes c ON s.class_id = c.id
+		WHERE (
+			LOWER(TRIM(s.ina)) = LOWER($1) 
+			OR LOWER(TRIM(s.ina)) = LOWER($2)
+			OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = REGEXP_REPLACE(LOWER($1), '[^a-z0-9]', '', 'g')
+			OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = REGEXP_REPLACE(LOWER($2), '[^a-z0-9]', '', 'g')
+			OR REGEXP_REPLACE(REGEXP_REPLACE(LOWER(s.ina), '^[l1]-', 'i-'), '[^a-z0-9]', '', 'g') = REGEXP_REPLACE(REGEXP_REPLACE(LOWER($2), '^[l1]-', 'i-'), '[^a-z0-9]', '', 'g')
+		)
+		  AND s.is_deleted = false AND u.is_deleted = false AND (c.id IS NULL OR c.is_deleted = false)
+		LIMIT 1
+	`, cleanINA, normINA).Scan(&studentID, &currentClassID, &firstName, &lastName, &currentClassName)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Hujjat raqami '%s' bo'lgan o'quvchi topilmadi", cleanINA)})
+		return
+	}
+
+	if currentClassID == targetClassID {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "O'quvchi allaqachon ushbu sinfda o'qimoqda"})
+		return
+	}
+
+	// 3. Find target class's main teacher
+	var targetTeacherID *int
+	var targetTeacherName string
+	_ = dbConn.QueryRow(`
+		SELECT ct.teacher_id, CONCAT(u.last_name, ' ', u.first_name)
+		FROM class_teachers ct
+		JOIN users u ON ct.teacher_id = u.id
+		WHERE ct.class_id = $1 AND ct.is_main_teacher = true AND ct.is_deleted = false AND u.is_deleted = false
+		LIMIT 1
+	`, currentClassID).Scan(&targetTeacherID, &targetTeacherName)
+
+	// 4. Check if pending request already exists
+	var existingReqID int
+	err = dbConn.QueryRow(`
+		SELECT id FROM student_transfer_requests 
+		WHERE student_id = $1 AND to_class_id = $2 AND status = 'PENDING'
+		LIMIT 1
+	`, studentID, targetClassID).Scan(&existingReqID)
+	if err == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "Ushbu o'quvchi bo'yicha so'rov allaqachon yuborilgan va kutilmoqda",
+			"request_id": existingReqID,
+			"status": "PENDING",
+		})
+		return
+	}
+
+	msg := strings.TrimSpace(req.Message)
+	if msg == "" {
+		msg = fmt.Sprintf("O'quvchi %s %sni %s sinfiga o'tkazish so'ralmoqda", firstName, lastName, targetClassName)
+	}
+
+	var reqID int
+	err = dbConn.QueryRow(`
+		INSERT INTO student_transfer_requests (student_id, from_class_id, to_class_id, requested_by, target_teacher_id, status, message)
+		VALUES ($1, $2, $3, $4, $5, 'PENDING', $6)
+		RETURNING id
+	`, studentID, currentClassID, targetClassID, currentUserID, targetTeacherID, msg).Scan(&reqID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "So'rovni yaratishda xatolik", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("%s sinf rahbariga (%s) o'tkazish so'rovi yuborildi!", currentClassName, targetTeacherName),
+		"request_id": reqID,
+		"target_teacher_name": targetTeacherName,
+		"status": "PENDING",
+	})
+}
+
+// GetTransferRequests returns transfer requests filtered by role and status
+func (h *TenantUserHandler) GetTransferRequests(c *gin.Context) {
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	userIDVal, _ := c.Get("userID")
+	currentUserID := 0
+	if idStr, ok := userIDVal.(string); ok {
+		currentUserID, _ = strconv.Atoi(idStr)
+	}
+	roleVal, _ := c.Get("role")
+	role, _ := roleVal.(string)
+
+	statusFilter := c.Query("status")
+
+	query := `
+		SELECT tr.id, tr.student_id, CONCAT(su.last_name, ' ', su.first_name), COALESCE(s.ina, ''),
+		       tr.from_class_id, fc.name, tr.to_class_id, tc.name,
+		       tr.requested_by, CONCAT(ru.last_name, ' ', ru.first_name),
+		       tr.target_teacher_id, COALESCE(CONCAT(tu.last_name, ' ', tu.first_name), 'Tayinlanmagan'),
+		       tr.status, COALESCE(tr.message, ''), COALESCE(tr.reject_reason, ''),
+		       tr.created_at, tr.responded_at
+		FROM student_transfer_requests tr
+		JOIN students s ON tr.student_id = s.id
+		JOIN users su ON s.user_id = su.id
+		JOIN classes fc ON tr.from_class_id = fc.id
+		JOIN classes tc ON tr.to_class_id = tc.id
+		JOIN users ru ON tr.requested_by = ru.id
+		LEFT JOIN users tu ON tr.target_teacher_id = tu.id
+		WHERE 1=1
+	`
+	args := []interface{}{}
+	argIdx := 1
+
+	if statusFilter != "" && statusFilter != "ALL" {
+		query += fmt.Sprintf(" AND tr.status = $%d", argIdx)
+		args = append(args, statusFilter)
+		argIdx++
+	}
+
+	// Non-admin teachers only see requests where they are target or requester
+	if role != "ADMIN" && role != "SUPER_ADMIN" && role != "DIRECTOR" {
+		query += fmt.Sprintf(" AND (tr.target_teacher_id = $%d OR tr.requested_by = $%d)", argIdx, argIdx)
+		args = append(args, currentUserID)
+		argIdx++
+	}
+
+	query += " ORDER BY tr.created_at DESC LIMIT 100"
+
+	rows, err := dbConn.Query(query, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query transfer requests", "details": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	items := []TransferRequestItem{}
+	for rows.Next() {
+		var item TransferRequestItem
+		var rejectReasonNull, msgNull sql.NullString
+		var targetTeacherIDNull sql.NullInt64
+		var respondedAtNull sql.NullTime
+
+		if err := rows.Scan(
+			&item.ID, &item.StudentID, &item.StudentName, &item.StudentDocumentNo,
+			&item.FromClassID, &item.FromClassName, &item.ToClassID, &item.ToClassName,
+			&item.RequestedBy, &item.RequesterName,
+			&targetTeacherIDNull, &item.TargetTeacherName,
+			&item.Status, &msgNull, &rejectReasonNull,
+			&item.CreatedAt, &respondedAtNull,
+		); err == nil {
+			item.Message = msgNull.String
+			item.RejectReason = rejectReasonNull.String
+			if targetTeacherIDNull.Valid {
+				tID := int(targetTeacherIDNull.Int64)
+				item.TargetTeacherID = &tID
+			}
+			if respondedAtNull.Valid {
+				item.RespondedAt = &respondedAtNull.Time
+			}
+			items = append(items, item)
+		}
+	}
+
+	c.JSON(http.StatusOK, items)
+}
+
+// RespondTransferRequest approves or rejects a pending transfer request
+func (h *TenantUserHandler) RespondTransferRequest(c *gin.Context) {
+	reqIDStr := c.Param("id")
+	reqID, err := strconv.Atoi(reqIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request ID"})
+		return
+	}
+
+	var req RespondTransferReqInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body", "details": err.Error()})
+		return
+	}
+
+	action := strings.ToUpper(strings.TrimSpace(req.Action))
+	if action != "APPROVE" && action != "REJECT" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "action 'APPROVE' yoki 'REJECT' bo'lishi kerak"})
+		return
+	}
+
+	userIDVal, _ := c.Get("userID")
+	currentUserID := 0
+	if idStr, ok := userIDVal.(string); ok {
+		currentUserID, _ = strconv.Atoi(idStr)
+	}
+	roleVal, _ := c.Get("role")
+	role, _ := roleVal.(string)
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failure"})
+		return
+	}
+	defer tx.Rollback()
+
+	var studentID, fromClassID, toClassID, requestedBy int
+	var targetTeacherIDNull sql.NullInt64
+	var currentStatus, fromClassName, toClassName, studentName string
+
+	err = tx.QueryRow(`
+		SELECT tr.student_id, tr.from_class_id, tr.to_class_id, tr.requested_by, tr.target_teacher_id, tr.status,
+		       fc.name, tc.name, CONCAT(su.last_name, ' ', su.first_name)
+		FROM student_transfer_requests tr
+		JOIN classes fc ON tr.from_class_id = fc.id
+		JOIN classes tc ON tr.to_class_id = tc.id
+		JOIN students s ON tr.student_id = s.id
+		JOIN users su ON s.user_id = su.id
+		WHERE tr.id = $1 FOR UPDATE
+	`, reqID).Scan(&studentID, &fromClassID, &toClassID, &requestedBy, &targetTeacherIDNull, &currentStatus, &fromClassName, &toClassName, &studentName)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "So'rov topilmadi"})
+		return
+	}
+
+	if currentStatus != "PENDING" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Bu so'rov allaqachon ko'rib chiqilgan (Status: %s)", currentStatus)})
+		return
+	}
+
+	// Permission check: only target teacher or admin can respond
+	if role != "ADMIN" && role != "SUPER_ADMIN" && role != "DIRECTOR" {
+		if !targetTeacherIDNull.Valid || int(targetTeacherIDNull.Int64) != currentUserID {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Faqat amaldagi sinf rahbari yoki ma'muriyat so'rovni tasdiqlashi/rad etishi mumkin"})
+			return
+		}
+	}
+
+	if action == "APPROVE" {
+		// Update student class
+		_, err = tx.Exec("UPDATE students SET class_id = $1 WHERE id = $2", toClassID, studentID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "O'quvchi sinfini ko'chirishda xatolik", "details": err.Error()})
+			return
+		}
+
+		// Update request status
+		_, err = tx.Exec("UPDATE student_transfer_requests SET status = 'APPROVED', responded_at = NOW() WHERE id = $1", reqID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "So'rov holatini yangilashda xatolik"})
+			return
+		}
+
+		audit.LogChange(c, tx, audit.LogData{
+			Action:    "UPDATE",
+			TableName: "students",
+			RecordID:  strconv.Itoa(studentID),
+			OldValues: map[string]interface{}{"student_id": studentID, "class_id": fromClassID, "class_name": fromClassName},
+			NewValues: map[string]interface{}{"student_id": studentID, "class_id": toClassID, "class_name": toClassName},
+		})
+
+		if err := tx.Commit(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Commit failure"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message": fmt.Sprintf("O'quvchi %s muvaffaqiyatli %s sinfiga o'tkazildi!", studentName, toClassName),
+			"status": "APPROVED",
+		})
+		return
+	} else {
+		// REJECT
+		reason := strings.TrimSpace(req.RejectReason)
+		_, err = tx.Exec("UPDATE student_transfer_requests SET status = 'REJECTED', reject_reason = $1, responded_at = NOW() WHERE id = $2", reason, reqID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "So'rovni rad etishda xatolik"})
+			return
+		}
+
+		if err := tx.Commit(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Commit failure"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message": "O'tkazish so'rovi rad etildi",
+			"status": "REJECTED",
+		})
+		return
+	}
+}
+
