@@ -66,21 +66,35 @@ END $$;
 -- 2. Drop global unique constraint on users(phone) so parents can share phone numbers
 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_phone_key;
 
--- 3. Create partial unique index on staff phone numbers (TEACHER, ADMIN, DIRECTOR)
-CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_unique_phone 
-ON users(phone) 
-WHERE role_id IN (SELECT id FROM roles WHERE name IN ('ADMIN', 'TEACHER', 'DIRECTOR', 'MAIN_TEACHER', 'SUBJECT_TEACHER')) 
-  AND phone IS NOT NULL 
-  AND TRIM(phone) != '' 
-  AND is_deleted = false;
+-- 3 & 4. Create partial unique indexes using dynamic SQL (PostgreSQL disallows subqueries in index predicates)
+DO $$
+DECLARE
+    parent_role_id INT;
+    staff_ids TEXT;
+BEGIN
+    SELECT id INTO parent_role_id FROM roles WHERE name = 'PARENT';
+    SELECT string_agg(id::text, ',') INTO staff_ids FROM roles WHERE name IN ('ADMIN', 'TEACHER', 'DIRECTOR', 'MAIN_TEACHER', 'SUBJECT_TEACHER');
 
--- 4. Create partial unique index on parent passport numbers
-CREATE UNIQUE INDEX IF NOT EXISTS idx_parents_unique_passport 
-ON users(UPPER(TRIM(passport))) 
-WHERE role_id = (SELECT id FROM roles WHERE name = 'PARENT') 
-  AND passport IS NOT NULL 
-  AND TRIM(passport) != '' 
-  AND is_deleted = false;
+    IF staff_ids IS NOT NULL AND staff_ids != '' THEN
+        EXECUTE format('
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_unique_phone 
+            ON users(phone) 
+            WHERE role_id IN (%s) 
+              AND phone IS NOT NULL 
+              AND TRIM(phone) != '''' 
+              AND is_deleted = false', staff_ids);
+    END IF;
+
+    IF parent_role_id IS NOT NULL THEN
+        EXECUTE format('
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_parents_unique_passport 
+            ON users(UPPER(TRIM(passport))) 
+            WHERE role_id = %s 
+              AND passport IS NOT NULL 
+              AND TRIM(passport) != '''' 
+              AND is_deleted = false', parent_role_id);
+    END IF;
+END $$;
 
 -- 5. Create student_transfer_requests table
 CREATE TABLE IF NOT EXISTS student_transfer_requests (
