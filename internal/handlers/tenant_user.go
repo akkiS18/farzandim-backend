@@ -104,7 +104,7 @@ func (h *TenantUserHandler) CreateClassStudent(c *gin.Context) {
 
 	// Authorization check: Admin or assigned main teacher of this class
 	if userRole != "ADMIN" {
-		if userRole != "MAIN_TEACHER" {
+		if userRole != "MAIN_TEACHER" && userRole != "SUBJECT_TEACHER" {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: faqat admin va ushbu sinf rahbari o'quvchi qo'sha oladi"})
 			return
 		}
@@ -855,7 +855,7 @@ func (h *TenantUserHandler) AssignClassTeacher(c *gin.Context) {
 
 	// Authorization check: Admin or assigned main teacher of this class
 	if userRole != "ADMIN" {
-		if userRole != "MAIN_TEACHER" {
+		if userRole != "MAIN_TEACHER" && userRole != "SUBJECT_TEACHER" {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: faqat admin va ushbu sinf rahbari o'qituvchi biriktira oladi"})
 			return
 		}
@@ -1045,7 +1045,7 @@ func (h *TenantUserHandler) UnassignClassTeacher(c *gin.Context) {
 
 	// Authorization check: Admin or assigned main teacher of this class
 	if userRole != "ADMIN" {
-		if userRole != "MAIN_TEACHER" {
+		if userRole != "MAIN_TEACHER" && userRole != "SUBJECT_TEACHER" {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: faqat admin va ushbu sinf rahbari o'qituvchi biriktiruvi o'chira oladi"})
 			return
 		}
@@ -1456,7 +1456,7 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 	authorized := false
 	if userRole == "ADMIN" {
 		authorized = true
-	} else if userRole == "MAIN_TEACHER" {
+	} else if userRole == "MAIN_TEACHER" || userRole == "SUBJECT_TEACHER" {
 		var isMain bool
 		dbConn.QueryRow(`SELECT EXISTS(SELECT 1 FROM class_teachers WHERE class_id = $1 AND teacher_id = $2 AND is_main_teacher = true AND is_deleted = false)`, classID, currentUserID).Scan(&isMain)
 		if isMain {
