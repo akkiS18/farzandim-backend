@@ -342,12 +342,22 @@ func (h *ScheduleHandler) SaveSchedule(c *gin.Context) {
 		}
 	}
 
+	effectiveOriginalStartDate := req.OriginalStartDate
+	if effectiveOriginalStartDate == "" {
+		// If original_start_date was not provided, check if there is an active schedule period starting on the same start_date
+		var existsExactStart bool
+		_ = dbConn.QueryRow("SELECT EXISTS(SELECT 1 FROM class_schedules WHERE class_id = $1 AND start_date = $2 AND is_deleted = false)", classID, startDate).Scan(&existsExactStart)
+		if existsExactStart {
+			effectiveOriginalStartDate = req.StartDate
+		}
+	}
+
 	// Check if the new schedule date range overlaps with another active schedule period
 	var conflictStart, conflictEnd string
 	var overlapQuery string
 	var overlapArgs []interface{}
 
-	if req.OriginalStartDate != "" {
+	if effectiveOriginalStartDate != "" {
 		// Editing existing period: check overlap with ANY OTHER active period
 		overlapQuery = `
 			SELECT to_char(start_date, 'YYYY-MM-DD'), to_char(end_date, 'YYYY-MM-DD')
@@ -359,7 +369,7 @@ func (h *ScheduleHandler) SaveSchedule(c *gin.Context) {
 			  AND end_date >= $4::date
 			LIMIT 1
 		`
-		overlapArgs = []interface{}{classID, req.OriginalStartDate, req.EndDate, req.StartDate}
+		overlapArgs = []interface{}{classID, effectiveOriginalStartDate, req.EndDate, req.StartDate}
 	} else {
 		// Adding new period: check overlap with ALL active periods
 		overlapQuery = `
@@ -390,8 +400,8 @@ func (h *ScheduleHandler) SaveSchedule(c *gin.Context) {
 	defer tx.Rollback()
 
 	targetOldStartDate := startDate
-	if req.OriginalStartDate != "" {
-		if parsedOrig, errOrig := time.Parse("2006-01-02", req.OriginalStartDate); errOrig == nil {
+	if effectiveOriginalStartDate != "" {
+		if parsedOrig, errOrig := time.Parse("2006-01-02", effectiveOriginalStartDate); errOrig == nil {
 			targetOldStartDate = parsedOrig
 		}
 	}
@@ -410,7 +420,7 @@ func (h *ScheduleHandler) SaveSchedule(c *gin.Context) {
 	}
 
 	// If editing an existing period (or updating by start_date), soft-delete the previous period records
-	if req.OriginalStartDate != "" || len(oldSchedules) > 0 {
+	if effectiveOriginalStartDate != "" || len(oldSchedules) > 0 {
 		_, err = tx.Exec(`UPDATE class_schedules SET is_deleted = true, deleted_at = NOW() WHERE class_id = $1 AND start_date = $2 AND is_deleted = false`, classID, targetOldStartDate)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to clear previous schedule records", "details": err.Error()})
@@ -455,6 +465,113 @@ func (h *ScheduleHandler) SaveSchedule(c *gin.Context) {
 	invalidateScheduleCache(c)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Dars jadvali muvaffaqiyatli saqlandi", "schedules": newSchedules})
+}
+
+// DeleteSchedule soft-deletes a weekly schedule period or all schedules for a class
+func (h *ScheduleHandler) DeleteSchedule(c *gin.Context) {
+	classIDStr := c.Param("id")
+	classID, err := strconv.Atoi(classIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid class ID"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	userRoleVal, _ := c.Get("role")
+	userRole := userRoleVal.(string)
+	userIDVal, _ := c.Get("userID")
+	userIDStr := userIDVal.(string)
+	currentUserID, _ := strconv.Atoi(userIDStr)
+
+	// Authorization check: Admin or assigned main teacher of this class
+	if userRole != "ADMIN" {
+		if userRole != "MAIN_TEACHER" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: faqat admin va ushbu sinf rahbari dars jadvalini o'chira oladi"})
+			return
+		}
+		var isMain bool
+		err = dbConn.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM class_teachers 
+				WHERE class_id = $1 AND teacher_id = $2 AND is_main_teacher = true AND is_deleted = false
+			)
+		`, classID, currentUserID).Scan(&isMain)
+		if err != nil || !isMain {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: siz ushbu sinf rahbari emassiz"})
+			return
+		}
+	}
+
+	startDateParam := c.Query("start_date")
+	var parsedStartDate *time.Time
+	if startDateParam != "" {
+		t, err := time.Parse("2006-01-02", startDateParam)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "start_date must be in YYYY-MM-DD format"})
+			return
+		}
+		parsedStartDate = &t
+	}
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start database transaction"})
+		return
+	}
+	defer tx.Rollback()
+
+	// Get old active schedules to log audit properly
+	var oldSchedules []models.ClassSchedule
+	var oldRows *sql.Rows
+	if parsedStartDate != nil {
+		oldRows, err = tx.Query(`SELECT id, class_id, day_of_week, lesson_number, subject_id, start_date, end_date FROM class_schedules WHERE class_id = $1 AND start_date = $2 AND is_deleted = false`, classID, *parsedStartDate)
+	} else {
+		oldRows, err = tx.Query(`SELECT id, class_id, day_of_week, lesson_number, subject_id, start_date, end_date FROM class_schedules WHERE class_id = $1 AND is_deleted = false`, classID)
+	}
+	if err == nil {
+		for oldRows.Next() {
+			var old models.ClassSchedule
+			if errScan := oldRows.Scan(&old.ID, &old.ClassID, &old.DayOfWeek, &old.LessonNumber, &old.SubjectID, &old.StartDate, &old.EndDate); errScan == nil {
+				oldSchedules = append(oldSchedules, old)
+			}
+		}
+		oldRows.Close()
+	}
+
+	if len(oldSchedules) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "O'chirish uchun faol dars jadvali topilmadi"})
+		return
+	}
+
+	if parsedStartDate != nil {
+		_, err = tx.Exec(`UPDATE class_schedules SET is_deleted = true, deleted_at = NOW() WHERE class_id = $1 AND start_date = $2 AND is_deleted = false`, classID, *parsedStartDate)
+	} else {
+		_, err = tx.Exec(`UPDATE class_schedules SET is_deleted = true, deleted_at = NOW() WHERE class_id = $1 AND is_deleted = false`, classID)
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete schedule records", "details": err.Error()})
+		return
+	}
+
+	// Audit Log
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "DELETE",
+		TableName: "class_schedules",
+		RecordID:  strconv.Itoa(classID),
+		OldValues: oldSchedules,
+		NewValues: nil,
+	})
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
+		return
+	}
+
+	invalidateScheduleCache(c)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Dars jadvali muvaffaqiyatli o'chirildi"})
 }
 
 // ListScheduleExceptions returns the history of all schedule exceptions for a class

@@ -173,6 +173,7 @@ func main() {
 		authTenantGroup.GET("/classes/:id/schedule", scheduleHandler.GetSchedule)
 		authTenantGroup.GET("/classes/:id/schedule-periods", scheduleHandler.GetSchedulePeriods)
 		authTenantGroup.POST("/classes/:id/schedule", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), scheduleHandler.SaveSchedule)
+		authTenantGroup.DELETE("/classes/:id/schedule", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), scheduleHandler.DeleteSchedule)
 		authTenantGroup.GET("/classes/:id/schedule-exceptions", scheduleHandler.ListScheduleExceptions)
 		authTenantGroup.POST("/classes/:id/schedule-exceptions", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), scheduleHandler.SaveScheduleException)
 		authTenantGroup.DELETE("/classes/:id/schedule-exceptions/:exception_id", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), scheduleHandler.DeleteScheduleException)
