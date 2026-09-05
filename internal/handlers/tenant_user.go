@@ -1444,7 +1444,14 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 	// Resolve student → user_id, and validate authorization
 	var targetUserID int
 	var classID int
-	err = dbConn.QueryRow(`SELECT s.user_id, s.class_id FROM students s WHERE s.id = $1 AND s.is_deleted = false`, studentID).Scan(&targetUserID, &classID)
+	var actualStudentID int
+	err = dbConn.QueryRow(`
+		SELECT s.id, s.user_id, s.class_id 
+		FROM students s 
+		WHERE (s.id = $1 OR s.user_id = $1) AND s.is_deleted = false 
+		ORDER BY (s.id = $1) DESC 
+		LIMIT 1
+	`, studentID).Scan(&actualStudentID, &targetUserID, &classID)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "O'quvchi topilmadi"})
 		return
@@ -1452,6 +1459,7 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "O'quvchi ma'lumotlarini olishda xatolik", "details": err.Error()})
 		return
 	}
+	studentID = actualStudentID
 
 	authorized := false
 	if userRole == "ADMIN" {
@@ -1703,10 +1711,17 @@ func (h *TenantUserHandler) DeleteStudent(c *gin.Context) {
 	userIDStr := userIDVal.(string)
 	currentUserID, _ := strconv.Atoi(userIDStr)
 
-	// Resolve student → user_id, class_id
+	// Resolve student → user_id, class_id (supports both student_id and user_id)
 	var targetUserID int
 	var classID int
-	err = dbConn.QueryRow(`SELECT s.user_id, s.class_id FROM students s WHERE s.id = $1 AND s.is_deleted = false`, studentID).Scan(&targetUserID, &classID)
+	var actualStudentID int
+	err = dbConn.QueryRow(`
+		SELECT s.id, s.user_id, s.class_id 
+		FROM students s 
+		WHERE (s.id = $1 OR s.user_id = $1) AND s.is_deleted = false 
+		ORDER BY (s.id = $1) DESC 
+		LIMIT 1
+	`, studentID).Scan(&actualStudentID, &targetUserID, &classID)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "O'quvchi topilmadi"})
 		return
@@ -1714,6 +1729,7 @@ func (h *TenantUserHandler) DeleteStudent(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "O'quvchi ma'lumotlarini olishda xatolik", "details": err.Error()})
 		return
 	}
+	studentID = actualStudentID
 
 	if userRole != "ADMIN" {
 		var isMain bool
