@@ -55,6 +55,8 @@ type TenantUserResponse struct {
 	EnrollmentDate *time.Time `json:"enrollment_date,omitempty"`
 	INA            *string    `json:"ina,omitempty"`
 	Balance        *float64   `json:"balance,omitempty"`
+	IsDeleted      *bool      `json:"is_deleted,omitempty"`
+	DeletedAt      *time.Time `json:"deleted_at,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
 }
 
@@ -66,6 +68,7 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 	roleFilter := c.Query("role")
 	classFilter := c.Query("class_id")
 	searchFilter := c.Query("search")
+	statusFilter := c.Query("status") // "active", "archived" / "deleted", "all"
 
 	roleVal, exists := c.Get("role")
 	currentRole := ""
@@ -84,7 +87,15 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 	uDeletedCond := "u.is_deleted = false"
 	suDeletedCond := "su.is_deleted = false"
 
-	if dateFilter != "" {
+	if statusFilter == "archived" || statusFilter == "deleted" {
+		sDeletedCond = "s.is_deleted = true"
+		uDeletedCond = "u.is_deleted = true"
+		suDeletedCond = "su.is_deleted = true"
+	} else if statusFilter == "all" {
+		sDeletedCond = "1=1"
+		uDeletedCond = "1=1"
+		suDeletedCond = "1=1"
+	} else if dateFilter != "" {
 		if _, err := time.Parse("2006-01-02", dateFilter); err == nil {
 			sDeletedCond = fmt.Sprintf("((s.is_deleted = false AND (s.enrollment_date IS NULL OR s.enrollment_date <= '%s'::date)) OR (s.is_deleted = true AND s.deleted_at::date > '%s'::date AND COALESCE(s.enrollment_date, s.created_at::date) <= '%s'::date AND s.created_at::date <= '%s'::date))", dateFilter, dateFilter, dateFilter, dateFilter)
 			uDeletedCond = fmt.Sprintf("(u.is_deleted = false OR (u.is_deleted = true AND u.deleted_at::date > '%s'::date AND u.created_at::date <= '%s'::date))", dateFilter, dateFilter)
@@ -106,7 +117,8 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
 			       s.id as student_id, NULL::text as student_name,
-			       u.passport, s.address, s.birthdate, s.ina, s.balance, s.enrollment_date
+			       u.passport, s.address, s.birthdate, s.ina, s.balance, s.enrollment_date,
+			       s.is_deleted as student_is_deleted, s.deleted_at as student_deleted_at
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
 			JOIN students s ON u.id = s.user_id AND %s
@@ -125,7 +137,8 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
 			       s.id as student_id, NULL::text as student_name,
-			       u.passport, s.address, s.birthdate, s.ina, s.balance, s.enrollment_date
+			       u.passport, s.address, s.birthdate, s.ina, s.balance, s.enrollment_date,
+			       s.is_deleted as student_is_deleted, s.deleted_at as student_deleted_at
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
 			JOIN students s ON u.id = s.user_id AND %s
@@ -138,7 +151,8 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
 			       s.id as student_id, (su.first_name || ' ' || su.last_name || COALESCE(' ' || su.middle_name, '')) as student_name,
-			       u.passport, NULL::text as address, NULL::date as birthdate, NULL::text as ina, NULL::numeric as balance, NULL::date as enrollment_date
+			       u.passport, NULL::text as address, NULL::date as birthdate, NULL::text as ina, NULL::numeric as balance, NULL::date as enrollment_date,
+			       u.is_deleted as student_is_deleted, u.deleted_at as student_deleted_at
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
 			LEFT JOIN student_parents sp ON sp.parent_id = u.id
@@ -160,7 +174,8 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
 			       s.id as student_id, NULL::text as student_name,
-			       u.passport, s.address, s.birthdate, s.ina, s.balance, s.enrollment_date
+			       u.passport, s.address, s.birthdate, s.ina, s.balance, s.enrollment_date,
+			       COALESCE(s.is_deleted, u.is_deleted) as student_is_deleted, COALESCE(s.deleted_at, u.deleted_at) as student_deleted_at
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
 			LEFT JOIN students s ON u.id = s.user_id AND %s
@@ -241,11 +256,14 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		var enrollmentDateNull sql.NullTime
 		var inaNull sql.NullString
 		var balanceNull sql.NullFloat64
+		var isDeletedNull sql.NullBool
+		var deletedAtNull sql.NullTime
 
 		err := rows.Scan(
 			&u.ID, &emailNull, &phoneNull, &u.FirstName, &u.LastName, &middleNameNull, &u.RoleID, &u.RoleName, &u.CreatedAt,
 			&classIDNull, &classNameNull, &studentIDNull, &studentNameNull,
 			&passportNull, &addressNull, &birthdateNull, &inaNull, &balanceNull, &enrollmentDateNull,
+			&isDeletedNull, &deletedAtNull,
 		)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse user records", "details": err.Error()})
@@ -292,6 +310,12 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		}
 		if balanceNull.Valid {
 			u.Balance = &balanceNull.Float64
+		}
+		if isDeletedNull.Valid {
+			u.IsDeleted = &isDeletedNull.Bool
+		}
+		if deletedAtNull.Valid {
+			u.DeletedAt = &deletedAtNull.Time
 		}
 
 		usersList = append(usersList, u)
