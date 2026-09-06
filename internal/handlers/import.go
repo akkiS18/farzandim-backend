@@ -97,9 +97,9 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		suDeletedCond = "1=1"
 	} else if dateFilter != "" {
 		if _, err := time.Parse("2006-01-02", dateFilter); err == nil {
-			sDeletedCond = fmt.Sprintf("((s.is_deleted = false AND (s.enrollment_date IS NULL OR s.enrollment_date <= '%s'::date)) OR (s.is_deleted = true AND s.deleted_at::date > '%s'::date AND COALESCE(s.enrollment_date, s.created_at::date) <= '%s'::date AND s.created_at::date <= '%s'::date))", dateFilter, dateFilter, dateFilter, dateFilter)
+			sDeletedCond = fmt.Sprintf("((s.is_deleted = false AND (s.enrollment_date IS NULL OR s.enrollment_date <= '%s'::date)) OR (s.is_deleted = true AND s.deleted_at::date > '%s'::date AND (s.enrollment_date IS NULL OR s.enrollment_date <= '%s'::date)))", dateFilter, dateFilter, dateFilter)
 			uDeletedCond = fmt.Sprintf("(u.is_deleted = false OR (u.is_deleted = true AND u.deleted_at::date > '%s'::date AND u.created_at::date <= '%s'::date))", dateFilter, dateFilter)
-			suDeletedCond = fmt.Sprintf("((su.is_deleted = false AND (s.enrollment_date IS NULL OR s.enrollment_date <= '%s'::date)) OR (su.is_deleted = true AND su.deleted_at::date > '%s'::date AND COALESCE(s.enrollment_date, s.created_at::date) <= '%s'::date AND s.created_at::date <= '%s'::date))", dateFilter, dateFilter, dateFilter, dateFilter)
+			suDeletedCond = fmt.Sprintf("((su.is_deleted = false AND (s.enrollment_date IS NULL OR s.enrollment_date <= '%s'::date)) OR (su.is_deleted = true AND su.deleted_at::date > '%s'::date AND (s.enrollment_date IS NULL OR s.enrollment_date <= '%s'::date)))", dateFilter, dateFilter, dateFilter)
 		}
 	}
 
@@ -190,20 +190,20 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 	}
 
 	// Teacher authorization check: If the caller is a teacher (MAIN_TEACHER or SUBJECT_TEACHER)
-	// and requesting STUDENT or PARENT list, they must only see classes where they are is_main_teacher = true
+	// and requesting STUDENT or PARENT list, they must be assigned to the class
 	if currentRole != "ADMIN" && currentRole != "PARENT" && currentRole != "STUDENT" && (roleFilter == "STUDENT" || roleFilter == "PARENT") {
 		teacherUserID, _ := strconv.Atoi(userIDStr)
 		if classFilter != "" {
 			cid, err := strconv.Atoi(classFilter)
 			if err == nil {
-				var isMain bool
+				var isAssigned bool
 				_ = dbConn.QueryRow(`
 					SELECT EXISTS(
 						SELECT 1 FROM class_teachers 
-						WHERE class_id = $1 AND teacher_id = $2 AND is_main_teacher = true AND is_deleted = false
+						WHERE class_id = $1 AND teacher_id = $2 AND is_deleted = false
 					)
-				`, cid, teacherUserID).Scan(&isMain)
-				if !isMain {
+				`, cid, teacherUserID).Scan(&isAssigned)
+				if !isAssigned {
 					c.JSON(http.StatusOK, []TenantUserResponse{})
 					return
 				}
@@ -211,7 +211,7 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		} else {
 			query += fmt.Sprintf(` AND s.class_id IN (
 				SELECT class_id FROM class_teachers 
-				WHERE teacher_id = $%d AND is_main_teacher = true AND is_deleted = false
+				WHERE teacher_id = $%d AND is_deleted = false
 			)`, argCount)
 			args = append(args, teacherUserID)
 			argCount++
