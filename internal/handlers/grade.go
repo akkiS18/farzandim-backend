@@ -94,10 +94,17 @@ func (h *GradeHandler) CreateGrade(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	// 2. Validate Student exists and is not deleted, and retrieve class_id and enrollment_date
+	var targetDate time.Time = time.Now()
+	if req.GradeDate != nil && *req.GradeDate != "" {
+		if parsed, err := time.Parse("2006-01-02", *req.GradeDate); err == nil {
+			targetDate = parsed
+		}
+	}
+
+	// 2. Validate Student exists and was active on grade date, and retrieve class_id and enrollment_date
 	var studentClassID int
 	var enrollmentDate sql.NullTime
-	err = tx.QueryRow("SELECT class_id, enrollment_date FROM students WHERE id = $1 AND is_deleted = false", req.StudentID).Scan(&studentClassID, &enrollmentDate)
+	err = tx.QueryRow("SELECT class_id, enrollment_date FROM students WHERE id = $1 AND (is_deleted = false OR deleted_at::date >= $2)", req.StudentID, targetDate).Scan(&studentClassID, &enrollmentDate)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Student profile not found or inactive"})
 		return
@@ -1048,10 +1055,17 @@ func (h *GradeHandler) BatchCreateGrades(c *gin.Context) {
 	var insertedGrades []models.Grade
 
 	for _, gReq := range req.Grades {
+		var targetDate time.Time = time.Now()
+		if gReq.GradeDate != nil && *gReq.GradeDate != "" {
+			if parsed, err := time.Parse("2006-01-02", *gReq.GradeDate); err == nil {
+				targetDate = parsed
+			}
+		}
+
 		// Validate Student exists and retrieve class_id and enrollment_date
 		var studentClassID int
 		var enrollmentDate sql.NullTime
-		err = tx.QueryRow("SELECT class_id, enrollment_date FROM students WHERE id = $1 AND is_deleted = false", gReq.StudentID).Scan(&studentClassID, &enrollmentDate)
+		err = tx.QueryRow("SELECT class_id, enrollment_date FROM students WHERE id = $1 AND (is_deleted = false OR deleted_at::date >= $2)", gReq.StudentID, targetDate).Scan(&studentClassID, &enrollmentDate)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Student ID %d not found or inactive", gReq.StudentID)})
 			return
