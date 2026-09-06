@@ -32,6 +32,7 @@ type CreateStudentRequest struct {
 	BirthDate      *string `json:"birthdate"`
 	EnrollmentDate *string `json:"enrollment_date"`
 	INA            *string `json:"ina"`
+	Passport       *string `json:"passport"`
 }
 
 type CreateTeacherRequest struct {
@@ -121,41 +122,45 @@ func (h *TenantUserHandler) CreateClassStudent(c *gin.Context) {
 		}
 	}
 
-	// Check INA uniqueness if provided
-	var normalizedINA *string
-	if req.INA != nil {
-		cleanINA := strings.TrimSpace(*req.INA)
-		if cleanINA != "" && cleanINA != "-" && !strings.EqualFold(cleanINA, "yo'q") {
-			normINA := NormalizeDocumentNo(cleanINA)
-			normalizedINA = &normINA
-			reg, _ := regexp.Compile("[^a-z0-9]")
-			rawNorm := reg.ReplaceAllString(strings.ToLower(normINA), "")
+	// Validate student document (INA or Passport is required)
+	var rawDoc string
+	if req.INA != nil && strings.TrimSpace(*req.INA) != "" {
+		rawDoc = strings.TrimSpace(*req.INA)
+	} else if req.Passport != nil && strings.TrimSpace(*req.Passport) != "" {
+		rawDoc = strings.TrimSpace(*req.Passport)
+	}
 
-			var existingStudentName, existingClassName string
-			err = dbConn.QueryRow(`
-				SELECT COALESCE(u.first_name || ' ' || u.last_name, ''), COALESCE(c.name, 'Sinfatsiz')
-				FROM students s
-				JOIN users u ON s.user_id = u.id
-				LEFT JOIN classes c ON s.class_id = c.id
-				WHERE (
-					LOWER(TRIM(s.ina)) = LOWER($1)
-					OR LOWER(TRIM(s.ina)) = LOWER($2)
-					OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = $3
-					OR REGEXP_REPLACE(REGEXP_REPLACE(LOWER(s.ina), '^[l1]-', 'i-'), '[^a-z0-9]', '', 'g') = $3
-				)
-				  AND s.is_deleted = false AND u.is_deleted = false AND (c.id IS NULL OR c.is_deleted = false)
-				LIMIT 1
-			`, cleanINA, normINA, rawNorm).Scan(&existingStudentName, &existingClassName)
-			if err == nil {
-				c.JSON(http.StatusConflict, gin.H{
-					"error": fmt.Sprintf("Ushbu Guvohnoma (INA) raqami ('%s') bilan '%s' ismli o'quvchi '%s' sinfida allaqachon mavjud!", cleanINA, existingStudentName, existingClassName),
-				})
-				return
-			}
-		} else {
-			norm := cleanINA
-			normalizedINA = &norm
-		}
+	cleanINA := strings.TrimSpace(rawDoc)
+	if cleanINA == "" || cleanINA == "-" || strings.EqualFold(cleanINA, "yo'q") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "O'quvchining I-NA yoki pasport seriya raqami kiritilishi shart"})
+		return
+	}
+
+	normINA := NormalizeDocumentNo(cleanINA)
+	normalizedINA := &normINA
+	reg, _ := regexp.Compile("[^a-z0-9]")
+	rawNorm := reg.ReplaceAllString(strings.ToLower(normINA), "")
+
+	var existingStudentName, existingClassName string
+	err = dbConn.QueryRow(`
+		SELECT COALESCE(u.first_name || ' ' || u.last_name, ''), COALESCE(c.name, 'Sinfatsiz')
+		FROM students s
+		JOIN users u ON s.user_id = u.id
+		LEFT JOIN classes c ON s.class_id = c.id
+		WHERE (
+			LOWER(TRIM(s.ina)) = LOWER($1)
+			OR LOWER(TRIM(s.ina)) = LOWER($2)
+			OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = $3
+			OR REGEXP_REPLACE(REGEXP_REPLACE(LOWER(s.ina), '^[l1]-', 'i-'), '[^a-z0-9]', '', 'g') = $3
+		)
+		  AND s.is_deleted = false AND u.is_deleted = false AND (c.id IS NULL OR c.is_deleted = false)
+		LIMIT 1
+	`, cleanINA, normINA, rawNorm).Scan(&existingStudentName, &existingClassName)
+	if err == nil {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": fmt.Sprintf("Ushbu Guvohnoma (INA) yoki Pasport raqami ('%s') bilan '%s' ismli o'quvchi '%s' sinfida allaqachon mavjud!", cleanINA, existingStudentName, existingClassName),
+		})
+		return
 	}
 
 	// Get role ID for STUDENT
@@ -1415,6 +1420,7 @@ type UpdateStudentRequest struct {
 	BirthDate      *string `json:"birthdate"` // Format: YYYY-MM-DD
 	EnrollmentDate *string `json:"enrollment_date"` // Format: YYYY-MM-DD
 	INA            *string `json:"ina"`
+	Passport       *string `json:"passport"`
 }
 
 // UpdateStudent updates a student user's profile (name, phone, password)
@@ -1483,40 +1489,47 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 		return
 	}
 
-	// Check INA uniqueness if updating INA
+	// Check INA/Passport uniqueness if updating document
 	var normalizedINA *string
-	if req.INA != nil {
-		cleanINA := strings.TrimSpace(*req.INA)
-		if cleanINA != "" && cleanINA != "-" && !strings.EqualFold(cleanINA, "yo'q") {
-			normINA := NormalizeDocumentNo(cleanINA)
-			normalizedINA = &normINA
-			reg, _ := regexp.Compile("[^a-z0-9]")
-			rawNorm := reg.ReplaceAllString(strings.ToLower(normINA), "")
+	if req.INA != nil || req.Passport != nil {
+		var rawDoc string
+		if req.INA != nil && strings.TrimSpace(*req.INA) != "" {
+			rawDoc = strings.TrimSpace(*req.INA)
+		} else if req.Passport != nil && strings.TrimSpace(*req.Passport) != "" {
+			rawDoc = strings.TrimSpace(*req.Passport)
+		}
 
-			var existingStudentName, existingClassName string
-			err = dbConn.QueryRow(`
-				SELECT COALESCE(u.first_name || ' ' || u.last_name, ''), COALESCE(c.name, 'Sinfatsiz')
-				FROM students s
-				JOIN users u ON s.user_id = u.id
-				LEFT JOIN classes c ON s.class_id = c.id
-				WHERE s.id != $1 AND (
-					LOWER(TRIM(s.ina)) = LOWER($2)
-					OR LOWER(TRIM(s.ina)) = LOWER($3)
-					OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = $4
-					OR REGEXP_REPLACE(REGEXP_REPLACE(LOWER(s.ina), '^[l1]-', 'i-'), '[^a-z0-9]', '', 'g') = $4
-				)
-				  AND s.is_deleted = false AND u.is_deleted = false AND (c.id IS NULL OR c.is_deleted = false)
-				LIMIT 1
-			`, studentID, cleanINA, normINA, rawNorm).Scan(&existingStudentName, &existingClassName)
-			if err == nil {
-				c.JSON(http.StatusConflict, gin.H{
-					"error": fmt.Sprintf("Ushbu Guvohnoma (INA) raqami ('%s') bilan boshqa o'quvchi ('%s', %s sinfi) allaqachon ro'yxatdan o'tgan!", cleanINA, existingStudentName, existingClassName),
-				})
-				return
-			}
-		} else {
-			norm := cleanINA
-			normalizedINA = &norm
+		cleanINA := strings.TrimSpace(rawDoc)
+		if cleanINA == "" || cleanINA == "-" || strings.EqualFold(cleanINA, "yo'q") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "O'quvchining I-NA yoki pasport seriya raqami kiritilishi shart"})
+			return
+		}
+
+		normINA := NormalizeDocumentNo(cleanINA)
+		normalizedINA = &normINA
+		reg, _ := regexp.Compile("[^a-z0-9]")
+		rawNorm := reg.ReplaceAllString(strings.ToLower(normINA), "")
+
+		var existingStudentName, existingClassName string
+		err = dbConn.QueryRow(`
+			SELECT COALESCE(u.first_name || ' ' || u.last_name, ''), COALESCE(c.name, 'Sinfatsiz')
+			FROM students s
+			JOIN users u ON s.user_id = u.id
+			LEFT JOIN classes c ON s.class_id = c.id
+			WHERE s.id != $1 AND (
+				LOWER(TRIM(s.ina)) = LOWER($2)
+				OR LOWER(TRIM(s.ina)) = LOWER($3)
+				OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = $4
+				OR REGEXP_REPLACE(REGEXP_REPLACE(LOWER(s.ina), '^[l1]-', 'i-'), '[^a-z0-9]', '', 'g') = $4
+			)
+			  AND s.is_deleted = false AND u.is_deleted = false AND (c.id IS NULL OR c.is_deleted = false)
+			LIMIT 1
+		`, studentID, cleanINA, normINA, rawNorm).Scan(&existingStudentName, &existingClassName)
+		if err == nil {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": fmt.Sprintf("Ushbu Guvohnoma (INA) yoki Pasport raqami ('%s') bilan boshqa o'quvchi ('%s', %s sinfi) allaqachon ro'yxatdan o'tgan!", cleanINA, existingStudentName, existingClassName),
+			})
+			return
 		}
 	}
 
@@ -1570,7 +1583,7 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 		args = append(args, cleanPhone)
 		argIdx++
 	}
-	if req.INA != nil {
+	if req.INA != nil || req.Passport != nil {
 		setClauses = append(setClauses, fmt.Sprintf("passport = $%d", argIdx))
 		args = append(args, normalizedINA)
 		argIdx++
@@ -1628,13 +1641,13 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 	if enrollmentDate != nil {
 		_, err = tx.Exec(`
 			UPDATE students 
-			SET address = $1, birthdate = $2, ina = $3, enrollment_date = $4 
+			SET address = $1, birthdate = $2, ina = COALESCE($3, ina), enrollment_date = $4 
 			WHERE id = $5`, 
 			req.Address, birthdate, normalizedINA, enrollmentDate, studentID)
 	} else {
 		_, err = tx.Exec(`
 			UPDATE students 
-			SET address = $1, birthdate = $2, ina = $3 
+			SET address = $1, birthdate = $2, ina = COALESCE($3, ina) 
 			WHERE id = $4`, 
 			req.Address, birthdate, normalizedINA, studentID)
 	}

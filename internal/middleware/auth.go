@@ -93,7 +93,7 @@ func RequireRole(allowedRoles ...string) gin.HandlerFunc {
 		}
 
 		if !allowed {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Access denied for this resource"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: ushbu amalni bajarish uchun sizda yetarli huquq yo'q"})
 			c.Abort()
 			return
 		}

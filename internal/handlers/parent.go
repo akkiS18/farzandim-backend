@@ -493,17 +493,15 @@ func (h *ParentHandler) UpdateParent(c *gin.Context) {
 	// Authorization: admin, parent themselves, or main teacher of any class this parent's student is in
 	if userRole != "ADMIN" && currentUserID != parentID {
 		var isMain bool
-		dbConn.QueryRow(`
+		err = dbConn.QueryRow(`
 			SELECT EXISTS(
 				SELECT 1 FROM class_teachers ct
-				JOIN student_parents sp ON sp.student_id IN (
-					SELECT id FROM students WHERE is_deleted = false
-				)
-				JOIN students s ON sp.student_id = s.id AND s.is_deleted = false
-				WHERE sp.parent_id = $1 AND ct.teacher_id = $2 AND ct.class_id = s.class_id AND ct.is_main_teacher = true AND ct.is_deleted = false
+				JOIN students s ON ct.class_id = s.class_id AND s.is_deleted = false
+				JOIN student_parents sp ON sp.student_id = s.id
+				WHERE sp.parent_id = $1 AND ct.teacher_id = $2 AND ct.is_main_teacher = true AND ct.is_deleted = false
 			)`, parentID, currentUserID).Scan(&isMain)
-		if !isMain {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan"})
+		if err != nil || !isMain {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: siz ushbu o'quvchining sinf rahbari emassiz"})
 			return
 		}
 	}

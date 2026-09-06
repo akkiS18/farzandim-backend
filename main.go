@@ -289,7 +289,7 @@ func main() {
 		authTenantGroup.DELETE("/holidays/:id", middleware.RequireRole("ADMIN"), holidayHandler.DeleteHoliday)
 		authTenantGroup.POST("/import/holidays", middleware.RequireRole("ADMIN"), importHandler.ImportHolidays)
 		authTenantGroup.GET("/import/template/holidays", middleware.RequireRole("ADMIN"), importHandler.ExportHolidayTemplate)
-		authTenantGroup.POST("/import/students-smart", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), importHandler.BatchImportStudentsSmart)
+		authTenantGroup.POST("/import/students-smart", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), importHandler.BatchImportStudentsSmart)
 		authTenantGroup.POST("/import/schedules-smart", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), scheduleHandler.BatchImportSchedulesSmart)
 		authTenantGroup.GET("/import/template/schedule", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), scheduleHandler.ExportScheduleTemplate)
 

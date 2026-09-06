@@ -174,6 +174,35 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		argCount++
 	}
 
+	// Teacher authorization check: If the caller is a teacher (MAIN_TEACHER or SUBJECT_TEACHER)
+	// and requesting STUDENT or PARENT list, they must only see classes where they are is_main_teacher = true
+	if currentRole != "ADMIN" && currentRole != "PARENT" && currentRole != "STUDENT" && (roleFilter == "STUDENT" || roleFilter == "PARENT") {
+		teacherUserID, _ := strconv.Atoi(userIDStr)
+		if classFilter != "" {
+			cid, err := strconv.Atoi(classFilter)
+			if err == nil {
+				var isMain bool
+				_ = dbConn.QueryRow(`
+					SELECT EXISTS(
+						SELECT 1 FROM class_teachers 
+						WHERE class_id = $1 AND teacher_id = $2 AND is_main_teacher = true AND is_deleted = false
+					)
+				`, cid, teacherUserID).Scan(&isMain)
+				if !isMain {
+					c.JSON(http.StatusOK, []TenantUserResponse{})
+					return
+				}
+			}
+		} else {
+			query += fmt.Sprintf(` AND s.class_id IN (
+				SELECT class_id FROM class_teachers 
+				WHERE teacher_id = $%d AND is_main_teacher = true AND is_deleted = false
+			)`, argCount)
+			args = append(args, teacherUserID)
+			argCount++
+		}
+	}
+
 	if classFilter != "" && roleFilter != "PARENT" {
 		classID, err := strconv.Atoi(classFilter)
 		if err == nil {
@@ -292,6 +321,30 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "Specified class_id does not exist or has been deleted"})
 				return
 			}
+		}
+	}
+
+	userRoleVal, _ := c.Get("role")
+	userRole, _ := userRoleVal.(string)
+	userIDVal, _ := c.Get("userID")
+	userIDStr, _ := userIDVal.(string)
+	currentUserID, _ := strconv.Atoi(userIDStr)
+
+	if userRole != "ADMIN" {
+		if !hasTargetClass {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Sinf tanlanishi shart"})
+			return
+		}
+		var isMain bool
+		err := tenantDB.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM class_teachers 
+				WHERE class_id = $1 AND teacher_id = $2 AND is_main_teacher = true AND is_deleted = false
+			)
+		`, targetClassID, currentUserID).Scan(&isMain)
+		if err != nil || !isMain {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: siz ushbu sinf rahbari emassiz"})
+			return
 		}
 	}
 
@@ -429,6 +482,41 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 			continue
 		}
 
+		cleanIna := strings.TrimSpace(getCell(row, "guvohnoma raqami"))
+		if cleanIna == "" || cleanIna == "-" || strings.EqualFold(cleanIna, "yo'q") {
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "O'quvchining I-NA yoki pasport seriya raqami kiritilmagan"})
+			failedCount++
+			continue
+		}
+
+		normINA := NormalizeDocumentNo(cleanIna)
+		reg, _ := regexp.Compile("[^a-z0-9]")
+		rawNorm := reg.ReplaceAllString(strings.ToLower(normINA), "")
+
+		var existingStudentName, existingClassName string
+		err = tenantDB.QueryRow(`
+			SELECT COALESCE(u.first_name || ' ' || u.last_name, ''), COALESCE(c.name, 'Sinfatsiz')
+			FROM students s
+			JOIN users u ON s.user_id = u.id
+			LEFT JOIN classes c ON s.class_id = c.id
+			WHERE (
+				LOWER(TRIM(s.ina)) = LOWER($1)
+				OR LOWER(TRIM(s.ina)) = LOWER($2)
+				OR REGEXP_REPLACE(LOWER(s.ina), '[^a-z0-9]', '', 'g') = $3
+				OR REGEXP_REPLACE(REGEXP_REPLACE(LOWER(s.ina), '^[l1]-', 'i-'), '[^a-z0-9]', '', 'g') = $3
+			)
+			  AND s.is_deleted = false AND u.is_deleted = false AND (c.id IS NULL OR c.is_deleted = false)
+			LIMIT 1
+		`, cleanIna, normINA, rawNorm).Scan(&existingStudentName, &existingClassName)
+		if err == nil {
+			rowErrors = append(rowErrors, RowError{
+				Row:   rowNum,
+				Error: fmt.Sprintf("Ushbu Guvohnoma (INA) yoki Pasport raqami ('%s') bilan '%s' ismli o'quvchi '%s' sinfida allaqachon mavjud!", cleanIna, existingStudentName, existingClassName),
+			})
+			failedCount++
+			continue
+		}
+
 		// Generate random password
 		parol := "STUDENT_NO_LOGIN_ACCESS_RANDOM_PASS_" + time.Now().Format("20060102150405.000")
 
@@ -489,10 +577,10 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 		}
 
 		insertUserQuery := `
-			INSERT INTO users (first_name, last_name, middle_name, phone, password_hash, role_id)
-			VALUES ($1, $2, $3, NULL, $4, $5)
+			INSERT INTO users (first_name, last_name, middle_name, passport, document_no, phone, password_hash, role_id)
+			VALUES ($1, $2, $3, $4, $4, NULL, $5, $6)
 			RETURNING id`
-		err = tx.QueryRow(insertUserQuery, ism, familiya, middleNamePtr, string(hashedPassword), studentRoleID).Scan(&userID)
+		err = tx.QueryRow(insertUserQuery, ism, familiya, middleNamePtr, normINA, string(hashedPassword), studentRoleID).Scan(&userID)
 		if err != nil {
 			tx.Rollback()
 			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Foydalanuvchini yaratib bo'lmadi: %v", err)})
@@ -503,7 +591,6 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 		// 4. Create Student record
 		manzil := getCell(row, "manzil")
 		tugilganSanaStr := getCell(row, "tug'ilgan sana")
-		ina := getCell(row, "guvohnoma raqami")
 		var addressPtr *string
 		if manzil != "" {
 			addressPtr = &manzil
@@ -518,17 +605,13 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 				birthdate = &parsedDate
 			}
 		}
-		var inaPtr *string
-		if ina != "" {
-			inaPtr = &ina
-		}
 
 		var studentID int
 		insertStudentQuery := `
 			INSERT INTO students (user_id, class_id, address, birthdate, ina, enrollment_date)
 			VALUES ($1, $2, $3, $4, $5, NOW()::date)
 			RETURNING id`
-		err = tx.QueryRow(insertStudentQuery, userID, classID, addressPtr, birthdate, inaPtr).Scan(&studentID)
+		err = tx.QueryRow(insertStudentQuery, userID, classID, addressPtr, birthdate, normINA).Scan(&studentID)
 		if err != nil {
 			tx.Rollback()
 			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("O'quvchi profilini yaratib bo'lmadi: %v", err)})
@@ -1766,6 +1849,12 @@ func (h *ImportHandler) ImportStudentsSmart(c *gin.Context) {
 	tenantDBVal, _ := c.Get("tenantDB")
 	tenantDB := tenantDBVal.(*sql.DB)
 
+	userRoleVal, _ := c.Get("role")
+	userRole, _ := userRoleVal.(string)
+	userIDVal, _ := c.Get("userID")
+	userIDStr, _ := userIDVal.(string)
+	currentUserID, _ := strconv.Atoi(userIDStr)
+
 	var req ImportStudentsSmartRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload"})
@@ -1815,6 +1904,12 @@ func (h *ImportHandler) ImportStudentsSmart(c *gin.Context) {
 		err = tx.QueryRow("SELECT id FROM classes WHERE name = $1 AND is_deleted = false", sRow.ClassName).Scan(&classID)
 		if err != nil {
 			if err == sql.ErrNoRows {
+				if userRole != "ADMIN" {
+					tx.Rollback()
+					rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Sinf '%s' topilmadi", sRow.ClassName)})
+					failedCount++
+					continue
+				}
 				err = tx.QueryRow("INSERT INTO classes (name) VALUES ($1) RETURNING id", sRow.ClassName).Scan(&classID)
 				if err != nil {
 					tx.Rollback()
@@ -1826,6 +1921,22 @@ func (h *ImportHandler) ImportStudentsSmart(c *gin.Context) {
 			} else {
 				tx.Rollback()
 				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Database error resolving class"})
+				failedCount++
+				continue
+			}
+		}
+
+		if userRole != "ADMIN" {
+			var isMain bool
+			err = tx.QueryRow(`
+				SELECT EXISTS(
+					SELECT 1 FROM class_teachers 
+					WHERE class_id = $1 AND teacher_id = $2 AND is_main_teacher = true AND is_deleted = false
+				)
+			`, classID, currentUserID).Scan(&isMain)
+			if err != nil || !isMain {
+				tx.Rollback()
+				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Ruxsat etilmagan: siz '%s' sinfining rahbari emassiz", sRow.ClassName)})
 				failedCount++
 				continue
 			}
@@ -1974,6 +2085,12 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 	tenantDBVal, _ := c.Get("tenantDB")
 	tenantDB := tenantDBVal.(*sql.DB)
 
+	userRoleVal, _ := c.Get("role")
+	userRole, _ := userRoleVal.(string)
+	userIDVal, _ := c.Get("userID")
+	userIDStr, _ := userIDVal.(string)
+	currentUserID, _ := strconv.Atoi(userIDStr)
+
 	var req BatchSmartStudentImportRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Noto'g'ri so'rov formati (JSON format error)"})
@@ -2085,6 +2202,23 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 			continue
 		}
 
+		// Authorization check: only admin or assigned main teacher can import students to this class
+		if userRole != "ADMIN" {
+			var isMain bool
+			err = tx.QueryRow(`
+				SELECT EXISTS(
+					SELECT 1 FROM class_teachers 
+					WHERE class_id = $1 AND teacher_id = $2 AND is_main_teacher = true AND is_deleted = false
+				)
+			`, classID, currentUserID).Scan(&isMain)
+			if err != nil || !isMain {
+				tx.Rollback()
+				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Ruxsat etilmagan: siz '%s' sinfining rahbari emassiz", sinfName)})
+				failedCount++
+				continue
+			}
+		}
+
 		// Helper to parse dates
 		var birthdatePtr *time.Time
 		if strings.TrimSpace(st.StudentBirthdate) != "" && st.StudentBirthdate != "-" {
@@ -2106,11 +2240,19 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 			}
 		}
 
-		var inaPtr *string
-		if strings.TrimSpace(st.StudentDocumentNo) != "" && st.StudentDocumentNo != "-" && !strings.EqualFold(st.StudentDocumentNo, "yo'q") {
-			d := NormalizeDocumentNo(st.StudentDocumentNo)
-			inaPtr = &d
+		cleanDoc := strings.TrimSpace(st.StudentDocumentNo)
+		if cleanDoc == "" || cleanDoc == "-" || strings.EqualFold(cleanDoc, "yo'q") {
+			tx.Rollback()
+			rowErrors = append(rowErrors, RowError{
+				Row:   rowNum,
+				Error: "O'quvchining I-NA yoki pasport seriya raqami kiritilmagan",
+			})
+			failedCount++
+			continue
 		}
+
+		d := NormalizeDocumentNo(cleanDoc)
+		inaPtr := &d
 
 		var addressPtr *string
 		if strings.TrimSpace(st.Address) != "" && st.Address != "-" {
