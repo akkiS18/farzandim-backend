@@ -242,6 +242,8 @@ func main() {
 		authTenantGroup.POST("/classes/:id/students", tenantUserHandler.CreateClassStudent)
 		authTenantGroup.POST("/classes/:id/transfer-students", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), tenantUserHandler.TransferStudentsClass)
 		authTenantGroup.PUT("/students/:id", tenantUserHandler.UpdateStudent)
+		authTenantGroup.PUT("/students/:id/leaving-date", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), tenantUserHandler.UpdateStudentLeavingDate)
+		authTenantGroup.POST("/students/:id/restore", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), tenantUserHandler.RestoreStudent)
 		authTenantGroup.DELETE("/students/:id", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), tenantUserHandler.DeleteStudent)
 		authTenantGroup.POST("/students/check-documents", tenantUserHandler.CheckStudentDocuments)
 		authTenantGroup.POST("/students/transfer-by-doc", middleware.RequireRole("ADMIN"), tenantUserHandler.TransferStudentByDocument)

@@ -1803,6 +1803,129 @@ func (h *TenantUserHandler) DeleteStudent(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "O'quvchi muvaffaqiyatli o'chirildi"})
 }
 
+// UpdateStudentLeavingDate updates the deleted_at date for an archived/deleted student
+func (h *TenantUserHandler) UpdateStudentLeavingDate(c *gin.Context) {
+	studentIDStr := c.Param("id")
+	studentID, err := strconv.Atoi(studentIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid student ID"})
+		return
+	}
+
+	var reqBody struct {
+		LeavingDate string `json:"leaving_date" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&reqBody); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "leaving_date is required (YYYY-MM-DD)"})
+		return
+	}
+
+	parsedDate, err := time.Parse("2006-01-02", reqBody.LeavingDate)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid date format, use YYYY-MM-DD"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	var targetUserID int
+	err = dbConn.QueryRow(`
+		SELECT s.user_id 
+		FROM students s 
+		WHERE (s.id = $1 OR s.user_id = $1)
+		ORDER BY (s.id = $1) DESC 
+		LIMIT 1
+	`, studentID).Scan(&targetUserID)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "O'quvchi topilmadi"})
+		return
+	}
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failure"})
+		return
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`UPDATE students SET deleted_at = $1 WHERE (id = $2 OR user_id = $2)`, parsedDate, studentID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Chiqish sanasini yangilashda xatolik", "details": err.Error()})
+		return
+	}
+	_, err = tx.Exec(`UPDATE users SET deleted_at = $1 WHERE id = $2`, parsedDate, targetUserID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Foydalanuvchi ma'lumotini yangilashda xatolik", "details": err.Error()})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit changes", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Chiqish sanasi muvaffaqiyatli yangilandi"})
+}
+
+// RestoreStudent reactivates an archived student
+func (h *TenantUserHandler) RestoreStudent(c *gin.Context) {
+	studentIDStr := c.Param("id")
+	studentID, err := strconv.Atoi(studentIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid student ID"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	var targetUserID int
+	err = dbConn.QueryRow(`
+		SELECT s.user_id 
+		FROM students s 
+		WHERE (s.id = $1 OR s.user_id = $1)
+		ORDER BY (s.id = $1) DESC 
+		LIMIT 1
+	`, studentID).Scan(&targetUserID)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "O'quvchi topilmadi"})
+		return
+	}
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failure"})
+		return
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`UPDATE students SET is_deleted = false, deleted_at = NULL WHERE (id = $1 OR user_id = $1)`, studentID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "O'quvchini qayta tiklashda xatolik", "details": err.Error()})
+		return
+	}
+	_, err = tx.Exec(`UPDATE users SET is_deleted = false, deleted_at = NULL WHERE id = $1`, targetUserID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Foydalanuvchini qayta tiklashda xatolik", "details": err.Error()})
+		return
+	}
+
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "RESTORE",
+		TableName: "students",
+		RecordID:  strconv.Itoa(studentID),
+		NewValues: map[string]interface{}{"is_deleted": false},
+	})
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit restore", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "O'quvchi muvaffaqiyatli qayta tiklandi"})
+}
+
 type CheckStudentDocumentsRequest struct {
 	Documents []string `json:"documents"`
 }
