@@ -86,9 +86,9 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 
 	if dateFilter != "" {
 		if _, err := time.Parse("2006-01-02", dateFilter); err == nil {
-			sDeletedCond = fmt.Sprintf("((s.is_deleted = false AND (s.enrollment_date IS NULL OR s.enrollment_date <= '%s'::date)) OR (s.is_deleted = true AND s.deleted_at::date >= '%s'::date AND COALESCE(s.enrollment_date, s.created_at::date) <= '%s'::date AND s.created_at::date <= '%s'::date))", dateFilter, dateFilter, dateFilter, dateFilter)
-			uDeletedCond = fmt.Sprintf("(u.is_deleted = false OR (u.is_deleted = true AND u.deleted_at::date >= '%s'::date AND u.created_at::date <= '%s'::date))", dateFilter, dateFilter)
-			suDeletedCond = fmt.Sprintf("((su.is_deleted = false AND (s.enrollment_date IS NULL OR s.enrollment_date <= '%s'::date)) OR (su.is_deleted = true AND su.deleted_at::date >= '%s'::date AND COALESCE(s.enrollment_date, s.created_at::date) <= '%s'::date AND s.created_at::date <= '%s'::date))", dateFilter, dateFilter, dateFilter, dateFilter)
+			sDeletedCond = fmt.Sprintf("((s.is_deleted = false AND (s.enrollment_date IS NULL OR s.enrollment_date <= '%s'::date)) OR (s.is_deleted = true AND s.deleted_at::date > '%s'::date AND COALESCE(s.enrollment_date, s.created_at::date) <= '%s'::date AND s.created_at::date <= '%s'::date))", dateFilter, dateFilter, dateFilter, dateFilter)
+			uDeletedCond = fmt.Sprintf("(u.is_deleted = false OR (u.is_deleted = true AND u.deleted_at::date > '%s'::date AND u.created_at::date <= '%s'::date))", dateFilter, dateFilter)
+			suDeletedCond = fmt.Sprintf("((su.is_deleted = false AND (s.enrollment_date IS NULL OR s.enrollment_date <= '%s'::date)) OR (su.is_deleted = true AND su.deleted_at::date > '%s'::date AND COALESCE(s.enrollment_date, s.created_at::date) <= '%s'::date AND s.created_at::date <= '%s'::date))", dateFilter, dateFilter, dateFilter, dateFilter)
 		}
 	}
 

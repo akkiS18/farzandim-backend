@@ -1753,6 +1753,23 @@ func (h *TenantUserHandler) DeleteStudent(c *gin.Context) {
 		}
 	}
 
+	var reqBody struct {
+		LeavingDate *string `json:"leaving_date"`
+	}
+	_ = c.ShouldBindJSON(&reqBody)
+
+	leavingDateStr := c.Query("leaving_date")
+	if leavingDateStr == "" && reqBody.LeavingDate != nil {
+		leavingDateStr = *reqBody.LeavingDate
+	}
+
+	deletedAt := time.Now()
+	if leavingDateStr != "" {
+		if parsedDate, err := time.Parse("2006-01-02", leavingDateStr); err == nil {
+			deletedAt = parsedDate
+		}
+	}
+
 	tx, err := dbConn.Begin()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failure"})
@@ -1760,13 +1777,12 @@ func (h *TenantUserHandler) DeleteStudent(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	now := "NOW()"
-	_, err = tx.Exec(`UPDATE students SET is_deleted = true, deleted_at = `+now+` WHERE id = $1`, studentID)
+	_, err = tx.Exec(`UPDATE students SET is_deleted = true, deleted_at = $1 WHERE id = $2`, deletedAt, studentID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "O'quvchi profilini o'chirishda xatolik", "details": err.Error()})
 		return
 	}
-	_, err = tx.Exec(`UPDATE users SET is_deleted = true, deleted_at = NOW() WHERE id = $1`, targetUserID)
+	_, err = tx.Exec(`UPDATE users SET is_deleted = true, deleted_at = $1 WHERE id = $2`, deletedAt, targetUserID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Foydalanuvchi profilini o'chirishda xatolik", "details": err.Error()})
 		return
@@ -1776,7 +1792,7 @@ func (h *TenantUserHandler) DeleteStudent(c *gin.Context) {
 		Action:    "DELETE",
 		TableName: "students",
 		RecordID:  strconv.Itoa(studentID),
-		OldValues: map[string]interface{}{"student_id": studentID, "user_id": targetUserID},
+		OldValues: map[string]interface{}{"student_id": studentID, "user_id": targetUserID, "deleted_at": deletedAt},
 	})
 
 	if err := tx.Commit(); err != nil {

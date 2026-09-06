@@ -101,12 +101,12 @@ func (h *GradeHandler) CreateGrade(c *gin.Context) {
 		}
 	}
 
-	// 2. Validate Student exists and was active on grade date, and retrieve class_id and enrollment_date
+	// 2. Validate Student exists and was active/enrolled on grade date, and retrieve class_id and enrollment_date
 	var studentClassID int
 	var enrollmentDate sql.NullTime
-	err = tx.QueryRow("SELECT class_id, enrollment_date FROM students WHERE id = $1 AND (is_deleted = false OR deleted_at::date >= $2)", req.StudentID, targetDate).Scan(&studentClassID, &enrollmentDate)
+	err = tx.QueryRow("SELECT class_id, enrollment_date FROM students WHERE id = $1 AND (is_deleted = false OR deleted_at::date > $2) AND (enrollment_date IS NULL OR enrollment_date <= $2)", req.StudentID, targetDate).Scan(&studentClassID, &enrollmentDate)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Student profile not found or inactive"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Student profile not found, inactive or not yet enrolled on this date"})
 		return
 	}
 
@@ -1065,9 +1065,9 @@ func (h *GradeHandler) BatchCreateGrades(c *gin.Context) {
 		// Validate Student exists and retrieve class_id and enrollment_date
 		var studentClassID int
 		var enrollmentDate sql.NullTime
-		err = tx.QueryRow("SELECT class_id, enrollment_date FROM students WHERE id = $1 AND (is_deleted = false OR deleted_at::date >= $2)", gReq.StudentID, targetDate).Scan(&studentClassID, &enrollmentDate)
+		err = tx.QueryRow("SELECT class_id, enrollment_date FROM students WHERE id = $1 AND (is_deleted = false OR deleted_at::date > $2) AND (enrollment_date IS NULL OR enrollment_date <= $2)", gReq.StudentID, targetDate).Scan(&studentClassID, &enrollmentDate)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Student ID %d not found or inactive", gReq.StudentID)})
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Student ID %d not found, inactive or not yet enrolled on this date", gReq.StudentID)})
 			return
 		}
 
