@@ -304,7 +304,11 @@ func (h *GradeHandler) CreateGrade(c *gin.Context) {
 	var gradeID int
 	gType := "MASTERY"
 	if req.GradeType != nil && *req.GradeType != "" {
-		gType = *req.GradeType
+		if strings.EqualFold(*req.GradeType, "DAILY") {
+			gType = "MASTERY"
+		} else {
+			gType = *req.GradeType
+		}
 	}
 	gCat := "DAILY"
 	if req.GradeCategory != nil && *req.GradeCategory != "" {
@@ -819,7 +823,11 @@ func (h *GradeHandler) UpdateGrade(c *gin.Context) {
 
 	gType := "MASTERY"
 	if req.GradeType != nil && *req.GradeType != "" {
-		gType = *req.GradeType
+		if strings.EqualFold(*req.GradeType, "DAILY") {
+			gType = "MASTERY"
+		} else {
+			gType = *req.GradeType
+		}
 	}
 	gCat := "DAILY"
 	if req.GradeCategory != nil && *req.GradeCategory != "" {
@@ -1259,7 +1267,11 @@ func (h *GradeHandler) BatchCreateGrades(c *gin.Context) {
 		var gradeID int
 		gType := "MASTERY"
 		if gReq.GradeType != nil && *gReq.GradeType != "" {
-			gType = *gReq.GradeType
+			if strings.EqualFold(*gReq.GradeType, "DAILY") {
+				gType = "MASTERY"
+			} else {
+				gType = *gReq.GradeType
+			}
 		}
 		gCat := "DAILY"
 		if gReq.GradeCategory != nil && *gReq.GradeCategory != "" {

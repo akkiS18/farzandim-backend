@@ -1596,9 +1596,11 @@ func (h *ScheduleHandler) GetTeacherTodayLessons(c *gin.Context) {
 	stuCountRows, err := dbConn.Query(`
 		SELECT class_id, COUNT(*) 
 		FROM students 
-		WHERE class_id = ANY($1) AND is_deleted = false
+		WHERE class_id = ANY($1) 
+		  AND (is_deleted = false OR deleted_at::date >= $2::date)
+		  AND (enrollment_date IS NULL OR enrollment_date <= $2::date)
 		GROUP BY class_id
-	`, pq.Array(activeClassIDs))
+	`, pq.Array(activeClassIDs), parsedDate)
 	if err == nil {
 		for stuCountRows.Next() {
 			var cid, cnt int
@@ -1614,7 +1616,9 @@ func (h *ScheduleHandler) GetTeacherTodayLessons(c *gin.Context) {
 	gradeMarkRows, err := dbConn.Query(`
 		SELECT st.class_id, g.subject_id, g.lesson_number, COUNT(DISTINCT g.student_id)
 		FROM grades g
-		JOIN students st ON g.student_id = st.id AND st.is_deleted = false
+		JOIN students st ON g.student_id = st.id 
+		  AND (st.is_deleted = false OR st.deleted_at::date >= $2::date)
+		  AND (st.enrollment_date IS NULL OR st.enrollment_date <= $2::date)
 		WHERE st.class_id = ANY($1)
 		  AND g.grade_date::date = $2::date
 		  AND g.is_deleted = false
