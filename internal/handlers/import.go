@@ -150,7 +150,7 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		query = fmt.Sprintf(`
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
-			       s.id as student_id, (su.first_name || ' ' || su.last_name || COALESCE(' ' || su.middle_name, '')) as student_name,
+			       s.id as student_id, (su.last_name || ' ' || su.first_name || COALESCE(' ' || su.middle_name, '')) as student_name,
 			       u.passport, NULL::text as address, NULL::date as birthdate, NULL::text as ina, NULL::numeric as balance, NULL::date as enrollment_date,
 			       u.is_deleted as student_is_deleted, u.deleted_at as student_deleted_at
 			FROM users u
@@ -233,7 +233,11 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		argCount++
 	}
 
-	query += " ORDER BY u.created_at DESC"
+	if roleFilter == "STUDENT" {
+		query += " ORDER BY u.last_name ASC, u.first_name ASC"
+	} else {
+		query += " ORDER BY u.created_at DESC"
+	}
 
 	rows, err := dbConn.Query(query, args...)
 	if err != nil {
@@ -988,7 +992,7 @@ func (h *ImportHandler) ExportParentTemplate(c *gin.Context) {
 				FROM students s
 				JOIN users u ON s.user_id = u.id
 				WHERE s.is_deleted = false AND u.is_deleted = false AND s.class_id = $1
-				ORDER BY u.first_name, u.last_name`
+				ORDER BY u.last_name, u.first_name`
 			rows, err = dbConn.Query(query, classID)
 		}
 	}
@@ -999,7 +1003,7 @@ func (h *ImportHandler) ExportParentTemplate(c *gin.Context) {
 			FROM students s
 			JOIN users u ON s.user_id = u.id
 			WHERE s.is_deleted = false AND u.is_deleted = false
-			ORDER BY u.first_name, u.last_name`
+			ORDER BY u.last_name, u.first_name`
 		rows, err = dbConn.Query(query)
 	}
 
@@ -1413,7 +1417,7 @@ func (h *ImportHandler) ExportGradeTemplate(c *gin.Context) {
 		FROM students s
 		JOIN users u ON s.user_id = u.id
 		WHERE s.is_deleted = false AND u.is_deleted = false AND s.class_id = $1
-		ORDER BY u.first_name, u.last_name`
+		ORDER BY u.last_name, u.first_name`
 
 	rows, err := dbConn.Query(query, classID)
 	hasStudents := false
@@ -2428,17 +2432,22 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 				pFirst = "Vasiy"
 			}
 
-			cleanPhone := utils.NormalizePhone(phone)
 			cleanDoc := NormalizeDocumentNo(passport)
+			cleanDocLower := strings.ToLower(cleanDoc)
 
+			// Qat'iy talab: Ota-onaning ismi bor bo'lsada, pasport seriyasi yo'q bo'lsa, bazaga qo'shmasin!
+			if cleanDoc == "" || cleanDoc == "-" || strings.EqualFold(cleanDoc, "yo'q") ||
+				strings.Contains(cleanDocLower, "vafot") || strings.Contains(cleanDocLower, "yo'q") ||
+				strings.Contains(cleanDocLower, "mavjud emas") || len(cleanDoc) < 4 {
+				return nil
+			}
+
+			pDocPtr := &cleanDoc
+
+			cleanPhone := utils.NormalizePhone(phone)
 			var pPhonePtr *string
 			if cleanPhone != "" {
 				pPhonePtr = &cleanPhone
-			}
-
-			var pDocPtr *string
-			if cleanDoc != "" && cleanDoc != "-" && !strings.EqualFold(cleanDoc, "yo'q") && !strings.Contains(strings.ToLower(cleanDoc), "vafot") {
-				pDocPtr = &cleanDoc
 			}
 
 			found := false

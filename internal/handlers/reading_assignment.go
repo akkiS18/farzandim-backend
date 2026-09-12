@@ -268,7 +268,7 @@ func (h *ReadingAssignmentHandler) GetAssignmentDetails(c *gin.Context) {
 	// Fetch student progress
 	pRows, err := dbConn.Query(`
 		SELECT srp.id, srp.assignment_id, srp.book_id, srp.student_id,
-		       u.first_name || ' ' || u.last_name as student_name, COALESCE(cl.name, '') as class_name,
+		       u.last_name || ' ' || u.first_name as student_name, COALESCE(cl.name, '') as class_name,
 		       srp.status, COALESCE(srp.grade_value, ''), srp.numeric_value, srp.grading_system_id,
 		       COALESCE(srp.teacher_feedback, ''), srp.graded_by, srp.graded_at, srp.created_at, srp.updated_at
 		FROM student_reading_progress srp
@@ -431,7 +431,7 @@ func (h *ReadingAssignmentHandler) GetStudentAssignments(c *gin.Context) {
 	pRows, err := dbConn.Query(`
 		SELECT srp.id, srp.assignment_id, ra.title as assignment_title, ra.start_date, ra.end_date,
 		       srp.book_id, b.title, b.author, b.description, b.cover_url, COALESCE(b.download_link, ''), COALESCE(b.location_in_school, ''),
-		       bc.name as category_name, srp.student_id, u.first_name || ' ' || u.last_name as student_name,
+		       bc.name as category_name, srp.student_id, u.last_name || ' ' || u.first_name as student_name,
 		       srp.status, COALESCE(srp.grade_value, ''), srp.numeric_value, COALESCE(srp.teacher_feedback, ''),
 		       srp.graded_at, srp.created_at
 		FROM student_reading_progress srp

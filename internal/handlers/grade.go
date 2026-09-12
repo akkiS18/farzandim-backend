@@ -389,7 +389,7 @@ func (h *GradeHandler) ListGrades(c *gin.Context) {
 
 	// Base SQL Query for retrieval with rich metadata
 	query := `
-		SELECT g.id, g.student_id, u_student.first_name || ' ' || u_student.last_name as student_name, st.class_id, cl.name as class_name,
+		SELECT g.id, g.student_id, u_student.last_name || ' ' || u_student.first_name as student_name, st.class_id, cl.name as class_name,
 		       g.subject_id, s.name as subject_name, g.teacher_id, u_teacher.first_name || ' ' || u_teacher.last_name as teacher_name,
 		       g.value, g.numeric_value, g.grade_date, g.status, g.approved_by_parent, g.grading_system_id,
 		       g.grade_type, g.grade_category, g.lesson_number, g.created_at, g.updated_at

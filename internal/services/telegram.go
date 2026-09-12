@@ -873,7 +873,7 @@ func SendGradeCommentNotificationToTeachers(schoolID string, gradeID int, commen
 	var studentName, subjectName, gradeValue string
 	queryInfo := `
 		SELECT 
-			stu_u.first_name || ' ' || stu_u.last_name as student_name,
+			stu_u.last_name || ' ' || stu_u.first_name as student_name,
 			sub.name as subject_name,
 			g.value as grade_value
 		FROM grades g

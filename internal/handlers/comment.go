@@ -221,7 +221,7 @@ func (h *CommentHandler) GetCommentsFeed(c *gin.Context) {
 		       gc.author_id, gc.content, gc.created_at, 
 		       au.first_name || ' ' || au.last_name as author_name,
 		       s.name as subject_name, g.value as grade_value,
-		       stu_u.first_name || ' ' || stu_u.last_name as student_name,
+		       stu_u.last_name || ' ' || stu_u.first_name as student_name,
 		       cls.name as class_name
 		FROM grade_comments gc
 		JOIN users au ON gc.author_id = au.id

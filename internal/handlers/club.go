@@ -312,7 +312,7 @@ func (h *ClubHandler) GetClubStudents(c *gin.Context) {
 
 	rows, err := db.Query(`
 		SELECT cs.id, cs.club_id, cs.student_id, cs.status, cs.created_at, cs.updated_at,
-		       stu_u.first_name || ' ' || stu_u.last_name as student_name,
+		       stu_u.last_name || ' ' || stu_u.first_name as student_name,
 		       cls.name as class_name
 		FROM club_students cs
 		JOIN students s ON cs.student_id = s.id
@@ -807,7 +807,7 @@ func (h *ClubHandler) GetClubGradesByDate(c *gin.Context) {
 
 	rows, err := db.Query(`
 		SELECT cg.id, cg.club_id, cg.student_id,
-		       stu_u.first_name || ' ' || stu_u.last_name as student_name,
+		       stu_u.last_name || ' ' || stu_u.first_name as student_name,
 		       cls.name as class_name,
 		       cg.lesson_date, cg.attendance, cg.score_value, cg.feedback, cg.graded_by, cg.created_at, cg.updated_at
 		FROM club_grades cg
@@ -888,7 +888,7 @@ func (h *ClubHandler) GetStudentClubGrades(c *gin.Context) {
 
 	rows, err := db.Query(`
 		SELECT cg.id, cg.club_id, clb.name as club_name, cg.student_id,
-		       stu_u.first_name || ' ' || stu_u.last_name as student_name,
+		       stu_u.last_name || ' ' || stu_u.first_name as student_name,
 		       cls.name as class_name,
 		       cg.lesson_date, cg.attendance, cg.score_value, cg.feedback, cg.graded_by, cg.created_at, cg.updated_at
 		FROM club_grades cg
@@ -950,7 +950,7 @@ func (h *ClubHandler) GetClubGradeHistory(c *gin.Context) {
 			to_char(cg.lesson_date, 'YYYY-MM-DD') as date_str,
 			cg.id,
 			cg.student_id,
-			COALESCE(u.first_name || ' ' || u.last_name, '') as student_name,
+			COALESCE(u.last_name || ' ' || u.first_name, '') as student_name,
 			COALESCE(cls.name, '') as class_name,
 			COALESCE(cg.attendance, 'PRESENT') as attendance,
 			cg.score_value,

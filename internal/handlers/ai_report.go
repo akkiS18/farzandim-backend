@@ -620,7 +620,7 @@ func (h *AIReportHandler) GetAIReportsByWeek(c *gin.Context) {
 
 	query := `
 		SELECT r.id, r.student_id, r.year, r.week_number, r.start_date::text, r.end_date::text, r.report_text, r.summary_json, r.created_at,
-		       u.first_name || ' ' || u.last_name as student_name, COALESCE(c.name, 'Sinf belgilanmagan') as class_name
+		       u.last_name || ' ' || u.first_name as student_name, COALESCE(c.name, 'Sinf belgilanmagan') as class_name
 		FROM ai_weekly_reports r
 		JOIN students s ON r.student_id = s.id
 		JOIN users u ON s.user_id = u.id
