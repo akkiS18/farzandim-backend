@@ -231,22 +231,16 @@ func FindSchoolIDBySubdomain(subdomain string) (string, error) {
 	cleanSub := sanitizeSubdomain(subdomain)
 	searchName := "db_f_" + cleanSub
 
-	rows, err := CentralDB.Query("SELECT id, db_connection_string FROM schools WHERE is_deleted = false ORDER BY created_at ASC")
+	rows, err := CentralDB.Query("SELECT id, name, db_connection_string FROM schools WHERE is_deleted = false ORDER BY created_at ASC")
 	if err != nil {
 		return "", err
 	}
 	defer rows.Close()
 
-	var firstSchoolID string
-
 	for rows.Next() {
-		var id, connStr string
-		if err := rows.Scan(&id, &connStr); err != nil {
+		var id, name, connStr string
+		if err := rows.Scan(&id, &name, &connStr); err != nil {
 			continue
-		}
-
-		if firstSchoolID == "" {
-			firstSchoolID = id
 		}
 
 		u, err := url.Parse(connStr)
@@ -255,16 +249,20 @@ func FindSchoolIDBySubdomain(subdomain string) (string, error) {
 		}
 		dbName := strings.TrimPrefix(u.Path, "/")
 
-		// Match db_f_test_school == db_f_test_school, or without db_f_ prefix, or cleanSub
+		// Match by db_name (db_f_test_school == db_f_test_school, or cleanSub without prefix)
 		if dbName == searchName || dbName == cleanSub || strings.TrimPrefix(dbName, "db_f_") == cleanSub {
+			return id, nil
+		}
+
+		// Also match by school name (case-insensitive, normalized)
+		normalizedName := sanitizeSubdomain(name)
+		if normalizedName == cleanSub {
 			return id, nil
 		}
 	}
 
-	if firstSchoolID != "" {
-		return firstSchoolID, nil
-	}
-
+	// Do NOT fall back to firstSchoolID — unknown subdomains must fail with a clear error.
+	// Previously this fallback caused any unrecognized subdomain to silently route to test_school.
 	return "", fmt.Errorf("no school database found matching subdomain: %s", subdomain)
 }
 
