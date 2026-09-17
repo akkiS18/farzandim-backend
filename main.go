@@ -142,7 +142,8 @@ func main() {
 		superAdminGroup.POST("/settings/change-password", authHandler.ChangePassword)
 	}
 
-	// Public refresh token endpoint
+	// Public endpoints (Schools discovery & Refresh token)
+	r.GET("/api/public/schools", schoolHandler.ListPublicSchools)
 	r.POST("/api/schools/refresh", authHandler.RefreshToken)
 
 	// Tenant APIs (Public endpoints like login, routed by X-School-ID header)

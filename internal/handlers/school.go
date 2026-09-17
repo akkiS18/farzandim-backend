@@ -3,7 +3,9 @@ package handlers
 import (
 	"database/sql"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/farzandim/backend/internal/audit"
 	"github.com/farzandim/backend/internal/db"
@@ -88,6 +90,48 @@ func (h *SchoolHandler) ListSchools(c *gin.Context) {
 			return
 		}
 		schools = append(schools, s)
+	}
+
+	c.JSON(http.StatusOK, schools)
+}
+
+// PublicSchoolDto represents safe public information about a school for tenant selection
+type PublicSchoolDto struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Subdomain string `json:"subdomain"`
+}
+
+// ListPublicSchools returns active schools with safe public info for mobile/web login
+func (h *SchoolHandler) ListPublicSchools(c *gin.Context) {
+	rows, err := db.CentralDB.Query("SELECT id, name, db_connection_string FROM schools WHERE is_deleted = false ORDER BY name ASC")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query schools list", "details": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	schools := []PublicSchoolDto{}
+	for rows.Next() {
+		var id, name, connStr string
+		if err := rows.Scan(&id, &name, &connStr); err != nil {
+			continue
+		}
+
+		subdomain := ""
+		if u, err := url.Parse(connStr); err == nil {
+			dbName := strings.TrimPrefix(u.Path, "/")
+			subdomain = strings.TrimPrefix(dbName, "db_f_")
+		}
+		if subdomain == "" {
+			subdomain = id
+		}
+
+		schools = append(schools, PublicSchoolDto{
+			ID:        id,
+			Name:      name,
+			Subdomain: subdomain,
+		})
 	}
 
 	c.JSON(http.StatusOK, schools)
