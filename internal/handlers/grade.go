@@ -390,7 +390,7 @@ func (h *GradeHandler) ListGrades(c *gin.Context) {
 	// Base SQL Query for retrieval with rich metadata
 	query := `
 		SELECT g.id, g.student_id, u_student.last_name || ' ' || u_student.first_name as student_name, st.class_id, cl.name as class_name,
-		       g.subject_id, s.name as subject_name, g.teacher_id, u_teacher.first_name || ' ' || u_teacher.last_name as teacher_name,
+		       g.subject_id, s.name as subject_name, g.teacher_id, COALESCE(u_teacher.first_name || ' ' || u_teacher.last_name, 'O''qituvchi') as teacher_name,
 		       g.value, g.numeric_value, g.grade_date, g.status, g.approved_by_parent, g.grading_system_id,
 		       g.grade_type, g.grade_category, g.lesson_number, g.created_at, g.updated_at
 		FROM grades g
@@ -398,7 +398,7 @@ func (h *GradeHandler) ListGrades(c *gin.Context) {
 		JOIN users u_student ON st.user_id = u_student.id AND u_student.is_deleted = false
 		JOIN classes cl ON st.class_id = cl.id AND cl.is_deleted = false
 		JOIN subjects s ON g.subject_id = s.id AND s.is_deleted = false
-		JOIN users u_teacher ON g.teacher_id = u_teacher.id AND u_teacher.is_deleted = false
+		LEFT JOIN users u_teacher ON g.teacher_id = u_teacher.id
 		WHERE g.is_deleted = false`
 
 	var args []interface{}
@@ -1330,7 +1330,8 @@ func (h *GradeHandler) BatchCreateGrades(c *gin.Context) {
 }
 
 type ChangeGradeStatusRequest struct {
-	MarkUIDs []int  `json:"mark_uids" binding:"required"`
+	MarkUIDs []int  `json:"mark_uids"`
+	GradeIDs []int  `json:"grade_ids"`
 	Status   string `json:"status" binding:"required"`
 }
 
@@ -1338,6 +1339,15 @@ func (h *GradeHandler) ChangeGradeStatus(c *gin.Context) {
 	var req ChangeGradeStatusRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid fields", "details": err.Error()})
+		return
+	}
+
+	if len(req.MarkUIDs) == 0 && len(req.GradeIDs) > 0 {
+		req.MarkUIDs = req.GradeIDs
+	}
+
+	if len(req.MarkUIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid fields", "details": "mark_uids or grade_ids is required"})
 		return
 	}
 
