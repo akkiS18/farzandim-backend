@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -237,10 +238,16 @@ func FindSchoolIDBySubdomain(subdomain string) (string, error) {
 	}
 	defer rows.Close()
 
+	var firstSchoolID string
+
 	for rows.Next() {
 		var id, name, connStr string
 		if err := rows.Scan(&id, &name, &connStr); err != nil {
 			continue
+		}
+
+		if firstSchoolID == "" {
+			firstSchoolID = id
 		}
 
 		u, err := url.Parse(connStr)
@@ -261,9 +268,67 @@ func FindSchoolIDBySubdomain(subdomain string) (string, error) {
 		}
 	}
 
-	// Do NOT fall back to firstSchoolID — unknown subdomains must fail with a clear error.
-	// Previously this fallback caused any unrecognized subdomain to silently route to test_school.
+	// For localhost development, fallback to first available school
+	if (subdomain == "localhost" || cleanSub == "localhost") && firstSchoolID != "" {
+		return firstSchoolID, nil
+	}
+
 	return "", fmt.Errorf("no school database found matching subdomain: %s", subdomain)
+}
+
+// FindSchoolIDByUserIdentifier searches all active school databases for a user matching the phone number or passport
+func FindSchoolIDByUserIdentifier(identifier string) (string, error) {
+	reg := regexp.MustCompile("[^0-9]+")
+	digits := reg.ReplaceAllString(identifier, "")
+	cleanDoc := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(identifier), " ", ""))
+
+	if digits == "" && cleanDoc == "" {
+		return "", fmt.Errorf("empty identifier provided")
+	}
+
+	rows, err := CentralDB.Query("SELECT id FROM schools WHERE is_deleted = false ORDER BY created_at ASC")
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	var schoolIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			schoolIDs = append(schoolIDs, id)
+		}
+	}
+
+	var matchedSchoolID string
+	var matchCount int
+
+	for _, sID := range schoolIDs {
+		tenantDB, err := TenantConnManager.GetTenantDB(sID)
+		if err != nil {
+			continue
+		}
+		var exists bool
+		query := `SELECT EXISTS(
+			SELECT 1 FROM users 
+			WHERE (
+				($1 != '' AND (phone = $1 OR REGEXP_REPLACE(phone, '\D', '', 'g') = $1))
+				OR ($2 != '' AND (UPPER(TRIM(document_no)) = $2 OR UPPER(TRIM(passport)) = $2))
+			) AND is_deleted = false
+		)`
+		if err := tenantDB.QueryRow(query, digits, cleanDoc).Scan(&exists); err == nil && exists {
+			matchedSchoolID = sID
+			matchCount++
+		}
+	}
+
+	if matchCount == 1 {
+		return matchedSchoolID, nil
+	} else if matchCount > 1 {
+		return "", fmt.Errorf("foydalanuvchi bir nechta maktabda mavjud, iltimos maktabni tanlang")
+	}
+
+	return "", fmt.Errorf("ushbu raqam yoki pasport bo'yicha hech qaysi maktabda foydalanuvchi topilmadi")
 }
 
 func sanitizeSubdomain(subdomain string) string {

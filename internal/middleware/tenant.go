@@ -1,6 +1,9 @@
 package middleware
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -30,6 +33,30 @@ func TenantMiddleware() gin.HandlerFunc {
 				schoolID = resolvedID
 			} else {
 				log.Printf("[TENANT RESOLUTION WARNING] Subdomain '%s' resolution error: %v", subdomain, err)
+			}
+		}
+
+		// 3. If still empty and this is a login request, try auto-resolving school by user identifier (phone or passport)
+		if schoolID == "" && strings.HasSuffix(c.Request.URL.Path, "/login") {
+			bodyBytes, err := io.ReadAll(c.Request.Body)
+			if err == nil && len(bodyBytes) > 0 {
+				c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // restore body for downstream handlers
+				var loginReq struct {
+					Phone      string `json:"phone"`
+					DocumentNo string `json:"document_no"`
+				}
+				if json.Unmarshal(bodyBytes, &loginReq) == nil {
+					identifier := loginReq.Phone
+					if identifier == "" {
+						identifier = loginReq.DocumentNo
+					}
+					if identifier != "" {
+						if autoSchoolID, err := db.FindSchoolIDByUserIdentifier(identifier); err == nil && autoSchoolID != "" {
+							schoolID = autoSchoolID
+							log.Printf("[TENANT AUTO-RESOLVE] User '%s' auto-routed to school ID '%s'", identifier, autoSchoolID)
+						}
+					}
+				}
 			}
 		}
 
