@@ -914,6 +914,41 @@ func (h *ScheduleHandler) GetSchedulePeriods(c *gin.Context) {
 	c.JSON(http.StatusOK, list)
 }
 
+// parseFlexibleScheduleDate parses date strings in multiple formats (ISO, DD.MM.YYYY, DD/MM/YYYY, or Excel serial numbers)
+func parseFlexibleScheduleDate(val string) (time.Time, error) {
+	s := strings.TrimSpace(val)
+	if s == "" {
+		return time.Time{}, fmt.Errorf("sana ko'rsatilmagan")
+	}
+
+	// 1. Try numeric Excel serial date (e.g. 45536, 46266)
+	if f, err := strconv.ParseFloat(s, 64); err == nil && f > 20000 && f < 100000 {
+		days := int(f)
+		baseDate := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
+		return baseDate.AddDate(0, 0, days), nil
+	}
+
+	// 2. Try common date string formats
+	formats := []string{
+		"2006-01-02",
+		"02.01.2006",
+		"02/01/2006",
+		"2006.01.02",
+		"2006/01/02",
+		"02-01-2006",
+		"2006-01-02T15:04:05Z07:00",
+		"2006-01-02 15:04:05",
+	}
+
+	for _, layout := range formats {
+		if t, err := time.Parse(layout, s); err == nil {
+			return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC), nil
+		}
+	}
+
+	return time.Time{}, fmt.Errorf("noto'g'ri sana formati: '%s' (kutilgan format: YYYY-MM-DD yoki DD.MM.YYYY)", s)
+}
+
 // ExportScheduleTemplate generates an Excel template matching the exact format:
 // hafta kuni | dars nome | sinf | fan | start_date | end_date
 func (h *ScheduleHandler) ExportScheduleTemplate(c *gin.Context) {
@@ -1097,21 +1132,31 @@ func (h *ScheduleHandler) BatchImportSchedulesSmart(c *gin.Context) {
 			return
 		}
 
-		startD := strings.TrimSpace(item.StartDate)
-		if startD == "" || strings.Contains(startD, "sentabr") {
-			startD = "2026-09-01"
+		startT, err := parseFlexibleScheduleDate(item.StartDate)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": fmt.Sprintf("%d-qatorda boshlanish sanasi xato: %v", idx+1, err),
+			})
+			return
 		}
-		endD := strings.TrimSpace(item.EndDate)
-		if endD == "" || strings.Contains(endD, "oktabr") || strings.Contains(endD, "may") {
-			endD = "2026-10-30"
+		endT, err := parseFlexibleScheduleDate(item.EndDate)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": fmt.Sprintf("%d-qatorda tugash sanasi xato: %v", idx+1, err),
+			})
+			return
 		}
 
-		if _, pErr := time.Parse("2006-01-02", startD); pErr != nil {
-			startD = "2026-09-01"
+		if startT.After(endT) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": fmt.Sprintf("%d-qatorda boshlanish sanasi (%s) tugash sanasidan (%s) keyin bo'lishi mumkin emas!",
+					idx+1, startT.Format("2006-01-02"), endT.Format("2006-01-02")),
+			})
+			return
 		}
-		if _, pErr := time.Parse("2006-01-02", endD); pErr != nil {
-			endD = "2027-05-31"
-		}
+
+		startD := startT.Format("2006-01-02")
+		endD := endT.Format("2006-01-02")
 
 		processedList = append(processedList, ProcessedItem{
 			ClassID:      classID,
@@ -1131,20 +1176,34 @@ func (h *ScheduleHandler) BatchImportSchedulesSmart(c *gin.Context) {
 			a := processedList[i]
 			b := processedList[j]
 
-			if a.ClassID != b.ClassID && a.DayOfWeek == b.DayOfWeek && a.LessonNumber == b.LessonNumber {
+			// Only check same weekday and lesson hour
+			if a.DayOfWeek == b.DayOfWeek && a.LessonNumber == b.LessonNumber {
+				// Intervals overlap if (startA <= endB) && (endA >= startB)
 				if (a.StartDate <= b.EndDate) && (a.EndDate >= b.StartDate) {
-					var teacherA, teacherB int
-					_ = tx.QueryRow("SELECT teacher_id FROM class_teachers WHERE class_id = $1 AND subject_id = $2 AND is_deleted = false LIMIT 1", a.ClassID, a.SubjectID).Scan(&teacherA)
-					_ = tx.QueryRow("SELECT teacher_id FROM class_teachers WHERE class_id = $1 AND subject_id = $2 AND is_deleted = false LIMIT 1", b.ClassID, b.SubjectID).Scan(&teacherB)
-
-					if teacherA > 0 && teacherB > 0 && teacherA == teacherB {
-						var tName string
-						_ = tx.QueryRow("SELECT first_name || ' ' || last_name FROM users WHERE id = $1", teacherA).Scan(&tName)
+					// 4a. Same Class Conflict (Two subjects scheduled at the same time in the same class)
+					if a.ClassID == b.ClassID {
 						c.JSON(http.StatusConflict, gin.H{
-							"error": fmt.Sprintf("DARS JADVALI ZIDDIYATI! O'qituvchi '%s' %s kuni %d-dars soatida bir vaqtning o'zida ham '%s', ham '%s' sinflariga dars o'tishi kiritilgan!",
-								tName, dayNames[a.DayOfWeek], a.LessonNumber, a.ClassName, b.ClassName),
+							"error": fmt.Sprintf("DARS JADVALI ZIDDIYATI! '%s' sinfida %s kuni %d-dars soatida bir vaqtning o'zida ham '%s' (%s — %s), ham '%s' (%s — %s) fanlari kiritilgan!",
+								a.ClassName, dayNames[a.DayOfWeek], a.LessonNumber, a.SubjectName, a.StartDate, a.EndDate, b.SubjectName, b.StartDate, b.EndDate),
 						})
 						return
+					}
+
+					// 4b. Teacher Conflict (Same teacher assigned to two different classes at the same time)
+					if a.ClassID != b.ClassID {
+						var teacherA, teacherB int
+						_ = tx.QueryRow("SELECT teacher_id FROM class_teachers WHERE class_id = $1 AND subject_id = $2 AND is_deleted = false LIMIT 1", a.ClassID, a.SubjectID).Scan(&teacherA)
+						_ = tx.QueryRow("SELECT teacher_id FROM class_teachers WHERE class_id = $1 AND subject_id = $2 AND is_deleted = false LIMIT 1", b.ClassID, b.SubjectID).Scan(&teacherB)
+
+						if teacherA > 0 && teacherB > 0 && teacherA == teacherB {
+							var tName string
+							_ = tx.QueryRow("SELECT first_name || ' ' || last_name FROM users WHERE id = $1", teacherA).Scan(&tName)
+							c.JSON(http.StatusConflict, gin.H{
+								"error": fmt.Sprintf("DARS JADVALI ZIDDIYATI! O'qituvchi '%s' %s kuni %d-dars soatida bir vaqtning o'zida ham '%s', ham '%s' sinflariga dars o'tishi kiritilgan (Sana: %s — %s va %s — %s ustma-ust tushyapti)!",
+									tName, dayNames[a.DayOfWeek], a.LessonNumber, a.ClassName, b.ClassName, a.StartDate, a.EndDate, b.StartDate, b.EndDate),
+							})
+							return
+						}
 					}
 				}
 			}
@@ -1153,11 +1212,32 @@ func (h *ScheduleHandler) BatchImportSchedulesSmart(c *gin.Context) {
 
 	// 5. Database Existing Schedule Overlap Conflict Check
 	for _, item := range processedList {
-		var existingClassID int
-		var existingClassName, existingTeacherName string
+		// 5a. Check if the SAME class already has an existing schedule for this slot with overlapping dates (and DIFFERENT start_date, since exact start_date is updated via UPSERT)
+		var existSameSubName, existSameStart, existSameEnd string
+		errSame := tx.QueryRow(`
+			SELECT s.name, to_char(cs.start_date, 'YYYY-MM-DD'), to_char(cs.end_date, 'YYYY-MM-DD')
+			FROM class_schedules cs
+			JOIN subjects s ON cs.subject_id = s.id
+			WHERE cs.class_id = $1 AND cs.day_of_week = $2 AND cs.lesson_number = $3 AND cs.is_deleted = false
+			  AND cs.start_date <> $4::date
+			  AND ($4::date <= cs.end_date AND $5::date >= cs.start_date)
+			LIMIT 1
+		`, item.ClassID, item.DayOfWeek, item.LessonNumber, item.StartDate, item.EndDate).Scan(&existSameSubName, &existSameStart, &existSameEnd)
 
-		err := tx.QueryRow(`
-			SELECT cs.class_id, c.name, COALESCE(u.first_name || ' ' || u.last_name, '')
+		if errSame == nil && existSameSubName != "" {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": fmt.Sprintf("BAZADAGI JADVAL BILAN ZIDDIYAT! '%s' sinfida %s kuni %d-dars soatida allaqachon boshqa davrdagi '%s' fani mavjud (%s — %s). Yangi kiritilayotgan sana (%s — %s) u bilan ustma-ust tushib qolmoqda!",
+					item.ClassName, dayNames[item.DayOfWeek], item.LessonNumber, existSameSubName, existSameStart, existSameEnd, item.StartDate, item.EndDate),
+			})
+			return
+		}
+
+		// 5b. Check if the TEACHER of this subject is already assigned to ANOTHER class during this overlapping period
+		var existingClassID int
+		var existingClassName, existingTeacherName, existTStart, existTEnd string
+
+		errTeacher := tx.QueryRow(`
+			SELECT cs.class_id, c.name, COALESCE(u.first_name || ' ' || u.last_name, ''), to_char(cs.start_date, 'YYYY-MM-DD'), to_char(cs.end_date, 'YYYY-MM-DD')
 			FROM class_schedules cs
 			JOIN classes c ON cs.class_id = c.id
 			LEFT JOIN class_teachers ct ON cs.class_id = ct.class_id AND cs.subject_id = ct.subject_id AND ct.is_deleted = false
@@ -1168,12 +1248,12 @@ func (h *ScheduleHandler) BatchImportSchedulesSmart(c *gin.Context) {
 				  SELECT teacher_id FROM class_teachers WHERE class_id = $1 AND subject_id = $6 AND is_deleted = false
 			  )
 			LIMIT 1
-		`, item.ClassID, item.DayOfWeek, item.LessonNumber, item.StartDate, item.EndDate, item.SubjectID).Scan(&existingClassID, &existingClassName, &existingTeacherName)
+		`, item.ClassID, item.DayOfWeek, item.LessonNumber, item.StartDate, item.EndDate, item.SubjectID).Scan(&existingClassID, &existingClassName, &existingTeacherName, &existTStart, &existTEnd)
 
-		if err == nil && existingClassID > 0 {
+		if errTeacher == nil && existingClassID > 0 {
 			c.JSON(http.StatusConflict, gin.H{
-				"error": fmt.Sprintf("BAZADAGI JADVAL BILAN ZIDDIYAT! O'qituvchi '%s' %s kuni %d-dars soatida allaqachon '%s' sinfiga darsga biriktirilgan!",
-					existingTeacherName, dayNames[item.DayOfWeek], item.LessonNumber, existingClassName),
+				"error": fmt.Sprintf("BAZADAGI JADVAL BILAN ZIDDIYAT! O'qituvchi '%s' %s kuni %d-dars soatida (%s — %s) allaqachon '%s' sinfiga darsga biriktirilgan!",
+					existingTeacherName, dayNames[item.DayOfWeek], item.LessonNumber, existTStart, existTEnd, existingClassName),
 			})
 			return
 		}
@@ -1186,7 +1266,7 @@ func (h *ScheduleHandler) BatchImportSchedulesSmart(c *gin.Context) {
 			INSERT INTO class_schedules (class_id, day_of_week, lesson_number, subject_id, start_date, end_date, is_deleted)
 			VALUES ($1, $2, $3, $4, $5, $6, false)
 			ON CONFLICT (class_id, day_of_week, lesson_number, start_date)
-			DO UPDATE SET subject_id = EXCLUDED.subject_id, end_date = EXCLUDED.end_date, is_deleted = false, updated_at = NOW()
+			DO UPDATE SET subject_id = EXCLUDED.subject_id, end_date = EXCLUDED.end_date, is_deleted = false, deleted_at = NULL, updated_at = NOW()
 		`, item.ClassID, item.DayOfWeek, item.LessonNumber, item.SubjectID, item.StartDate, item.EndDate)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{

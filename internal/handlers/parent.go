@@ -124,12 +124,13 @@ func (h *ParentHandler) CreateAndLinkParent(c *gin.Context) {
 
 	cleanPhone := utils.NormalizePhone(req.Phone)
 
-	// Check if parent user already exists by phone if not found by passport
-	if !found {
+	// Check if parent user already exists by phone only if passport was NOT provided
+	if !found && normalizedPassport == nil && cleanPhone != "" {
 		err = tx.QueryRow(`
 			SELECT u.id, r.name FROM users u
 			JOIN roles r ON u.role_id = r.id
 			WHERE u.phone = $1 AND u.is_deleted = false
+			LIMIT 1
 		`, cleanPhone).Scan(&parentID, &existingRoleName)
 		if err == nil {
 			found = true
@@ -438,6 +439,256 @@ func (h *ParentHandler) UnlinkParent(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Ota-ona o'quvchidan muvaffaqiyatli ajratildi"})
+}
+
+// DeleteParentPermanent permanently deletes a parent user from the database and removes all associations
+func (h *ParentHandler) DeleteParentPermanent(c *gin.Context) {
+	parentIDStr := c.Param("parent_id")
+	parentID, err := strconv.Atoi(parentIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid parent ID"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	userRoleVal, _ := c.Get("role")
+	userRole := userRoleVal.(string)
+	userIDVal, _ := c.Get("userID")
+	userIDStr := userIDVal.(string)
+	currentUserID, _ := strconv.Atoi(userIDStr)
+
+	// Authorization check: Admin or Main Teacher of one of the parent's children's classes
+	if userRole != "ADMIN" {
+		if userRole != "MAIN_TEACHER" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: faqat admin yoki sinf rahbari ota-onani o'chira oladi"})
+			return
+		}
+		var isAuthorized bool
+		err = dbConn.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM student_parents sp
+				JOIN students s ON sp.student_id = s.id
+				JOIN class_teachers ct ON s.class_id = ct.class_id
+				WHERE sp.parent_id = $1 AND ct.teacher_id = $2 AND ct.is_main_teacher = true AND ct.is_deleted = false
+			)
+		`, parentID, currentUserID).Scan(&isAuthorized)
+		if err != nil || !isAuthorized {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: siz ushbu ota-onaning farzandlariga sinf rahbari emassiz"})
+			return
+		}
+	}
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to begin transaction", "details": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	// Verify user exists and has PARENT role
+	var roleName string
+	var firstName, lastName string
+	err = tx.QueryRow(`
+		SELECT r.name, u.first_name, u.last_name
+		FROM users u
+		JOIN roles r ON u.role_id = r.id
+		WHERE u.id = $1
+	`, parentID).Scan(&roleName, &firstName, &lastName)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Ota-ona topilmadi"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify parent user", "details": err.Error()})
+		}
+		return
+	}
+
+	if roleName != "PARENT" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Faqat PARENT roldagi foydalanuvchini ushbu amal orqali o'chirish mumkin"})
+		return
+	}
+
+	// 1. Delete relations
+	_, _ = tx.Exec("DELETE FROM student_parents WHERE parent_id = $1", parentID)
+	_, _ = tx.Exec("DELETE FROM parent_access_codes WHERE user_id = $1", parentID)
+	_, _ = tx.Exec("DELETE FROM menu_comments WHERE parent_id = $1", parentID)
+	_, _ = tx.Exec("DELETE FROM announcement_poll_votes WHERE user_id = $1", parentID)
+
+	// 2. Hard delete from users
+	_, err = tx.Exec("DELETE FROM users WHERE id = $1 AND role_id = (SELECT id FROM roles WHERE name = 'PARENT')", parentID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Ota-onani bazadan o'chirishda xatolik", "details": err.Error()})
+		return
+	}
+
+	// Audit Log
+	audit.LogChange(c, tx, audit.LogData{
+		Action:    "HARD_DELETE",
+		TableName: "users",
+		RecordID:  strconv.Itoa(parentID),
+		OldValues: map[string]interface{}{
+			"id":         parentID,
+			"first_name": firstName,
+			"last_name":  lastName,
+			"role":       "PARENT",
+		},
+	})
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit delete transaction"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Ota-ona '%s %s' bazadan butunlay o'chirildi", firstName, lastName)})
+}
+
+type BatchUnlinkItem struct {
+	StudentID int `json:"student_id"`
+	ParentID  int `json:"parent_id"`
+}
+
+type BatchUnlinkRequest struct {
+	Items []BatchUnlinkItem `json:"items"`
+}
+
+// BatchUnlinkParents unlinks multiple student-parent connections
+func (h *ParentHandler) BatchUnlinkParents(c *gin.Context) {
+	var req BatchUnlinkRequest
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.Items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Ajratish uchun elementlar topilmadi"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	userRoleVal, _ := c.Get("role")
+	userRole := userRoleVal.(string)
+	userIDVal, _ := c.Get("userID")
+	userIDStr := userIDVal.(string)
+	currentUserID, _ := strconv.Atoi(userIDStr)
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to begin transaction"})
+		return
+	}
+	defer tx.Rollback()
+
+	successCount := 0
+	for _, it := range req.Items {
+		if it.StudentID <= 0 || it.ParentID <= 0 {
+			continue
+		}
+
+		if userRole != "ADMIN" {
+			var isMain bool
+			_ = tx.QueryRow(`
+				SELECT EXISTS(
+					SELECT 1 FROM students s
+					JOIN class_teachers ct ON s.class_id = ct.class_id
+					WHERE s.id = $1 AND ct.teacher_id = $2 AND ct.is_main_teacher = true AND ct.is_deleted = false
+				)
+			`, it.StudentID, currentUserID).Scan(&isMain)
+			if !isMain {
+				continue
+			}
+		}
+
+		res, err := tx.Exec("DELETE FROM student_parents WHERE student_id = $1 AND parent_id = $2", it.StudentID, it.ParentID)
+		if err == nil {
+			if rowsAffected, _ := res.RowsAffected(); rowsAffected > 0 {
+				successCount++
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit batch unlink"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("%d ta ota-ona muvaffaqiyatli ajratildi", successCount),
+		"count":   successCount,
+	})
+}
+
+type BatchDeleteParentsRequest struct {
+	ParentIDs []int `json:"parent_ids"`
+}
+
+// BatchDeleteParentsPermanent permanently deletes multiple parents from users table
+func (h *ParentHandler) BatchDeleteParentsPermanent(c *gin.Context) {
+	var req BatchDeleteParentsRequest
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.ParentIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "O'chirish uchun ota-onalar ID lari kiritilmadi"})
+		return
+	}
+
+	tenantDBVal, _ := c.Get("tenantDB")
+	dbConn := tenantDBVal.(*sql.DB)
+
+	userRoleVal, _ := c.Get("role")
+	userRole := userRoleVal.(string)
+	userIDVal, _ := c.Get("userID")
+	userIDStr := userIDVal.(string)
+	currentUserID, _ := strconv.Atoi(userIDStr)
+
+	tx, err := dbConn.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to begin transaction"})
+		return
+	}
+	defer tx.Rollback()
+
+	successCount := 0
+	for _, pId := range req.ParentIDs {
+		if pId <= 0 {
+			continue
+		}
+
+		if userRole != "ADMIN" {
+			var isAuthorized bool
+			_ = tx.QueryRow(`
+				SELECT EXISTS(
+					SELECT 1 FROM student_parents sp
+					JOIN students s ON sp.student_id = s.id
+					JOIN class_teachers ct ON s.class_id = ct.class_id
+					WHERE sp.parent_id = $1 AND ct.teacher_id = $2 AND ct.is_main_teacher = true AND ct.is_deleted = false
+				)
+			`, pId, currentUserID).Scan(&isAuthorized)
+			if !isAuthorized {
+				continue
+			}
+		}
+
+		// Delete relations
+		_, _ = tx.Exec("DELETE FROM student_parents WHERE parent_id = $1", pId)
+		_, _ = tx.Exec("DELETE FROM parent_access_codes WHERE user_id = $1", pId)
+		_, _ = tx.Exec("DELETE FROM menu_comments WHERE parent_id = $1", pId)
+		_, _ = tx.Exec("DELETE FROM announcement_poll_votes WHERE user_id = $1", pId)
+
+		// Hard delete from users
+		res, dErr := tx.Exec("DELETE FROM users WHERE id = $1 AND role_id = (SELECT id FROM roles WHERE name = 'PARENT')", pId)
+		if dErr == nil {
+			if rowsAffected, _ := res.RowsAffected(); rowsAffected > 0 {
+				successCount++
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit batch delete"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("%d ta ota-ona bazadan butunlay o'chirildi", successCount),
+		"count":   successCount,
+	})
 }
 
 // UpdateParentRequest holds editable fields for a parent user

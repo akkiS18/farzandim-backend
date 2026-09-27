@@ -1245,14 +1245,40 @@ func (h *ImportHandler) ImportParents(c *gin.Context) {
 			continue
 		}
 
-		// 3. Check if parent user already exists by phone
+		passport := getCell(row, "passport")
+		var passportPtr *string
+		if passport != "" {
+			passportPtr = &passport
+		}
+
+		var normalizedPassport *string
+		if passportPtr != nil && *passportPtr != "" {
+			norm := NormalizeDocumentNo(*passportPtr)
+			normalizedPassport = &norm
+		}
+
+		// 3. Check if parent user already exists (by passport first, or phone if passport not provided)
 		var parentID int
 		var existingRoleName string
-		err = tx.QueryRow(`
-			SELECT u.id, r.name FROM users u
-			JOIN roles r ON u.role_id = r.id
-			WHERE u.phone = $1 AND u.is_deleted = false
-		`, nomer).Scan(&parentID, &existingRoleName)
+
+		if normalizedPassport != nil {
+			err = tx.QueryRow(`
+				SELECT u.id, r.name FROM users u
+				JOIN roles r ON u.role_id = r.id
+				WHERE r.name = 'PARENT' AND u.is_deleted = false
+				  AND (UPPER(TRIM(u.passport)) = UPPER($1) OR UPPER(TRIM(u.document_no)) = UPPER($1))
+				LIMIT 1
+			`, *normalizedPassport).Scan(&parentID, &existingRoleName)
+		} else if nomer != "" {
+			err = tx.QueryRow(`
+				SELECT u.id, r.name FROM users u
+				JOIN roles r ON u.role_id = r.id
+				WHERE u.phone = $1 AND u.is_deleted = false
+				LIMIT 1
+			`, nomer).Scan(&parentID, &existingRoleName)
+		} else {
+			err = sql.ErrNoRows
+		}
 
 		if err != nil && err != sql.ErrNoRows {
 			tx.Rollback()
@@ -1274,18 +1300,6 @@ func (h *ImportHandler) ImportParents(c *gin.Context) {
 			var middleNamePtr *string
 			if parentSharif != "" {
 				middleNamePtr = &parentSharif
-			}
-
-			passport := getCell(row, "passport")
-			var passportPtr *string
-			if passport != "" {
-				passportPtr = &passport
-			}
-
-			var normalizedPassport *string
-			if passportPtr != nil && *passportPtr != "" {
-				norm := NormalizeDocumentNo(*passportPtr)
-				normalizedPassport = &norm
 			}
 
 			insertUserQuery := `
