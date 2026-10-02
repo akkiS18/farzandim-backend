@@ -171,6 +171,7 @@ func main() {
 		authTenantGroup.POST("/classes", middleware.RequireRole("ADMIN"), classHandler.CreateClass)
 		authTenantGroup.PUT("/classes/:id", middleware.RequireRole("ADMIN"), classHandler.UpdateClass)
 		authTenantGroup.DELETE("/classes/:id", middleware.RequireRole("ADMIN"), classHandler.DeleteClass)
+		authTenantGroup.GET("/classes/:id/journal-adjacent", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), scheduleHandler.AdjacentJournalLesson)
 		authTenantGroup.GET("/classes/:id/schedule", scheduleHandler.GetSchedule)
 		authTenantGroup.GET("/classes/:id/schedule-periods", scheduleHandler.GetSchedulePeriods)
 		authTenantGroup.POST("/classes/:id/schedule", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), scheduleHandler.SaveSchedule)
@@ -325,6 +326,7 @@ func main() {
 		authTenantGroup.POST("/change-password", authHandler.ChangePassword)
 		authTenantGroup.POST("/settings/change-password", authHandler.ChangePassword)
 
+		authTenantGroup.POST("/announcements/images", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), announcementHandler.UploadImage)
 		authTenantGroup.GET("/announcements", announcementHandler.ListAnnouncements)
 		authTenantGroup.POST("/announcements", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), announcementHandler.CreateAnnouncement)
 		authTenantGroup.DELETE("/announcements/:id", middleware.RequireRole("ADMIN"), announcementHandler.DeleteAnnouncement)

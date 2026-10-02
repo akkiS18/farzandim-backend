@@ -31,6 +31,7 @@ func NewAnnouncementHandler() *AnnouncementHandler {
 }
 
 type CreateAnnouncementRequest struct {
+	ImageURLs  []string `json:"image_urls"`
 	Title      string   `json:"title" binding:"required"`
 	Content    string   `json:"content" binding:"required"`
 	ClassIDs   []int    `json:"class_ids"`   // Optional.
@@ -91,6 +92,17 @@ func (h *AnnouncementHandler) CreateAnnouncement(c *gin.Context) {
 		return
 	}
 
+	if len(req.ImageURLs) > 10 {
+		c.JSON(400, gin.H{"error": "Ko‘pi bilan 10 ta rasm"})
+		return
+	}
+	for _, url := range req.ImageURLs {
+		var exists bool
+		if err := dbConn.QueryRow("SELECT EXISTS(SELECT 1 FROM announcement_uploads WHERE url=$1 AND uploaded_by=$2)", url, userID).Scan(&exists); err != nil || !exists {
+			c.JSON(400, gin.H{"error": "Rasmni avval yuklang"})
+			return
+		}
+	}
 	roleVal, _ := c.Get("role")
 	role := roleVal.(string)
 
@@ -208,12 +220,16 @@ func (h *AnnouncementHandler) CreateAnnouncement(c *gin.Context) {
 	// Insert Announcement
 	var announcementID int
 	query := `
-		INSERT INTO announcements (title, content, author_id, is_poll) 
-		VALUES ($1, $2, $3, $4) 
+		INSERT INTO announcements (title, content, author_id, is_poll, image_urls)
+		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id, created_at, updated_at
 	`
 	var createdAt, updatedAt time.Time
-	err = tx.QueryRow(query, req.Title, req.Content, userID, req.IsPoll).Scan(&announcementID, &createdAt, &updatedAt)
+	imageJSON, _ := json.Marshal(req.ImageURLs)
+	if req.ImageURLs == nil {
+		imageJSON = []byte("[]")
+	}
+	err = tx.QueryRow(query, req.Title, req.Content, userID, req.IsPoll, imageJSON).Scan(&announcementID, &createdAt, &updatedAt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create announcement", "details": err.Error()})
 		return
@@ -288,6 +304,7 @@ func (h *AnnouncementHandler) CreateAnnouncement(c *gin.Context) {
 	}
 
 	ann := models.Announcement{
+		ImageURLs:   req.ImageURLs,
 		ID:          announcementID,
 		Title:       req.Title,
 		Content:     req.Content,
@@ -370,7 +387,7 @@ func (h *AnnouncementHandler) ListAnnouncements(c *gin.Context) {
 		query := `
 			SELECT DISTINCT a.id, a.title, a.content, a.author_id, 
 				u.first_name || ' ' || u.last_name as author_name, 
-				a.is_poll, a.created_at, a.updated_at
+				a.is_poll, a.created_at, a.updated_at, a.image_urls
 			FROM announcements a
 			JOIN users u ON a.author_id = u.id
 			LEFT JOIN announcement_classes ac ON a.id = ac.announcement_id
@@ -408,7 +425,7 @@ func (h *AnnouncementHandler) ListAnnouncements(c *gin.Context) {
 		query := `
 			SELECT DISTINCT a.id, a.title, a.content, a.author_id, 
 				u.first_name || ' ' || u.last_name as author_name, 
-				a.is_poll, a.created_at, a.updated_at
+				a.is_poll, a.created_at, a.updated_at, a.image_urls
 			FROM announcements a
 			JOIN users u ON a.author_id = u.id
 			LEFT JOIN announcement_classes ac ON a.id = ac.announcement_id
@@ -440,7 +457,7 @@ func (h *AnnouncementHandler) ListAnnouncements(c *gin.Context) {
 		query := `
 			SELECT a.id, a.title, a.content, a.author_id, 
 				u.first_name || ' ' || u.last_name as author_name, 
-				a.is_poll, a.created_at, a.updated_at
+				a.is_poll, a.created_at, a.updated_at, a.image_urls
 			FROM announcements a
 			JOIN users u ON a.author_id = u.id
 			WHERE a.is_deleted = false
@@ -457,12 +474,14 @@ func (h *AnnouncementHandler) ListAnnouncements(c *gin.Context) {
 	announcements := []models.Announcement{}
 	for rows.Next() {
 		var ann models.Announcement
-		err := rows.Scan(&ann.ID, &ann.Title, &ann.Content, &ann.AuthorID, &ann.AuthorName, &ann.IsPoll, &ann.CreatedAt, &ann.UpdatedAt)
+		var imageJSON []byte
+		err := rows.Scan(&ann.ID, &ann.Title, &ann.Content, &ann.AuthorID, &ann.AuthorName, &ann.IsPoll, &ann.CreatedAt, &ann.UpdatedAt, &imageJSON)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan announcement data", "details": err.Error()})
 			return
 		}
 
+		_ = json.Unmarshal(imageJSON, &ann.ImageURLs)
 		if ann.IsPoll {
 			optRows, err := dbConn.Query(`
 				SELECT po.id, po.option_text,

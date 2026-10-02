@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 
 	"github.com/farzandim/backend/internal/db"
 	"github.com/farzandim/backend/internal/models"
@@ -810,6 +811,22 @@ func SendAnnouncementNotification(schoolID string, ann *models.Announcement) {
 	}
 
 	go func() {
+		send := func(chatID interface{}, label string) {
+			if len(ann.ImageURLs) > 0 {
+				if err := sendAnnouncementMedia(token, chatID, ann.ImageURLs, msgText); err != nil {
+					log.Printf("Announcement %d media delivery failed: %v", ann.ID, err)
+					Manager.sendAnnouncementText(token, chatID, msgText+"\n\nRasmlarni portalda ko‘ring.", label, fmt.Sprintf("%s/parents", frontendURL))
+					return
+				}
+				time.Sleep(time.Second)
+				if len(utf16.Encode([]rune(msgText))) <= 1024 {
+					Manager.sendAnnouncementText(token, chatID, "E’lonni portalda ko‘rish:", label, fmt.Sprintf("%s/parents", frontendURL))
+					return
+				}
+			}
+			Manager.sendAnnouncementText(token, chatID, msgText, label, fmt.Sprintf("%s/parents", frontendURL))
+		}
+
 		btnLabel := "🌐 Portalda ko'rish"
 		if ann.IsPoll {
 			btnLabel = "🌐 Portalda ko'rish va ovoz berish"
@@ -817,7 +834,7 @@ func SendAnnouncementNotification(schoolID string, ann *models.Announcement) {
 
 		// 1. Send to configured Telegram Channel / Group if present
 		if telegramChannelID != "" {
-			Manager.sendTextMessageWithButton(token, telegramChannelID, msgText, btnLabel, fmt.Sprintf("%s/parents", frontendURL))
+			send(telegramChannelID, btnLabel)
 			if ann.IsPoll && len(optTexts) >= 2 {
 				time.Sleep(1000 * time.Millisecond) // Respect Telegram 1 msg/sec per chat rule
 				pollQuestion := fmt.Sprintf("📊 %s", ann.Title)
@@ -834,7 +851,7 @@ func SendAnnouncementNotification(schoolID string, ann *models.Announcement) {
 			chatID := int64(0)
 			fmt.Sscanf(tid, "%d", &chatID)
 			if chatID != 0 {
-				Manager.sendTextMessageWithButton(token, chatID, msgText, btnLabel, fmt.Sprintf("%s/parents", frontendURL))
+				send(chatID, btnLabel)
 
 				if ann.IsPoll && len(optTexts) >= 2 {
 					time.Sleep(1000 * time.Millisecond) // Respect Telegram 1 msg/sec per chat rule

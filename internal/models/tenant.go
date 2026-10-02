@@ -11,21 +11,22 @@ type Role struct {
 }
 
 type User struct {
-	ID           int        `json:"id" db:"id"`
-	Email        *string    `json:"email,omitempty" db:"email"`
-	Phone        *string    `json:"phone,omitempty" db:"phone"`
-	PasswordHash string     `json:"-" db:"password_hash"`
-	FirstName    string     `json:"first_name" db:"first_name"`
-	LastName     string     `json:"last_name" db:"last_name"`
-	MiddleName   *string    `json:"middle_name,omitempty" db:"middle_name"`
-	Passport     *string    `json:"passport,omitempty" db:"passport"`
-	DocumentNo   *string    `json:"document_no,omitempty" db:"document_no"`
-	TelegramID   *string    `json:"telegram_id,omitempty" db:"telegram_id"`
-	RoleID       int        `json:"role_id" db:"role_id"`
-	IsDeleted    bool       `json:"is_deleted" db:"is_deleted"`
-	DeletedAt    *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
-	CreatedAt    time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at" db:"updated_at"`
+	PrimarySubjectID *int       `json:"primary_subject_id,omitempty"`
+	ID               int        `json:"id" db:"id"`
+	Email            *string    `json:"email,omitempty" db:"email"`
+	Phone            *string    `json:"phone,omitempty" db:"phone"`
+	PasswordHash     string     `json:"-" db:"password_hash"`
+	FirstName        string     `json:"first_name" db:"first_name"`
+	LastName         string     `json:"last_name" db:"last_name"`
+	MiddleName       *string    `json:"middle_name,omitempty" db:"middle_name"`
+	Passport         *string    `json:"passport,omitempty" db:"passport"`
+	DocumentNo       *string    `json:"document_no,omitempty" db:"document_no"`
+	TelegramID       *string    `json:"telegram_id,omitempty" db:"telegram_id"`
+	RoleID           int        `json:"role_id" db:"role_id"`
+	IsDeleted        bool       `json:"is_deleted" db:"is_deleted"`
+	DeletedAt        *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
+	CreatedAt        time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at" db:"updated_at"`
 }
 
 type Class struct {
@@ -216,6 +217,7 @@ type PollOptionResponse struct {
 }
 
 type Announcement struct {
+	ImageURLs   []string             `json:"image_urls"`
 	ID          int                  `json:"id" db:"id"`
 	Title       string               `json:"title" db:"title"`
 	Content     string               `json:"content" db:"content"`
@@ -304,5 +306,3 @@ type AIInstructionLog struct {
 	ChangeReason      string    `json:"change_reason,omitempty" db:"change_reason"`
 	CreatedAt         time.Time `json:"created_at" db:"created_at"`
 }
-
-

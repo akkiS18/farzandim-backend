@@ -61,9 +61,16 @@ func GenerateAIWeeklyReport(data StudentWeeklyDataContext) (string, error) {
 
 // GenerateAIWeeklyReportWithDB loads dynamic system instructions and max tokens from DB if available
 func GenerateAIWeeklyReportWithDB(dbConn *sql.DB, data StudentWeeklyDataContext) (string, error) {
+	result, err := GenerateAIWeeklyReportResult(dbConn, data)
+	return result.Text, err
+}
+
+type ReportGenerationResult struct{ Text, Source, Model, Reason string }
+
+func GenerateAIWeeklyReportResult(dbConn *sql.DB, data StudentWeeklyDataContext) (ReportGenerationResult, error) {
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
-		return generateFallbackReport(data), nil
+		return ReportGenerationResult{Text: generateFallbackReport(data), Source: "template", Reason: "api_key_missing"}, nil
 	}
 
 	var customInstruction string
@@ -97,19 +104,19 @@ func GenerateAIWeeklyReportWithDB(dbConn *sql.DB, data StudentWeeklyDataContext)
 
 	jsonBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal gemini request: %v", err)
+		return ReportGenerationResult{}, fmt.Errorf("failed to marshal gemini request: %v", err)
 	}
 
 	// Try models in priority order
 	modelsToTry := []string{"gemini-2.5-flash", "gemini-3.6-flash", "gemini-2.0-flash", "gemini-1.5-flash"}
-	var lastStatusErr string
+	lastStatusErr := "empty_response"
 
 	for _, modelName := range modelsToTry {
 		url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", modelName, apiKey)
 
 		resp, err := geminiHTTPClient.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
 		if err != nil {
-			lastStatusErr = err.Error()
+			lastStatusErr = "network_error"
 			continue
 		}
 
@@ -118,20 +125,23 @@ func GenerateAIWeeklyReportWithDB(dbConn *sql.DB, data StudentWeeklyDataContext)
 			if err := json.NewDecoder(resp.Body).Decode(&geminiResp); err == nil {
 				resp.Body.Close()
 				if len(geminiResp.Candidates) > 0 && len(geminiResp.Candidates[0].Content.Parts) > 0 {
-					return geminiResp.Candidates[0].Content.Parts[0].Text, nil
+					text := strings.TrimSpace(geminiResp.Candidates[0].Content.Parts[0].Text)
+					if text != "" {
+						return ReportGenerationResult{Text: text, Source: "ai", Model: modelName}, nil
+					}
 				}
 			}
 			resp.Body.Close()
 		} else {
-			respBytes, _ := io.ReadAll(resp.Body)
+			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
-			lastStatusErr = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(respBytes))
+			lastStatusErr = fmt.Sprintf("http_%d", resp.StatusCode)
 			fmt.Printf("[Gemini Model %s Warning] %s\n", modelName, lastStatusErr)
 		}
 	}
 
 	fmt.Printf("[Gemini API Fallback] Failed calling Gemini API (%s). Using fallback template.\n", lastStatusErr)
-	return generateFallbackReport(data), nil
+	return ReportGenerationResult{Text: generateFallbackReport(data), Source: "template", Reason: lastStatusErr}, nil
 }
 
 func buildGeminiPromptDynamic(customInstruction string, data StudentWeeklyDataContext) string {

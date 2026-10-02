@@ -683,11 +683,11 @@ func (h *AIReportHandler) GetAIReportsByWeek(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"reports":      reports,
-		"total_count":  totalCount,
-		"page":         page,
-		"limit":        limit,
-		"total_pages":  (totalCount + limit - 1) / limit,
+		"reports":     reports,
+		"total_count": totalCount,
+		"page":        page,
+		"limit":       limit,
+		"total_pages": (totalCount + limit - 1) / limit,
 	})
 }
 
@@ -965,7 +965,7 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 		CurrentAverageGrade: currentAvg,
 	}
 
-	reportMarkdown, genErr := services.GenerateAIWeeklyReportWithDB(dbConn, promptContext)
+	generation, genErr := services.GenerateAIWeeklyReportResult(dbConn, promptContext)
 	if genErr != nil {
 		return nil, genErr
 	}
@@ -980,6 +980,9 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 	}
 
 	summaryData := map[string]interface{}{
+		"generation_source":  generation.Source,
+		"generation_model":   generation.Model,
+		"generation_reason":  generation.Reason,
 		"average_grade":      currentAvg,
 		"prev_average_grade": prevAvgGrade,
 		"grade_trend":        trend,
@@ -996,7 +999,7 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 		INSERT INTO ai_weekly_reports (student_id, year, week_number, start_date, end_date, report_text, summary_json)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id, created_at, updated_at`,
-		studentID, year, weekNum, startStr, endStr, reportMarkdown, summaryJSONBytes).
+		studentID, year, weekNum, startStr, endStr, generation.Text, summaryJSONBytes).
 		Scan(&newID, &createdAt, &updatedAt)
 
 	if err != nil {
@@ -1010,7 +1013,7 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 		WeekNumber:  weekNum,
 		StartDate:   startStr,
 		EndDate:     endStr,
-		ReportText:  reportMarkdown,
+		ReportText:  generation.Text,
 		SummaryJSON: summaryData,
 		CreatedAt:   createdAt,
 		UpdatedAt:   updatedAt,

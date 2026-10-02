@@ -36,28 +36,30 @@ type CreateStudentRequest struct {
 }
 
 type CreateTeacherRequest struct {
-	FirstName  string  `json:"first_name" binding:"required"`
-	LastName   string  `json:"last_name" binding:"required"`
-	MiddleName *string `json:"middle_name"`
-	Phone      string  `json:"phone" binding:"required"`
-	RoleName   string  `json:"role" binding:"required"` // MAIN_TEACHER or SUBJECT_TEACHER
-	Password   string  `json:"password" binding:"required"`
-	Email      *string `json:"email"`
+	PrimarySubjectID int     `json:"primary_subject_id" binding:"required,min=1"`
+	FirstName        string  `json:"first_name" binding:"required"`
+	LastName         string  `json:"last_name" binding:"required"`
+	MiddleName       *string `json:"middle_name"`
+	Phone            string  `json:"phone" binding:"required"`
+	RoleName         string  `json:"role" binding:"required"` // MAIN_TEACHER or SUBJECT_TEACHER
+	Password         string  `json:"password" binding:"required"`
+	Email            *string `json:"email"`
 }
 
 type UpdateTeacherRequest struct {
-	FirstName  string  `json:"first_name" binding:"required"`
-	LastName   string  `json:"last_name" binding:"required"`
-	MiddleName *string `json:"middle_name"`
-	Phone      string  `json:"phone"`
-	RoleName   string  `json:"role"`
-	Password   *string `json:"password"`
+	PrimarySubjectID *int    `json:"primary_subject_id"`
+	FirstName        string  `json:"first_name" binding:"required"`
+	LastName         string  `json:"last_name" binding:"required"`
+	MiddleName       *string `json:"middle_name"`
+	Phone            string  `json:"phone"`
+	RoleName         string  `json:"role"`
+	Password         *string `json:"password"`
 }
 
 type AssignTeacherRequest struct {
-	TeacherID     int   `json:"teacher_id" binding:"required"`
-	SubjectID     *int  `json:"subject_id"`
-	IsMainTeacher bool  `json:"is_main_teacher"`
+	TeacherID     int  `json:"teacher_id" binding:"required"`
+	SubjectID     *int `json:"subject_id"`
+	IsMainTeacher bool `json:"is_main_teacher"`
 }
 
 type SubjectRequest struct {
@@ -239,7 +241,6 @@ func (h *TenantUserHandler) CreateClassStudent(c *gin.Context) {
 		IsDeleted:  false,
 	}
 
-
 	// Audit Log
 	audit.LogChange(c, tx, audit.LogData{
 		Action:    "CREATE",
@@ -273,6 +274,11 @@ func (h *TenantUserHandler) CreateTeacher(c *gin.Context) {
 	tenantDBVal, _ := c.Get("tenantDB")
 	dbConn := tenantDBVal.(*sql.DB)
 
+	var subjectExists bool
+	if err := dbConn.QueryRow("SELECT EXISTS(SELECT 1 FROM subjects WHERE id = $1 AND is_deleted = false)", req.PrimarySubjectID).Scan(&subjectExists); err != nil || !subjectExists {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Asosiy fanni tanlang"})
+		return
+	}
 	var roleID int
 	err := dbConn.QueryRow("SELECT id FROM roles WHERE name = $1", req.RoleName).Scan(&roleID)
 	if err != nil {
@@ -295,10 +301,10 @@ func (h *TenantUserHandler) CreateTeacher(c *gin.Context) {
 
 	var userID int
 	insertUserQuery := `
-		INSERT INTO users (first_name, last_name, middle_name, phone, email, password_hash, role_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO users (first_name, last_name, middle_name, phone, email, password_hash, role_id, primary_subject_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id`
-	err = tx.QueryRow(insertUserQuery, req.FirstName, req.LastName, req.MiddleName, req.Phone, req.Email, string(hashedPassword), roleID).Scan(&userID)
+	err = tx.QueryRow(insertUserQuery, req.FirstName, req.LastName, req.MiddleName, req.Phone, req.Email, string(hashedPassword), roleID, req.PrimarySubjectID).Scan(&userID)
 	if err != nil {
 		if strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "users_phone_key") {
 			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Telefon raqam '%s' allaqachon ro'yxatdan o'tgan", req.Phone)})
@@ -309,14 +315,15 @@ func (h *TenantUserHandler) CreateTeacher(c *gin.Context) {
 	}
 
 	newUser := models.User{
-		ID:         userID,
-		FirstName:  req.FirstName,
-		LastName:   req.LastName,
-		MiddleName: req.MiddleName,
-		Phone:      &req.Phone,
-		Email:      req.Email,
-		RoleID:     roleID,
-		IsDeleted:  false,
+		PrimarySubjectID: &req.PrimarySubjectID,
+		ID:               userID,
+		FirstName:        req.FirstName,
+		LastName:         req.LastName,
+		MiddleName:       req.MiddleName,
+		Phone:            &req.Phone,
+		Email:            req.Email,
+		RoleID:           roleID,
+		IsDeleted:        false,
 	}
 
 	audit.LogChange(c, tx, audit.LogData{
@@ -340,9 +347,10 @@ func (h *TenantUserHandler) ListTeachers(c *gin.Context) {
 	dbConn := tenantDBVal.(*sql.DB)
 
 	query := `
-		SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at
+		SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at, u.primary_subject_id, COALESCE(s.name, '')
 		FROM users u
 		JOIN roles r ON u.role_id = r.id
+ LEFT JOIN subjects s ON s.id = u.primary_subject_id AND s.is_deleted = false
 		WHERE r.name IN ('MAIN_TEACHER', 'SUBJECT_TEACHER') AND u.is_deleted = false
 		ORDER BY u.first_name, u.last_name`
 
@@ -358,7 +366,7 @@ func (h *TenantUserHandler) ListTeachers(c *gin.Context) {
 		var u TenantUserResponse
 		var emailNull, middleNameNull, phoneNull sql.NullString
 
-		err := rows.Scan(&u.ID, &emailNull, &phoneNull, &u.FirstName, &u.LastName, &middleNameNull, &u.RoleID, &u.RoleName, &u.CreatedAt)
+		err := rows.Scan(&u.ID, &emailNull, &phoneNull, &u.FirstName, &u.LastName, &middleNameNull, &u.RoleID, &u.RoleName, &u.CreatedAt, &u.PrimarySubjectID, &u.PrimarySubjectName)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse teacher record", "details": err.Error()})
 			return
@@ -416,10 +424,10 @@ func (h *TenantUserHandler) UpdateTeacher(c *gin.Context) {
 	var oldUser models.User
 	var oldPhoneNull, oldMiddleNameNull sql.NullString
 	err = tx.QueryRow(`
-		SELECT u.id, u.first_name, u.last_name, u.middle_name, u.phone, u.role_id 
+		SELECT u.id, u.first_name, u.last_name, u.middle_name, u.phone, u.role_id, u.primary_subject_id
 		FROM users u 
 		WHERE u.id = $1 AND u.is_deleted = false
-	`, teacherID).Scan(&oldUser.ID, &oldUser.FirstName, &oldUser.LastName, &oldMiddleNameNull, &oldPhoneNull, &oldUser.RoleID)
+	`, teacherID).Scan(&oldUser.ID, &oldUser.FirstName, &oldUser.LastName, &oldMiddleNameNull, &oldPhoneNull, &oldUser.RoleID, &oldUser.PrimarySubjectID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Foydalanuvchi topilmadi"})
@@ -474,6 +482,15 @@ func (h *TenantUserHandler) UpdateTeacher(c *gin.Context) {
 	}
 	args := []interface{}{req.FirstName, req.LastName, middleNamePtr, phonePtr, roleID}
 
+	if req.PrimarySubjectID != nil {
+		var exists bool
+		if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM subjects WHERE id = $1 AND is_deleted = false)", *req.PrimarySubjectID).Scan(&exists); err != nil || !exists {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Asosiy fan topilmadi"})
+			return
+		}
+		setClauses = append(setClauses, fmt.Sprintf("primary_subject_id = $%d", len(args)+1))
+		args = append(args, *req.PrimarySubjectID)
+	}
 	if req.Password != nil && *req.Password != "" {
 		hashed, hashErr := bcrypt.GenerateFromPassword([]byte(*req.Password), bcrypt.DefaultCost)
 		if hashErr != nil {
@@ -497,14 +514,19 @@ func (h *TenantUserHandler) UpdateTeacher(c *gin.Context) {
 		return
 	}
 
+	primarySubjectID := oldUser.PrimarySubjectID
+	if req.PrimarySubjectID != nil {
+		primarySubjectID = req.PrimarySubjectID
+	}
 	newUser := models.User{
-		ID:         teacherID,
-		FirstName:  req.FirstName,
-		LastName:   req.LastName,
-		MiddleName: middleNamePtr,
-		Phone:      phonePtr,
-		RoleID:     roleID,
-		IsDeleted:  false,
+		PrimarySubjectID: primarySubjectID,
+		ID:               teacherID,
+		FirstName:        req.FirstName,
+		LastName:         req.LastName,
+		MiddleName:       middleNamePtr,
+		Phone:            phonePtr,
+		RoleID:           roleID,
+		IsDeleted:        false,
 	}
 
 	audit.LogChange(c, tx, audit.LogData{
@@ -711,12 +733,11 @@ func (h *TenantUserHandler) TransferStudentsClass(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":          fmt.Sprintf("%d ta o'quvchi yangi sinfga muvaffaqiyatli o'tkazildi", len(validStudents)),
+		"message":           fmt.Sprintf("%d ta o'quvchi yangi sinfga muvaffaqiyatli o'tkazildi", len(validStudents)),
 		"transferred_count": len(validStudents),
-		"target_class_id":  targetClassID,
+		"target_class_id":   targetClassID,
 	})
 }
-
 
 // DeleteTeacher soft-deletes a teacher user and unassigns from class subjects
 func (h *TenantUserHandler) DeleteTeacher(c *gin.Context) {
@@ -1417,7 +1438,7 @@ type UpdateStudentRequest struct {
 	Phone          *string `json:"phone"`
 	Password       *string `json:"password"`
 	Address        *string `json:"address"`
-	BirthDate      *string `json:"birthdate"` // Format: YYYY-MM-DD
+	BirthDate      *string `json:"birthdate"`       // Format: YYYY-MM-DD
 	EnrollmentDate *string `json:"enrollment_date"` // Format: YYYY-MM-DD
 	INA            *string `json:"ina"`
 	Passport       *string `json:"passport"`
@@ -1642,13 +1663,13 @@ func (h *TenantUserHandler) UpdateStudent(c *gin.Context) {
 		_, err = tx.Exec(`
 			UPDATE students 
 			SET address = $1, birthdate = $2, ina = COALESCE($3, ina), enrollment_date = $4 
-			WHERE id = $5`, 
+			WHERE id = $5`,
 			req.Address, birthdate, normalizedINA, enrollmentDate, studentID)
 	} else {
 		_, err = tx.Exec(`
 			UPDATE students 
 			SET address = $1, birthdate = $2, ina = COALESCE($3, ina) 
-			WHERE id = $4`, 
+			WHERE id = $4`,
 			req.Address, birthdate, normalizedINA, studentID)
 	}
 	if err != nil {
@@ -2137,9 +2158,9 @@ func (h *TenantUserHandler) TransferStudentByDocument(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": fmt.Sprintf("%s %s muvaffaqiyatli %s sinfiga o'tkazildi!", firstName, lastName, targetClassName),
-		"student_id": studentID,
-		"user_id": userID,
+		"message":        fmt.Sprintf("%s %s muvaffaqiyatli %s sinfiga o'tkazildi!", firstName, lastName, targetClassName),
+		"student_id":     studentID,
+		"user_id":        userID,
 		"new_class_name": targetClassName,
 	})
 }
@@ -2261,9 +2282,9 @@ func (h *TenantUserHandler) CreateTransferRequest(c *gin.Context) {
 	`, studentID, targetClassID).Scan(&existingReqID)
 	if err == nil {
 		c.JSON(http.StatusOK, gin.H{
-			"message": "Ushbu o'quvchi bo'yicha so'rov allaqachon yuborilgan va kutilmoqda",
+			"message":    "Ushbu o'quvchi bo'yicha so'rov allaqachon yuborilgan va kutilmoqda",
 			"request_id": existingReqID,
-			"status": "PENDING",
+			"status":     "PENDING",
 		})
 		return
 	}
@@ -2285,10 +2306,10 @@ func (h *TenantUserHandler) CreateTransferRequest(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": fmt.Sprintf("%s sinf rahbariga (%s) o'tkazish so'rovi yuborildi!", currentClassName, targetTeacherName),
-		"request_id": reqID,
+		"message":             fmt.Sprintf("%s sinf rahbariga (%s) o'tkazish so'rovi yuborildi!", currentClassName, targetTeacherName),
+		"request_id":          reqID,
 		"target_teacher_name": targetTeacherName,
-		"status": "PENDING",
+		"status":              "PENDING",
 	})
 }
 
@@ -2480,7 +2501,7 @@ func (h *TenantUserHandler) RespondTransferRequest(c *gin.Context) {
 
 		c.JSON(http.StatusOK, gin.H{
 			"message": fmt.Sprintf("O'quvchi %s muvaffaqiyatli %s sinfiga o'tkazildi!", studentName, toClassName),
-			"status": "APPROVED",
+			"status":  "APPROVED",
 		})
 		return
 	} else {
@@ -2499,9 +2520,8 @@ func (h *TenantUserHandler) RespondTransferRequest(c *gin.Context) {
 
 		c.JSON(http.StatusOK, gin.H{
 			"message": "O'tkazish so'rovi rad etildi",
-			"status": "REJECTED",
+			"status":  "REJECTED",
 		})
 		return
 	}
 }
-

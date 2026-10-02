@@ -1,0 +1,5 @@
+ALTER TABLE users ADD COLUMN IF NOT EXISTS primary_subject_id INTEGER REFERENCES subjects(id);
+ALTER TABLE announcements ADD COLUMN IF NOT EXISTS image_urls JSONB NOT NULL DEFAULT '[]'::jsonb;
+CREATE TABLE IF NOT EXISTS announcement_uploads (
+ url TEXT PRIMARY KEY, uploaded_by INTEGER NOT NULL REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

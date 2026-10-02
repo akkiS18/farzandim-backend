@@ -37,27 +37,29 @@ type ImportResult struct {
 }
 
 type TenantUserResponse struct {
-	ID             int        `json:"id"`
-	Email          *string    `json:"email"`
-	Phone          *string    `json:"phone"`
-	FirstName      string     `json:"first_name"`
-	LastName       string     `json:"last_name"`
-	MiddleName     *string    `json:"middle_name"`
-	Passport       *string    `json:"passport"`
-	RoleID         int        `json:"role_id"`
-	RoleName       string     `json:"role_name"`
-	ClassID        *int       `json:"class_id,omitempty"`
-	ClassName      *string    `json:"class_name,omitempty"`
-	StudentID      *int       `json:"student_id,omitempty"`
-	StudentName    *string    `json:"student_name,omitempty"`
-	Address        *string    `json:"address,omitempty"`
-	BirthDate      *time.Time `json:"birthdate,omitempty"`
-	EnrollmentDate *time.Time `json:"enrollment_date,omitempty"`
-	INA            *string    `json:"ina,omitempty"`
-	Balance        *float64   `json:"balance,omitempty"`
-	IsDeleted      *bool      `json:"is_deleted,omitempty"`
-	DeletedAt      *time.Time `json:"deleted_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
+	PrimarySubjectID   *int       `json:"primary_subject_id"`
+	PrimarySubjectName string     `json:"primary_subject_name"`
+	ID                 int        `json:"id"`
+	Email              *string    `json:"email"`
+	Phone              *string    `json:"phone"`
+	FirstName          string     `json:"first_name"`
+	LastName           string     `json:"last_name"`
+	MiddleName         *string    `json:"middle_name"`
+	Passport           *string    `json:"passport"`
+	RoleID             int        `json:"role_id"`
+	RoleName           string     `json:"role_name"`
+	ClassID            *int       `json:"class_id,omitempty"`
+	ClassName          *string    `json:"class_name,omitempty"`
+	StudentID          *int       `json:"student_id,omitempty"`
+	StudentName        *string    `json:"student_name,omitempty"`
+	Address            *string    `json:"address,omitempty"`
+	BirthDate          *time.Time `json:"birthdate,omitempty"`
+	EnrollmentDate     *time.Time `json:"enrollment_date,omitempty"`
+	INA                *string    `json:"ina,omitempty"`
+	Balance            *float64   `json:"balance,omitempty"`
+	IsDeleted          *bool      `json:"is_deleted,omitempty"`
+	DeletedAt          *time.Time `json:"deleted_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
 }
 
 // ListUsers lists all active users in the school tenant database with filters
@@ -929,7 +931,7 @@ func (h *ImportHandler) ExportStudentTemplate(c *gin.Context) {
 
 	c.Header("Content-Disposition", "attachment; filename=oquvchi_template.xlsx")
 	c.Header("Content-Type", "application/octet-stream")
-	
+
 	if err := f.Write(c.Writer); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate template file"})
 	}
@@ -956,7 +958,7 @@ func (h *ImportHandler) ExportTeacherTemplate(c *gin.Context) {
 
 	c.Header("Content-Disposition", "attachment; filename=oqituvchilar_shablon.xlsx")
 	c.Header("Content-Type", "application/octet-stream")
-	
+
 	if err := f.Write(c.Writer); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate template file"})
 	}
@@ -1036,7 +1038,7 @@ func (h *ImportHandler) ExportParentTemplate(c *gin.Context) {
 
 	c.Header("Content-Disposition", "attachment; filename=ota_ona_template.xlsx")
 	c.Header("Content-Type", "application/octet-stream")
-	
+
 	if err := f.Write(c.Writer); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate template file"})
 	}
@@ -1466,7 +1468,7 @@ func (h *ImportHandler) ExportGradeTemplate(c *gin.Context) {
 
 	c.Header("Content-Disposition", "attachment; filename=baholash_template.xlsx")
 	c.Header("Content-Type", "application/octet-stream")
-	
+
 	if err := f.Write(c.Writer); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate template file"})
 	}
@@ -1927,7 +1929,7 @@ func (h *ImportHandler) ImportStudentsSmart(c *gin.Context) {
 
 	for i, sRow := range req.Students {
 		rowNum := i + 1
-		
+
 		if sRow.FirstName == "" || sRow.LastName == "" || sRow.ClassName == "" {
 			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Missing required fields"})
 			failedCount++
@@ -1990,11 +1992,13 @@ func (h *ImportHandler) ImportStudentsSmart(c *gin.Context) {
 
 		var studentUserID int
 		var midNamePtr *string
-		if sRow.MiddleName != "" { midNamePtr = &sRow.MiddleName }
-		
+		if sRow.MiddleName != "" {
+			midNamePtr = &sRow.MiddleName
+		}
+
 		err = tx.QueryRow("INSERT INTO users (first_name, last_name, middle_name, password_hash, role_id) VALUES ($1, $2, $3, $4, $5) RETURNING id",
 			sRow.FirstName, sRow.LastName, midNamePtr, string(hashedPass), studentRoleID).Scan(&studentUserID)
-		
+
 		if err != nil {
 			tx.Rollback()
 			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Failed to create student user"})
@@ -2026,13 +2030,17 @@ func (h *ImportHandler) ImportStudentsSmart(c *gin.Context) {
 		}
 
 		var addressPtr, inaPtr *string
-		if sRow.Address != "" { addressPtr = &sRow.Address }
-		if sRow.INA != "" { inaPtr = &sRow.INA }
+		if sRow.Address != "" {
+			addressPtr = &sRow.Address
+		}
+		if sRow.INA != "" {
+			inaPtr = &sRow.INA
+		}
 
 		var studentID int
 		err = tx.QueryRow("INSERT INTO students (user_id, class_id, address, birthdate, ina, enrollment_date) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
 			studentUserID, classID, addressPtr, birthdate, inaPtr, enrollmentDate).Scan(&studentID)
-		
+
 		if err != nil {
 			tx.Rollback()
 			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Failed to create student profile"})
@@ -2063,10 +2071,10 @@ func (h *ImportHandler) ImportStudentsSmart(c *gin.Context) {
 
 				pPass := "123"
 				pHashed, _ := bcrypt.GenerateFromPassword([]byte(pPass), bcrypt.DefaultCost)
-				
+
 				err = tx.QueryRow("INSERT INTO users (first_name, last_name, phone, password_hash, role_id) VALUES ($1, $2, $3, $4, $5) RETURNING id",
 					pFirst, pLast, sRow.ParentPhone, string(pHashed), parentRoleID).Scan(&parentUserID)
-				
+
 				if err != nil {
 					tx.Rollback()
 					rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Failed to create parent user"})
@@ -2613,4 +2621,3 @@ func NormalizeDocumentNo(doc string) string {
 
 	return clean
 }
-
