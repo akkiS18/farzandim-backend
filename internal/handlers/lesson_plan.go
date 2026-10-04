@@ -168,11 +168,12 @@ func (h *LessonPlanHandler) GetSlots(c *gin.Context) {
 		ID        int
 		TopicName string
 		Notes     string
+		Homework  string
 	}
 	// key: "YYYY-MM-DD_lessonNumber"
 	savedPlansMap := make(map[string]savedPlan)
 	planRows, err := dbConn.Query(`
-		SELECT id, start_date, lesson_number, topic_name, notes
+		SELECT id, start_date, lesson_number, topic_name, notes, homework
 		FROM lesson_plans
 		WHERE class_id = $1 AND subject_id = $2 AND is_deleted = false
 		  AND start_date BETWEEN $3 AND $4
@@ -182,10 +183,10 @@ func (h *LessonPlanHandler) GetSlots(c *gin.Context) {
 		for planRows.Next() {
 			var pID, lNum int
 			var pDate time.Time
-			var tName, pNotes string
-			if err := planRows.Scan(&pID, &pDate, &lNum, &tName, &pNotes); err == nil {
+			var tName, pNotes, pHomework string
+			if err := planRows.Scan(&pID, &pDate, &lNum, &tName, &pNotes, &pHomework); err == nil {
 				k := fmt.Sprintf("%s_%d", pDate.Format("2006-01-02"), lNum)
-				savedPlansMap[k] = savedPlan{ID: pID, TopicName: tName, Notes: pNotes}
+				savedPlansMap[k] = savedPlan{ID: pID, TopicName: tName, Notes: pNotes, Homework: pHomework}
 			}
 		}
 	}
@@ -253,11 +254,13 @@ func (h *LessonPlanHandler) GetSlots(c *gin.Context) {
 				var planID *int
 				topicName := ""
 				notes := ""
+				homework := ""
 
 				if sp, hasPlan := savedPlansMap[slotID]; hasPlan {
 					planID = &sp.ID
 					topicName = sp.TopicName
 					notes = sp.Notes
+					homework = sp.Homework
 				}
 
 				slots = append(slots, models.LessonPlanSlotItem{
@@ -269,6 +272,7 @@ func (h *LessonPlanHandler) GetSlots(c *gin.Context) {
 					LessonNumber: lNum,
 					TopicName:    topicName,
 					Notes:        notes,
+					Homework:     homework,
 					PlanID:       planID,
 					IsException:  isExc,
 				})
@@ -391,7 +395,7 @@ func (h *LessonPlanHandler) List(c *gin.Context) {
 			COALESCE(u.first_name || ' ' || u.last_name, '') as teacher_name,
 			lp.class_id, COALESCE(c.name, '') as class_name,
 			lp.subject_id, COALESCE(s.name, '') as subject_name,
-			lp.day_of_week, lp.lesson_number, lp.start_date, lp.topic_name, lp.notes,
+			lp.day_of_week, lp.lesson_number, lp.start_date, lp.topic_name, lp.notes, lp.homework,
 			lp.created_at
 		FROM lesson_plans lp
 		LEFT JOIN users u ON lp.teacher_id = u.id
@@ -417,7 +421,7 @@ func (h *LessonPlanHandler) List(c *gin.Context) {
 			&item.ID, &item.TeacherID, &item.TeacherName,
 			&item.ClassID, &item.ClassName,
 			&item.SubjectID, &item.SubjectName,
-			&item.DayOfWeek, &item.LessonNumber, &startDate, &item.TopicName, &item.Notes,
+			&item.DayOfWeek, &item.LessonNumber, &startDate, &item.TopicName, &item.Notes, &item.Homework,
 			&createdAt,
 		)
 		if err != nil {
@@ -667,16 +671,21 @@ func (h *LessonPlanHandler) Create(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
+	topicName := strings.TrimSpace(req.TopicName)
+	if topicName == "" {
+		topicName = "Dars mashg'uloti"
+	}
+
 	var newID int
 	err = tx.QueryRow(`
 		INSERT INTO lesson_plans (
 			teacher_id, class_id, subject_id, day_of_week, lesson_number,
-			start_date, topic_name, notes, is_deleted, created_at, updated_at
+			start_date, topic_name, notes, homework, is_deleted, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false, NOW(), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false, NOW(), NOW())
 		RETURNING id
 	`, currentUserID, req.ClassID, req.SubjectID, req.DayOfWeek, req.LessonNumber,
-		parsedDate.Format("2006-01-02"), strings.TrimSpace(req.TopicName), strings.TrimSpace(req.Notes),
+		parsedDate.Format("2006-01-02"), topicName, strings.TrimSpace(req.Notes), strings.TrimSpace(req.Homework),
 	).Scan(&newID)
 
 	if err != nil {
@@ -803,11 +812,11 @@ func (h *LessonPlanHandler) BatchSave(c *gin.Context) {
 		_, err = tx.Exec(`
 			INSERT INTO lesson_plans (
 				teacher_id, class_id, subject_id, day_of_week, lesson_number,
-				start_date, topic_name, notes, is_deleted, created_at, updated_at
+				start_date, topic_name, notes, homework, is_deleted, created_at, updated_at
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false, NOW(), NOW())
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false, NOW(), NOW())
 		`, currentUserID, req.ClassID, req.SubjectID, dayOfWeek, lessonNumber,
-			parsedDate.Format("2006-01-02"), topic, strings.TrimSpace(item.Notes),
+			parsedDate.Format("2006-01-02"), topic, strings.TrimSpace(item.Notes), strings.TrimSpace(item.Homework),
 		)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Mavzularni bazaga yozishda xatolik", "details": err.Error()})
@@ -865,12 +874,6 @@ func (h *LessonPlanHandler) Update(c *gin.Context) {
 		return
 	}
 
-	parsedDate, err := parseFlexibleDate(req.StartDate)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
 	// Permission check: owner teacher OR class main teacher OR admin
 	if userRole != "ADMIN" {
 		var isAllowed bool
@@ -888,6 +891,52 @@ func (h *LessonPlanHandler) Update(c *gin.Context) {
 		}
 	}
 
+	var existing models.LessonPlan
+	err = dbConn.QueryRow(`
+		SELECT id, class_id, subject_id, day_of_week, lesson_number, start_date, topic_name, notes, homework
+		FROM lesson_plans
+		WHERE id = $1 AND is_deleted = false
+	`, id).Scan(
+		&existing.ID, &existing.ClassID, &existing.SubjectID, &existing.DayOfWeek,
+		&existing.LessonNumber, &existing.StartDate, &existing.TopicName, &existing.Notes, &existing.Homework,
+	)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Dars rejasi topilmadi"})
+		return
+	}
+
+	classID := existing.ClassID
+	if req.ClassID > 0 {
+		classID = req.ClassID
+	}
+	subjectID := existing.SubjectID
+	if req.SubjectID > 0 {
+		subjectID = req.SubjectID
+	}
+	dayOfWeek := existing.DayOfWeek
+	if req.DayOfWeek > 0 {
+		dayOfWeek = req.DayOfWeek
+	}
+	lessonNumber := existing.LessonNumber
+	if req.LessonNumber > 0 {
+		lessonNumber = req.LessonNumber
+	}
+	startDateStr := existing.StartDate.Format("2006-01-02")
+	if req.StartDate != "" {
+		if parsedDate, errDate := parseFlexibleDate(req.StartDate); errDate == nil {
+			startDateStr = parsedDate.Format("2006-01-02")
+		}
+	}
+	topicName := existing.TopicName
+	if strings.TrimSpace(req.TopicName) != "" {
+		topicName = strings.TrimSpace(req.TopicName)
+	}
+	notes := existing.Notes
+	if req.Notes != "" {
+		notes = strings.TrimSpace(req.Notes)
+	}
+	homework := strings.TrimSpace(req.Homework)
+
 	tx, err := dbConn.Begin()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failure"})
@@ -898,10 +947,10 @@ func (h *LessonPlanHandler) Update(c *gin.Context) {
 	_, err = tx.Exec(`
 		UPDATE lesson_plans
 		SET class_id = $1, subject_id = $2, day_of_week = $3, lesson_number = $4,
-		    start_date = $5, topic_name = $6, notes = $7, updated_at = NOW()
-		WHERE id = $8 AND is_deleted = false
-	`, req.ClassID, req.SubjectID, req.DayOfWeek, req.LessonNumber,
-		parsedDate.Format("2006-01-02"), strings.TrimSpace(req.TopicName), strings.TrimSpace(req.Notes), id,
+		    start_date = $5, topic_name = $6, notes = $7, homework = $8, updated_at = NOW()
+		WHERE id = $9 AND is_deleted = false
+	`, classID, subjectID, dayOfWeek, lessonNumber,
+		startDateStr, topicName, notes, homework, id,
 	)
 
 	if err != nil {
@@ -1002,6 +1051,7 @@ func (h *LessonPlanHandler) ExportLessonPlanTemplate(c *gin.Context) {
 		"fan",
 		"start_date",
 		"mavzu nomi",
+		"uyga vazifa",
 	}
 
 	for i, hdr := range headers {
@@ -1016,6 +1066,7 @@ func (h *LessonPlanHandler) ExportLessonPlanTemplate(c *gin.Context) {
 	f.SetCellValue(sheet, "D2", "Matematika")
 	f.SetCellValue(sheet, "E2", "2026-09-01")
 	f.SetCellValue(sheet, "F2", "1 raqamini o'rganish")
+	f.SetCellValue(sheet, "G2", "1 dan 10 gacha yozish")
 
 	f.SetCellValue(sheet, "A3", "1")
 	f.SetCellValue(sheet, "B3", "4")
@@ -1023,6 +1074,7 @@ func (h *LessonPlanHandler) ExportLessonPlanTemplate(c *gin.Context) {
 	f.SetCellValue(sheet, "D3", "Matematika")
 	f.SetCellValue(sheet, "E3", "2026-09-01")
 	f.SetCellValue(sheet, "F3", "1 raqamini takrorlash")
+	f.SetCellValue(sheet, "G3", "Misollar yechish")
 
 	f.SetCellValue(sheet, "A4", "5")
 	f.SetCellValue(sheet, "B4", "4")
@@ -1030,13 +1082,14 @@ func (h *LessonPlanHandler) ExportLessonPlanTemplate(c *gin.Context) {
 	f.SetCellValue(sheet, "D4", "Matematika")
 	f.SetCellValue(sheet, "E4", "2026-10-25")
 	f.SetCellValue(sheet, "F4", "10 gacha sanash")
+	f.SetCellValue(sheet, "G4", "Sanashni mashq qilish")
 
 	style, _ := f.NewStyle(&excelize.Style{
 		Font:      &excelize.Font{Bold: true, Color: "1D1E26"},
 		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#D4F562"}, Pattern: 1},
 		Alignment: &excelize.Alignment{Horizontal: "center", Vertical: "center"},
 	})
-	f.SetCellStyle(sheet, "A1", "F1", style)
+	f.SetCellStyle(sheet, "A1", "G1", style)
 	f.SetRowHeight(sheet, 1, 26)
 
 	f.SetColWidth(sheet, "A", "A", 16)
@@ -1045,6 +1098,7 @@ func (h *LessonPlanHandler) ExportLessonPlanTemplate(c *gin.Context) {
 	f.SetColWidth(sheet, "D", "D", 24)
 	f.SetColWidth(sheet, "E", "E", 20)
 	f.SetColWidth(sheet, "F", "F", 45)
+	f.SetColWidth(sheet, "G", "G", 35)
 
 	c.Header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 	c.Header("Content-Disposition", `attachment; filename="ish_rejasi_shablon.xlsx"`)
@@ -1183,9 +1237,14 @@ func (h *LessonPlanHandler) ImportLessonPlans(c *gin.Context) {
 		if len(row) > 5 {
 			topicName = strings.TrimSpace(row[5])
 		}
+		
+		homeworkStr := ""
+		if len(row) > 6 {
+			homeworkStr = strings.TrimSpace(row[6])
+		}
 
 		// Skip completely empty rows
-		if dayOfWeekStr == "" && lessonNumStr == "" && className == "" && subjectName == "" && startDateStr == "" && topicName == "" {
+		if dayOfWeekStr == "" && lessonNumStr == "" && className == "" && subjectName == "" && startDateStr == "" && topicName == "" && homeworkStr == "" {
 			continue
 		}
 
@@ -1258,11 +1317,11 @@ func (h *LessonPlanHandler) ImportLessonPlans(c *gin.Context) {
 		err = tx.QueryRow(`
 			INSERT INTO lesson_plans (
 				teacher_id, class_id, subject_id, day_of_week, lesson_number,
-				start_date, topic_name, notes, is_deleted, created_at, updated_at
+				start_date, topic_name, notes, homework, is_deleted, created_at, updated_at
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, '', false, NOW(), NOW())
+			VALUES ($1, $2, $3, $4, $5, $6, $7, '', $8, false, NOW(), NOW())
 			RETURNING id
-		`, currentUserID, classID, subjectID, dayOfWeek, lessonNumber, parsedDate.Format("2006-01-02"), topicName).Scan(&newPlanID)
+		`, currentUserID, classID, subjectID, dayOfWeek, lessonNumber, parsedDate.Format("2006-01-02"), topicName, homeworkStr).Scan(&newPlanID)
 
 		if err != nil {
 			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Bazaga yozishda xatolik: %s", err.Error())})

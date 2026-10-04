@@ -25,6 +25,8 @@ type ClassScheduleResponse struct {
 	SubjectName  string `json:"subject_name"`
 	StartDate    string `json:"start_date"`
 	EndDate      string `json:"end_date"`
+	TopicName    string `json:"topic_name,omitempty"`
+	Homework     string `json:"homework,omitempty"`
 }
 
 type SaveScheduleRequest struct {

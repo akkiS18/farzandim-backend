@@ -12,6 +12,7 @@ type LessonPlan struct {
 	StartDate    time.Time  `json:"start_date" db:"start_date"`
 	TopicName    string     `json:"topic_name" db:"topic_name"`
 	Notes        string     `json:"notes" db:"notes"`
+	Homework     string     `json:"homework" db:"homework"`
 	IsDeleted    bool       `json:"is_deleted" db:"is_deleted"`
 	DeletedAt    *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
 	CreatedAt    time.Time  `json:"created_at" db:"created_at"`
@@ -31,6 +32,7 @@ type LessonPlanResponse struct {
 	StartDate    string `json:"start_date"`
 	TopicName    string `json:"topic_name"`
 	Notes        string `json:"notes"`
+	Homework     string `json:"homework"`
 	CreatedAt    string `json:"created_at"`
 }
 
@@ -40,18 +42,20 @@ type CreateLessonPlanRequest struct {
 	DayOfWeek    int    `json:"day_of_week" binding:"required,min=1,max=7"`
 	LessonNumber int    `json:"lesson_number" binding:"required,min=1"`
 	StartDate    string `json:"start_date" binding:"required"`
-	TopicName    string `json:"topic_name" binding:"required"`
+	TopicName    string `json:"topic_name"`
 	Notes        string `json:"notes"`
+	Homework     string `json:"homework"`
 }
 
 type UpdateLessonPlanRequest struct {
-	ClassID      int    `json:"class_id" binding:"required"`
-	SubjectID    int    `json:"subject_id" binding:"required"`
-	DayOfWeek    int    `json:"day_of_week" binding:"required,min=1,max=7"`
-	LessonNumber int    `json:"lesson_number" binding:"required,min=1"`
-	StartDate    string `json:"start_date" binding:"required"`
-	TopicName    string `json:"topic_name" binding:"required"`
+	ClassID      int    `json:"class_id"`
+	SubjectID    int    `json:"subject_id"`
+	DayOfWeek    int    `json:"day_of_week"`
+	LessonNumber int    `json:"lesson_number"`
+	StartDate    string `json:"start_date"`
+	TopicName    string `json:"topic_name"`
 	Notes        string `json:"notes"`
+	Homework     string `json:"homework"`
 }
 
 type BatchLessonPlanItem struct {
@@ -60,6 +64,7 @@ type BatchLessonPlanItem struct {
 	LessonNumber int    `json:"lesson_number"`
 	TopicName    string `json:"topic_name" binding:"required"`
 	Notes        string `json:"notes"`
+	Homework     string `json:"homework"`
 }
 
 type BatchLessonPlanRequest struct {
@@ -80,6 +85,7 @@ type LessonPlanSlotItem struct {
 	LessonNumber int    `json:"lesson_number"`
 	TopicName    string `json:"topic_name"`
 	Notes        string `json:"notes"`
+	Homework     string `json:"homework"`
 	PlanID       *int   `json:"plan_id,omitempty"`
 	IsException  bool   `json:"is_exception"`
 }

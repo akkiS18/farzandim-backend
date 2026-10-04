@@ -812,19 +812,23 @@ func SendAnnouncementNotification(schoolID string, ann *models.Announcement) {
 
 	go func() {
 		send := func(chatID interface{}, label string) {
+			targetURL := fmt.Sprintf("%s/parents", frontendURL)
 			if len(ann.ImageURLs) > 0 {
-				if err := sendAnnouncementMedia(token, chatID, ann.ImageURLs, msgText); err != nil {
+				if err := sendAnnouncementMedia(token, chatID, ann.ImageURLs, msgText, label, targetURL); err != nil {
 					log.Printf("Announcement %d media delivery failed: %v", ann.ID, err)
-					Manager.sendAnnouncementText(token, chatID, msgText+"\n\nRasmlarni portalda ko‘ring.", label, fmt.Sprintf("%s/parents", frontendURL))
+					Manager.sendAnnouncementText(token, chatID, msgText+"\n\nRasmlarni portalda ko‘ring.", label, targetURL)
+					return
+				}
+				if len(ann.ImageURLs) == 1 && len(utf16.Encode([]rune(msgText))) <= 1024 {
 					return
 				}
 				time.Sleep(time.Second)
 				if len(utf16.Encode([]rune(msgText))) <= 1024 {
-					Manager.sendAnnouncementText(token, chatID, "E’lonni portalda ko‘rish:", label, fmt.Sprintf("%s/parents", frontendURL))
+					Manager.sendAnnouncementText(token, chatID, "E’lonni portalda ko‘rish:", label, targetURL)
 					return
 				}
 			}
-			Manager.sendAnnouncementText(token, chatID, msgText, label, fmt.Sprintf("%s/parents", frontendURL))
+			Manager.sendAnnouncementText(token, chatID, msgText, label, targetURL)
 		}
 
 		btnLabel := "🌐 Portalda ko'rish"

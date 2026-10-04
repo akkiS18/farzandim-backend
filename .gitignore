@@ -23,3 +23,5 @@ tmp/
 seed_mock_data.go
 *.xlsx
 
+# Uploads
+uploads/

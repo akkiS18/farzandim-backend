@@ -138,9 +138,21 @@ func (h *ScheduleHandler) GetSchedule(c *gin.Context) {
 		}
 
 		query := `
-			SELECT cs.id, cs.class_id, cs.day_of_week, cs.lesson_number, cs.subject_id, s.name as subject_name, cs.start_date, cs.end_date
+			SELECT cs.id, cs.class_id, cs.day_of_week, cs.lesson_number, cs.subject_id, s.name as subject_name, cs.start_date, cs.end_date,
+			       COALESCE(lp.topic_name, ''), COALESCE(lp.homework, '')
 			FROM class_schedules cs
 			JOIN subjects s ON cs.subject_id = s.id
+			LEFT JOIN LATERAL (
+				SELECT lp.topic_name, lp.homework
+				FROM lesson_plans lp
+				WHERE lp.class_id = cs.class_id 
+				  AND lp.subject_id = cs.subject_id 
+				  AND lp.lesson_number = cs.lesson_number 
+				  AND lp.start_date = (date_trunc('week', $2::date)::date + (cs.day_of_week - 1) * interval '1 day')::date
+				  AND lp.is_deleted = false
+				ORDER BY lp.id DESC
+				LIMIT 1
+			) lp ON true
 			WHERE cs.class_id = $1 AND cs.is_deleted = false AND s.is_deleted = false
 			  AND $2::date BETWEEN cs.start_date AND cs.end_date
 			  AND cs.start_date = (
@@ -160,7 +172,7 @@ func (h *ScheduleHandler) GetSchedule(c *gin.Context) {
 		for rows.Next() {
 			var item models.ClassScheduleResponse
 			var startDate, endDate time.Time
-			err := rows.Scan(&item.ID, &item.ClassID, &item.DayOfWeek, &item.LessonNumber, &item.SubjectID, &item.SubjectName, &startDate, &endDate)
+			err := rows.Scan(&item.ID, &item.ClassID, &item.DayOfWeek, &item.LessonNumber, &item.SubjectID, &item.SubjectName, &startDate, &endDate, &item.TopicName, &item.Homework)
 			if err != nil {
 				rows.Close()
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse schedule row", "details": err.Error()})

@@ -103,6 +103,27 @@ func (h *AnnouncementHandler) CreateAnnouncement(c *gin.Context) {
 			return
 		}
 	}
+
+	// Normalize StudentIDs (resolve users.id to students.id if user ID was passed by client)
+	if len(req.StudentIDs) > 0 {
+		normalizedStudentIDs := make([]int, 0, len(req.StudentIDs))
+		for _, sid := range req.StudentIDs {
+			var actualStudentID int
+			err := dbConn.QueryRow(`
+				SELECT id FROM students 
+				WHERE id = $1 OR user_id = $1 
+				ORDER BY CASE WHEN id = $1 THEN 0 ELSE 1 END 
+				LIMIT 1
+			`, sid).Scan(&actualStudentID)
+			if err == nil {
+				normalizedStudentIDs = append(normalizedStudentIDs, actualStudentID)
+			} else {
+				normalizedStudentIDs = append(normalizedStudentIDs, sid)
+			}
+		}
+		req.StudentIDs = normalizedStudentIDs
+	}
+
 	roleVal, _ := c.Get("role")
 	role := roleVal.(string)
 
