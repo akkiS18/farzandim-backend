@@ -84,6 +84,7 @@ func main() {
 	aiReportHandler := handlers.NewAIReportHandler()
 	aiInstructionHandler := handlers.NewAIInstructionHandler()
 	lessonPlanHandler := handlers.NewLessonPlanHandler()
+	reportHandler := handlers.NewReportHandler()
 
 	// 4. Initialize web server router
 	r := gin.Default()
@@ -240,6 +241,8 @@ func main() {
 		authTenantGroup.POST("/import/menu/exception", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), menuHandler.ImportMenuExceptions)
 		authTenantGroup.GET("/import/template/menu/cycle", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), menuHandler.ExportMenuCycleTemplate)
 		authTenantGroup.GET("/import/template/menu/exception", middleware.RequireRole("ADMIN", "MAIN_TEACHER"), menuHandler.ExportMenuExceptionTemplate)
+		
+		authTenantGroup.GET("/reports/social-passport", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), reportHandler.ExportSocialPassport)
 
 		authTenantGroup.POST("/classes/:id/students", tenantUserHandler.CreateClassStudent)
 		authTenantGroup.POST("/classes/:id/transfer-students", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), tenantUserHandler.TransferStudentsClass)
