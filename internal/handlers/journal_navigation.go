@@ -23,13 +23,16 @@ func (h *ScheduleHandler) AdjacentJournalLesson(c *gin.Context) {
 	conn := c.MustGet("tenantDB").(*sql.DB)
 	if c.GetString("role") != "ADMIN" {
 		var allowed bool
-		err := conn.QueryRow(`SELECT EXISTS(SELECT 1 FROM class_teachers WHERE class_id=$1 AND subject_id=$2 AND teacher_id=$3 AND is_deleted=false)`, classID, subjectID, c.GetString("userID")).Scan(&allowed)
+		err := conn.QueryRow(`SELECT EXISTS(
+			SELECT 1 FROM class_teachers 
+			WHERE class_id=$1 AND teacher_id=$2 AND is_deleted=false
+		)`, classID, c.GetString("userID")).Scan(&allowed)
 		if err != nil {
 			c.JSON(500, gin.H{"error": "Ruxsatni tekshirib bo‘lmadi"})
 			return
 		}
 		if !allowed {
-			c.JSON(403, gin.H{"error": "Bu fan sizga biriktirilmagan"})
+			c.JSON(403, gin.H{"error": "Siz ushbu sinfga biriktirilmagansiz"})
 			return
 		}
 	}
