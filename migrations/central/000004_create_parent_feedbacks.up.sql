@@ -1,5 +1,8 @@
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
 CREATE TABLE IF NOT EXISTS parent_feedbacks (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     telegram_user_id BIGINT NOT NULL,
     telegram_username VARCHAR(255),
     first_name VARCHAR(255),
