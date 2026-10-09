@@ -53,6 +53,11 @@ func main() {
 		}
 	}()
 
+	// Start lightning parent feedback bot
+	if cfg.FeedbackBotToken != "" {
+		services.StartFeedbackBot(cfg.FeedbackBotToken, cfg.FeedbackAdminChatIDs, db.CentralDB)
+	}
+
 	// Run migrations on all existing tenant DBs at startup
 	log.Println("Running startup migrations on all tenant DBs...")
 	if err := db.TenantConnManager.MigrateAllTenants(cfg.PGRootURL); err != nil {
