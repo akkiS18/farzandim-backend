@@ -225,7 +225,7 @@ type AdminBatchGenerateRequest struct {
 	TargetDate string `json:"target_date"`
 }
 
-func runBatchGenerationJob(dbConn *sql.DB, jobID string, targetStudentIDs []int, targetTime time.Time) {
+func runBatchGenerationJob(dbConn *sql.DB, jobID string, targetStudentIDs []int, targetTime time.Time, forceRegenerate bool) {
 	// Mark status as IN_PROGRESS
 	_, _ = dbConn.Exec(`UPDATE ai_generation_jobs SET status = 'IN_PROGRESS', updated_at = NOW() WHERE id = $1`, jobID)
 
@@ -262,7 +262,7 @@ func runBatchGenerationJob(dbConn *sql.DB, jobID string, targetStudentIDs []int,
 		// Throttling / Rate Limit safety delay (2000ms)
 		time.Sleep(2000 * time.Millisecond)
 
-		_, err = generateReportForStudent(dbConn, sID, targetTime)
+		_, err = generateReportForStudentWithOption(dbConn, sID, targetTime, forceRegenerate)
 		if err != nil {
 			log.Printf("[AI Batch Error] Job %s Student %d error: %v", jobID, sID, err)
 			lastError = err.Error()
@@ -400,10 +400,117 @@ func (h *AIReportHandler) AdminBatchGenerateAIReports(c *gin.Context) {
 	}
 
 	// Launch background goroutine
-	go runBatchGenerationJob(dbConn, jobID, targetStudentIDs, targetTime)
+	go runBatchGenerationJob(dbConn, jobID, targetStudentIDs, targetTime, false)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":            "AI hisobot generatsiyasi boshlandi (fonda ishlamoqda)",
+		"job_id":             jobID,
+		"status":             "STARTED",
+		"total_students":     len(targetStudentIDs),
+		"processed_students": 0,
+		"is_existing":        false,
+	})
+}
+
+// BatchRegenerateWeekTemplates starts background generation for all template reports in a specific week
+func (h *AIReportHandler) BatchRegenerateWeekTemplates(c *gin.Context) {
+	dbConn, err := getTenantDB(c)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	var req struct {
+		Year       int  `json:"year"`
+		WeekNumber int  `json:"week_number"`
+		ClassID    *int `json:"class_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Yaroqsiz parametrlar"})
+		return
+	}
+
+	if req.Year <= 0 || req.WeekNumber <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "year va week_number talab qilinadi"})
+		return
+	}
+
+	// 1. Check if there's already an active job in progress
+	var activeJobID, activeStatus string
+	activeErr := dbConn.QueryRow(`
+		SELECT id, status 
+		FROM ai_generation_jobs 
+		WHERE status IN ('STARTED', 'IN_PROGRESS') AND updated_at >= NOW() - INTERVAL '15 minutes'
+		ORDER BY created_at DESC LIMIT 1
+	`).Scan(&activeJobID, &activeStatus)
+
+	if activeErr == nil && activeJobID != "" {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":  "Hozirda boshqa generatsiya jarayoni fonda ishlamoqda. Iltimos, u tugashini kuting yoki uni bekor qiling.",
+			"job_id": activeJobID,
+		})
+		return
+	}
+
+	// 2. Query students who currently have template reports in this week
+	query := `
+		SELECT r.student_id
+		FROM ai_weekly_reports r
+		JOIN students s ON r.student_id = s.id
+		WHERE r.year = $1 AND r.week_number = $2
+		  AND (r.summary_json->>'generation_source' IS NULL OR r.summary_json->>'generation_source' != 'ai')`
+	args := []interface{}{req.Year, req.WeekNumber}
+
+	if req.ClassID != nil && *req.ClassID > 0 {
+		query += " AND s.class_id = $3"
+		args = append(args, *req.ClassID)
+	}
+
+	rows, err := dbConn.Query(query, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Dinamik hisobotlarni qidirishda xatolik: " + err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var targetStudentIDs []int
+	for rows.Next() {
+		var sid int
+		if err := rows.Scan(&sid); err == nil {
+			targetStudentIDs = append(targetStudentIDs, sid)
+		}
+	}
+
+	if len(targetStudentIDs) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "Ushbu haftada barcha hisobotlar allaqachon AI orqali yaratilgan (dinamik shablonlar qolmagan)",
+			"count":   0,
+		})
+		return
+	}
+
+	// Calculate Monday of that week
+	monday, _ := getWeekDateRange(req.Year, req.WeekNumber)
+	targetDateStr := monday.Format("2006-01-02")
+
+	// Insert Job Record
+	var jobID string
+	var createdAt, updatedAt time.Time
+	err = dbConn.QueryRow(`
+		INSERT INTO ai_generation_jobs (target_date, class_id, status, total_students, processed_students, generated_count, error_count)
+		VALUES ($1, $2, 'STARTED', $3, 0, 0, 0)
+		RETURNING id, created_at, updated_at`,
+		targetDateStr, req.ClassID, len(targetStudentIDs)).Scan(&jobID, &createdAt, &updatedAt)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Job yaratishda xatolik: " + err.Error()})
+		return
+	}
+
+	// Launch background goroutine with forceRegenerate = true
+	go runBatchGenerationJob(dbConn, jobID, targetStudentIDs, monday, true)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":            fmt.Sprintf("%d ta dinamik hisobotni AI orqali qayta generatsiya qilish boshlandi (fonda ishlamoqda)", len(targetStudentIDs)),
 		"job_id":             jobID,
 		"status":             "STARTED",
 		"total_students":     len(targetStudentIDs),
@@ -682,12 +789,31 @@ func (h *AIReportHandler) GetAIReportsByWeek(c *gin.Context) {
 		}
 	}
 
+	// Count Dynamic Templates in this week
+	var templateCount int
+	templateCountQuery := `
+		SELECT COUNT(r.id)
+		FROM ai_weekly_reports r
+		JOIN students s ON r.student_id = s.id
+		WHERE r.year = $1 AND r.week_number = $2
+		  AND (r.summary_json->>'generation_source' IS NULL OR r.summary_json->>'generation_source' != 'ai')`
+	templateArgs := []interface{}{year, weekNum}
+	if classIDStr != "" {
+		cid, err := strconv.Atoi(classIDStr)
+		if err == nil && cid > 0 {
+			templateCountQuery += " AND s.class_id = $3"
+			templateArgs = append(templateArgs, cid)
+		}
+	}
+	_ = dbConn.QueryRow(templateCountQuery, templateArgs...).Scan(&templateCount)
+
 	c.JSON(http.StatusOK, gin.H{
-		"reports":     reports,
-		"total_count": totalCount,
-		"page":        page,
-		"limit":       limit,
-		"total_pages": (totalCount + limit - 1) / limit,
+		"reports":        reports,
+		"total_count":    totalCount,
+		"template_count": templateCount,
+		"page":           page,
+		"limit":          limit,
+		"total_pages":    (totalCount + limit - 1) / limit,
 	})
 }
 
@@ -816,6 +942,19 @@ func (h *AIReportHandler) AdminRegenerateSingleAIReport(c *gin.Context) {
 		"message": "Hisobot muvaffaqiyatli qayta yaratildi",
 		"report":  resultItem,
 	})
+}
+
+func getWeekDateRange(year int, week int) (time.Time, time.Time) {
+	// Jan 4 is always in week 1 of ISO year
+	jan4 := time.Date(year, time.January, 4, 0, 0, 0, 0, time.UTC)
+	wd := jan4.Weekday()
+	if wd == time.Sunday {
+		wd = 7
+	}
+	week1Monday := jan4.AddDate(0, 0, -int(wd-time.Monday))
+	monday := week1Monday.AddDate(0, 0, (week-1)*7)
+	sunday := monday.AddDate(0, 0, 6)
+	return monday, sunday
 }
 
 func GenerateReportForStudentExported(dbConn *sql.DB, studentID int, targetTime time.Time) (*models.AIWeeklyReport, error) {
