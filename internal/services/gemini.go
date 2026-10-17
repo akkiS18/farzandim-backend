@@ -107,8 +107,8 @@ func GenerateAIWeeklyReportResult(dbConn *sql.DB, data StudentWeeklyDataContext)
 		return ReportGenerationResult{}, fmt.Errorf("failed to marshal gemini request: %v", err)
 	}
 
-	// Try models in priority order (gemini-2.5-flash is primary and fastest ~7s)
-	modelsToTry := []string{"gemini-2.5-flash", "gemini-3.8-flash"}
+	// Try models in priority order (gemini-3.5-flash-lite is fastest ~2.5s and has fresh quota!)
+	modelsToTry := []string{"gemini-3.5-flash-lite", "gemini-3.5-flash"}
 	lastStatusErr := "empty_response"
 
 	for _, modelName := range modelsToTry {

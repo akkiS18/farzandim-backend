@@ -1188,6 +1188,9 @@ func generateReportForStudentWithOption(dbConn *sql.DB, studentID int, targetTim
 	if genErr != nil {
 		return nil, genErr
 	}
+	if forceRegenerate && generation.Source == "template" {
+		return nil, fmt.Errorf("AI generatsiya qilinmadi (%s)", generation.Reason)
+	}
 
 	trend := "STABLE"
 	if prevAvgGrade > 0 {
