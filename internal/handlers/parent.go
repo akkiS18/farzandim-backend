@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/farzandim/backend/internal/audit"
-	"github.com/farzandim/backend/internal/models"
+	"github.com/farzandim/backend/internal/services"
 	"github.com/farzandim/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
@@ -24,13 +24,14 @@ func NewParentHandler() *ParentHandler {
 }
 
 type CreateParentRequest struct {
-	FirstName  string  `json:"first_name" binding:"required"`
-	LastName   string  `json:"last_name" binding:"required"`
-	MiddleName *string `json:"middle_name"`
-	Passport   *string `json:"passport"`
-	Phone      string  `json:"phone" binding:"required"`
-	Email      *string `json:"email"`
-	Password   string  `json:"password" binding:"required"`
+	FirstName    string  `json:"first_name" binding:"required"`
+	LastName     string  `json:"last_name" binding:"required"`
+	MiddleName   *string `json:"middle_name"`
+	Passport     *string `json:"passport"`
+	Phone        string  `json:"phone"`
+	Email        *string `json:"email"`
+	Password     string  `json:"password" binding:"required"`
+	RelationType *string `json:"relation_type"`
 }
 
 // CreateAndLinkParent registers a parent user profile if not exists, and links it to a student
@@ -45,6 +46,11 @@ func (h *ParentHandler) CreateAndLinkParent(c *gin.Context) {
 	var req CreateParentRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid fields", "details": err.Error()})
+		return
+	}
+
+	if req.Passport == nil || strings.TrimSpace(*req.Passport) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Ota-onaning pasport seriyasi kiritilishi shart"})
 		return
 	}
 
@@ -95,134 +101,50 @@ func (h *ParentHandler) CreateAndLinkParent(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	var normalizedPassport *string
-	if req.Passport != nil {
-		cleanPass := strings.TrimSpace(*req.Passport)
-		if cleanPass != "" && cleanPass != "-" {
-			normPass := NormalizeDocumentNo(cleanPass)
-			normalizedPassport = &normPass
-		}
+	parentSvc := services.NewParentService()
+	relType := "vasiy"
+	if req.RelationType != nil && strings.TrimSpace(*req.RelationType) != "" {
+		relType = strings.TrimSpace(*req.RelationType)
 	}
 
-	var parentID int
-	var existingRoleName string
-	found := false
-
-	// 3. Check if parent user already exists by passport first (to avoid duplicate accounts with different phone formatting)
-	if normalizedPassport != nil {
-		err = tx.QueryRow(`
-			SELECT u.id, r.name FROM users u
-			JOIN roles r ON u.role_id = r.id
-			WHERE r.name = 'PARENT' AND u.is_deleted = false
-			  AND (UPPER(TRIM(u.passport)) = UPPER($1) OR UPPER(TRIM(u.document_no)) = UPPER($1))
-			LIMIT 1
-		`, *normalizedPassport).Scan(&parentID, &existingRoleName)
-		if err == nil {
-			found = true
-		}
-	}
-
-	cleanPhone := utils.NormalizePhone(req.Phone)
-
-	// Check if parent user already exists by phone only if passport was NOT provided
-	if !found && normalizedPassport == nil && cleanPhone != "" {
-		err = tx.QueryRow(`
-			SELECT u.id, r.name FROM users u
-			JOIN roles r ON u.role_id = r.id
-			WHERE u.phone = $1 AND u.is_deleted = false
-			LIMIT 1
-		`, cleanPhone).Scan(&parentID, &existingRoleName)
-		if err == nil {
-			found = true
-		}
-	}
-
-	isNewUser := false
-	if !found {
-		// Create new parent user
-		isNewUser = true
-
-		// Resolve role ID for PARENT
-		var parentRoleID int
-		err = tx.QueryRow("SELECT id FROM roles WHERE name = 'PARENT'").Scan(&parentRoleID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Role 'PARENT' not initialized in database"})
-			return
-		}
-
-		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encrypt password"})
-			return
-		}
-
-		insertUserQuery := `
-			INSERT INTO users (first_name, last_name, middle_name, passport, document_no, phone, email, password_hash, role_id, password_reset_required)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
-			RETURNING id`
-		err = tx.QueryRow(insertUserQuery, req.FirstName, req.LastName, req.MiddleName, normalizedPassport, normalizedPassport, cleanPhone, req.Email, string(hashedPassword), parentRoleID).Scan(&parentID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create parent user profile", "details": err.Error()})
-			return
-		}
-
-		// Audit Log for user creation
-		audit.LogChange(c, tx, audit.LogData{
-			Action:    "CREATE",
-			TableName: "users",
-			RecordID:  strconv.Itoa(parentID),
-			NewValues: models.User{
-				ID:         parentID,
-				FirstName:  req.FirstName,
-				LastName:   req.LastName,
-				MiddleName: req.MiddleName,
-				Passport:   normalizedPassport,
-				Phone:      &cleanPhone,
-				Email:      req.Email,
-				RoleID:     parentRoleID,
-				IsDeleted:  false,
-			},
-		})
-	} else {
-		// Existing user found. Verify that they have the PARENT role.
-		if existingRoleName != "PARENT" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Telefon raqamli yoki pasportli foydalanuvchi tizimda mavjud, lekin roli '%s'. Faqat PARENT roldagi foydalanuvchini bog'lash mumkin.", existingRoleName)})
-			return
-		}
-		// Backfill passport and document_no if they are empty
-		if normalizedPassport != nil {
-			_, _ = tx.Exec("UPDATE users SET passport = $1, document_no = $1 WHERE id = $2 AND (document_no IS NULL OR document_no = '')", *normalizedPassport, parentID)
-		}
-	}
-
-	// 4. Check if student parent link already exists
-	var linkExists bool
-	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM student_parents WHERE student_id = $1 AND parent_id = $2)", actualStudentID, parentID).Scan(&linkExists)
+	res, err := parentSvc.CreateOrLinkParent(tx, services.ParentInput{
+		FirstName:    req.FirstName,
+		LastName:     req.LastName,
+		MiddleName:   req.MiddleName,
+		Passport:     req.Passport,
+		Phone:        req.Phone,
+		Email:        req.Email,
+		Password:     req.Password,
+		RelationType: relType,
+		StudentID:    &actualStudentID,
+	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing link"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	if linkExists {
+	if res.AlreadyLinked {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Ushbu ota-ona allaqachon o'quvchiga bog'langan"})
 		return
 	}
 
-	// 5. Create student-parent link
-	_, err = tx.Exec("INSERT INTO student_parents (student_id, parent_id) VALUES ($1, $2)", actualStudentID, parentID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to map parent to student", "details": err.Error()})
-		return
+	if res.IsNewUser {
+		audit.LogChange(c, tx, audit.LogData{
+			Action:    "CREATE",
+			TableName: "users",
+			RecordID:  strconv.Itoa(res.ParentID),
+			NewValues: res.User,
+		})
 	}
 
 	// Audit Log for link creation
 	audit.LogChange(c, tx, audit.LogData{
 		Action:    "CREATE",
 		TableName: "student_parents",
-		RecordID:  fmt.Sprintf("%d-%d", actualStudentID, parentID),
+		RecordID:  fmt.Sprintf("%d-%d", actualStudentID, res.ParentID),
 		NewValues: map[string]int{
 			"student_id": actualStudentID,
-			"parent_id":  parentID,
+			"parent_id":  res.ParentID,
 		},
 	})
 
@@ -233,8 +155,8 @@ func (h *ParentHandler) CreateAndLinkParent(c *gin.Context) {
 
 	c.JSON(http.StatusCreated, gin.H{
 		"message":     "Ota-ona muvaffaqiyatli bog'landi",
-		"parent_id":   parentID,
-		"is_new_user": isNewUser,
+		"parent_id":   res.ParentID,
+		"is_new_user": res.IsNewUser,
 	})
 }
 
@@ -459,23 +381,61 @@ func (h *ParentHandler) DeleteParentPermanent(c *gin.Context) {
 	userIDStr := userIDVal.(string)
 	currentUserID, _ := strconv.Atoi(userIDStr)
 
-	// Authorization check: Admin or Main Teacher of one of the parent's children's classes
+	// Authorization check: Admin or Main Teacher of ALL of the parent's children's classes
 	if userRole != "ADMIN" {
 		if userRole != "MAIN_TEACHER" {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: faqat admin yoki sinf rahbari ota-onani o'chira oladi"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: faqat admin yoki tegishli barcha sinflar rahbari ota-onani butunlay o'chira oladi"})
 			return
 		}
-		var isAuthorized bool
+
+		// 1. Check total children linked to this parent
+		var totalChildren int
 		err = dbConn.QueryRow(`
-			SELECT EXISTS(
-				SELECT 1 FROM student_parents sp
-				JOIN students s ON sp.student_id = s.id
-				JOIN class_teachers ct ON s.class_id = ct.class_id
-				WHERE sp.parent_id = $1 AND ct.teacher_id = $2 AND ct.is_main_teacher = true AND ct.is_deleted = false
-			)
-		`, parentID, currentUserID).Scan(&isAuthorized)
-		if err != nil || !isAuthorized {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: siz ushbu ota-onaning farzandlariga sinf rahbari emassiz"})
+			SELECT COUNT(DISTINCT sp.student_id)
+			FROM student_parents sp
+			JOIN students s ON sp.student_id = s.id
+			WHERE sp.parent_id = $1 AND s.is_deleted = false
+		`, parentID).Scan(&totalChildren)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Farzandlar bog'liqligini tekshirishda xatolik"})
+			return
+		}
+
+		if totalChildren == 0 {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Ruxsat berilmagan: bu ota-onaga hech qanday o'quvchi biriktirilmagan. Faqat maktab admini bunday profilni butunlay o'chira oladi"})
+			return
+		}
+
+		// 2. Find any children in classes where the current teacher is NOT the main teacher
+		rows, err := dbConn.Query(`
+			SELECT s.first_name, s.last_name, c.name
+			FROM student_parents sp
+			JOIN students s ON sp.student_id = s.id
+			JOIN classes c ON s.class_id = c.id
+			WHERE sp.parent_id = $1 AND s.is_deleted = false
+			  AND s.class_id NOT IN (
+				  SELECT ct.class_id FROM class_teachers ct
+				  WHERE ct.teacher_id = $2 AND ct.is_main_teacher = true AND ct.is_deleted = false
+			  )
+		`, parentID, currentUserID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Sinf huquqlarini tekshirishda xatolik"})
+			return
+		}
+		defer rows.Close()
+
+		var unmanagedChildren []string
+		for rows.Next() {
+			var fName, lName, cName string
+			if err := rows.Scan(&fName, &lName, &cName); err == nil {
+				unmanagedChildren = append(unmanagedChildren, fmt.Sprintf("%s %s (%s)", fName, lName, cName))
+			}
+		}
+
+		if len(unmanagedChildren) > 0 {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": fmt.Sprintf("Ushbu ota-onani butunlay o'chirib bo'lmaydi! Chunki uning siz rahbarlik qilmaydigan boshqa sinfda ham farzandi bor: %s. Ota-onani butunlay o'chirish o'rniga, 'Farzanddan ajratish' (unlink) tugmasidan foydalaning.", strings.Join(unmanagedChildren, ", ")),
+			})
 			return
 		}
 	}
@@ -511,10 +471,15 @@ func (h *ParentHandler) DeleteParentPermanent(c *gin.Context) {
 	}
 
 	// 1. Delete relations
-	_, _ = tx.Exec("DELETE FROM student_parents WHERE parent_id = $1", parentID)
-	_, _ = tx.Exec("DELETE FROM parent_access_codes WHERE user_id = $1", parentID)
-	_, _ = tx.Exec("DELETE FROM menu_comments WHERE parent_id = $1", parentID)
+	if _, err := tx.Exec("DELETE FROM student_parents WHERE parent_id = $1", parentID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Ota-onaning o'quvchilar bilan bog'liqligini o'chirishda xatolik", "details": err.Error()})
+		return
+	}
+	_, _ = tx.Exec("DELETE FROM parent_access_codes WHERE parent_phone = (SELECT phone FROM users WHERE id = $1 AND phone IS NOT NULL AND phone != '')", parentID)
+	_, _ = tx.Exec("DELETE FROM menu_comments WHERE parent_id = $1 OR author_id = $1", parentID)
+	_, _ = tx.Exec("DELETE FROM grade_comments WHERE author_id = $1", parentID)
 	_, _ = tx.Exec("DELETE FROM announcement_poll_votes WHERE user_id = $1", parentID)
+	_, _ = tx.Exec("UPDATE audit_logs SET user_id = NULL WHERE user_id = $1", parentID)
 
 	// 2. Hard delete from users
 	_, err = tx.Exec("DELETE FROM users WHERE id = $1 AND role_id = (SELECT id FROM roles WHERE name = 'PARENT')", parentID)
@@ -645,31 +610,48 @@ func (h *ParentHandler) BatchDeleteParentsPermanent(c *gin.Context) {
 	defer tx.Rollback()
 
 	successCount := 0
+	skippedCount := 0
 	for _, pId := range req.ParentIDs {
 		if pId <= 0 {
 			continue
 		}
 
 		if userRole != "ADMIN" {
-			var isAuthorized bool
+			var unmanagedCount int
 			_ = tx.QueryRow(`
-				SELECT EXISTS(
-					SELECT 1 FROM student_parents sp
-					JOIN students s ON sp.student_id = s.id
-					JOIN class_teachers ct ON s.class_id = ct.class_id
-					WHERE sp.parent_id = $1 AND ct.teacher_id = $2 AND ct.is_main_teacher = true AND ct.is_deleted = false
-				)
-			`, pId, currentUserID).Scan(&isAuthorized)
-			if !isAuthorized {
+				SELECT COUNT(*)
+				FROM student_parents sp
+				JOIN students s ON sp.student_id = s.id
+				WHERE sp.parent_id = $1 AND s.is_deleted = false
+				  AND s.class_id NOT IN (
+					  SELECT ct.class_id FROM class_teachers ct
+					  WHERE ct.teacher_id = $2 AND ct.is_main_teacher = true AND ct.is_deleted = false
+				  )
+			`, pId, currentUserID).Scan(&unmanagedCount)
+
+			var managedCount int
+			_ = tx.QueryRow(`
+				SELECT COUNT(*)
+				FROM student_parents sp
+				JOIN students s ON sp.student_id = s.id
+				JOIN class_teachers ct ON s.class_id = ct.class_id
+				WHERE sp.parent_id = $1 AND s.is_deleted = false
+				  AND ct.teacher_id = $2 AND ct.is_main_teacher = true AND ct.is_deleted = false
+			`, pId, currentUserID).Scan(&managedCount)
+
+			if unmanagedCount > 0 || managedCount == 0 {
+				skippedCount++
 				continue
 			}
 		}
 
 		// Delete relations
 		_, _ = tx.Exec("DELETE FROM student_parents WHERE parent_id = $1", pId)
-		_, _ = tx.Exec("DELETE FROM parent_access_codes WHERE user_id = $1", pId)
-		_, _ = tx.Exec("DELETE FROM menu_comments WHERE parent_id = $1", pId)
+		_, _ = tx.Exec("DELETE FROM parent_access_codes WHERE parent_phone = (SELECT phone FROM users WHERE id = $1 AND phone IS NOT NULL AND phone != '')", pId)
+		_, _ = tx.Exec("DELETE FROM menu_comments WHERE parent_id = $1 OR author_id = $1", pId)
+		_, _ = tx.Exec("DELETE FROM grade_comments WHERE author_id = $1", pId)
 		_, _ = tx.Exec("DELETE FROM announcement_poll_votes WHERE user_id = $1", pId)
+		_, _ = tx.Exec("UPDATE audit_logs SET user_id = NULL WHERE user_id = $1", pId)
 
 		// Hard delete from users
 		res, dErr := tx.Exec("DELETE FROM users WHERE id = $1 AND role_id = (SELECT id FROM roles WHERE name = 'PARENT')", pId)
@@ -685,9 +667,17 @@ func (h *ParentHandler) BatchDeleteParentsPermanent(c *gin.Context) {
 		return
 	}
 
+	var msg string
+	if skippedCount > 0 {
+		msg = fmt.Sprintf("%d ta ota-ona o'chirildi. %d ta ota-ona boshqa sinflarda ham farzandi borligi sababli o'chirilmadi.", successCount, skippedCount)
+	} else {
+		msg = fmt.Sprintf("%d ta ota-ona bazadan butunlay o'chirildi", successCount)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message": fmt.Sprintf("%d ta ota-ona bazadan butunlay o'chirildi", successCount),
+		"message": msg,
 		"count":   successCount,
+		"skipped": skippedCount,
 	})
 }
 

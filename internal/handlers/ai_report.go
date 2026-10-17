@@ -752,11 +752,85 @@ func (h *AIReportHandler) DeleteSingleAIReport(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Hisobot muvaffaqiyatli o'chirildi"})
 }
 
+// AdminRegenerateSingleAIReport regenerates an existing AI report by its ID using Google Gemini AI
+func (h *AIReportHandler) AdminRegenerateSingleAIReport(c *gin.Context) {
+	dbConn, err := getTenantDB(c)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	idStr := c.Param("id")
+	if idStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Report ID parametri talab qilinadi"})
+		return
+	}
+
+	var studentID int
+	var startDateStr string
+	var studentName, className string
+
+	err = dbConn.QueryRow(`
+		SELECT r.student_id, r.start_date::text, 
+		       u.last_name || ' ' || u.first_name as student_name, 
+		       COALESCE(c.name, 'Sinf belgilanmagan') as class_name
+		FROM ai_weekly_reports r
+		JOIN students s ON r.student_id = s.id
+		JOIN users u ON s.user_id = u.id
+		LEFT JOIN classes c ON s.class_id = c.id
+		WHERE r.id = $1`, idStr).Scan(&studentID, &startDateStr, &studentName, &className)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Hisobot topilmadi"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Hisobotni qidirishda xatolik: " + err.Error()})
+		return
+	}
+
+	targetTime, err := time.Parse("2006-01-02", startDateStr)
+	if err != nil {
+		targetTime = time.Now()
+	}
+
+	updatedReport, err := generateReportForStudentWithOption(dbConn, studentID, targetTime, true)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Qayta generatsiya qilishda xatolik: " + err.Error()})
+		return
+	}
+
+	type AdminStudentReportItem struct {
+		models.AIWeeklyReport
+		StudentName string `json:"student_name"`
+		ClassName   string `json:"class_name"`
+	}
+
+	resultItem := AdminStudentReportItem{
+		AIWeeklyReport: *updatedReport,
+		StudentName:    studentName,
+		ClassName:      className,
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Hisobot muvaffaqiyatli qayta yaratildi",
+		"report":  resultItem,
+	})
+}
+
 func GenerateReportForStudentExported(dbConn *sql.DB, studentID int, targetTime time.Time) (*models.AIWeeklyReport, error) {
 	return generateReportForStudent(dbConn, studentID, targetTime)
 }
 
+func GenerateReportForStudentWithOptionExported(dbConn *sql.DB, studentID int, targetTime time.Time, forceRegenerate bool) (*models.AIWeeklyReport, error) {
+	return generateReportForStudentWithOption(dbConn, studentID, targetTime, forceRegenerate)
+}
+
 func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Time) (*models.AIWeeklyReport, error) {
+	return generateReportForStudentWithOption(dbConn, studentID, targetTime, false)
+}
+
+func generateReportForStudentWithOption(dbConn *sql.DB, studentID int, targetTime time.Time, forceRegenerate bool) (*models.AIWeeklyReport, error) {
 	ensureAITable(dbConn)
 	year, weekNum := targetTime.ISOWeek()
 
@@ -771,25 +845,27 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 	endStr := sunday.Format("2006-01-02")
 
 	// 1. Check if report already exists in DB
-	var existing models.AIWeeklyReport
-	var summaryBytes []byte
-	err := dbConn.QueryRow(`
-		SELECT id, student_id, year, week_number, start_date::text, end_date::text, report_text, summary_json, created_at, updated_at
-		FROM ai_weekly_reports
-		WHERE student_id = $1 AND year = $2 AND week_number = $3`, studentID, year, weekNum).
-		Scan(&existing.ID, &existing.StudentID, &existing.Year, &existing.WeekNumber, &existing.StartDate, &existing.EndDate, &existing.ReportText, &summaryBytes, &existing.CreatedAt, &existing.UpdatedAt)
+	if !forceRegenerate {
+		var existing models.AIWeeklyReport
+		var summaryBytes []byte
+		err := dbConn.QueryRow(`
+			SELECT id, student_id, year, week_number, start_date::text, end_date::text, report_text, summary_json, created_at, updated_at
+			FROM ai_weekly_reports
+			WHERE student_id = $1 AND year = $2 AND week_number = $3`, studentID, year, weekNum).
+			Scan(&existing.ID, &existing.StudentID, &existing.Year, &existing.WeekNumber, &existing.StartDate, &existing.EndDate, &existing.ReportText, &summaryBytes, &existing.CreatedAt, &existing.UpdatedAt)
 
-	if err == nil {
-		if len(summaryBytes) > 0 {
-			json.Unmarshal(summaryBytes, &existing.SummaryJSON)
+		if err == nil {
+			if len(summaryBytes) > 0 {
+				json.Unmarshal(summaryBytes, &existing.SummaryJSON)
+			}
+			return &existing, nil
 		}
-		return &existing, nil
 	}
 
 	// 2. Fetch Student Details and Enrollment Date
 	var studentName, className string
 	var enrollmentDate sql.NullTime
-	err = dbConn.QueryRow(`
+	err := dbConn.QueryRow(`
 		SELECT u.first_name || ' ' || u.last_name, COALESCE(c.name, 'Sinf belgilanmagan'), s.enrollment_date
 		FROM students s
 		JOIN users u ON s.user_id = u.id
@@ -998,6 +1074,8 @@ func generateReportForStudent(dbConn *sql.DB, studentID int, targetTime time.Tim
 	err = dbConn.QueryRow(`
 		INSERT INTO ai_weekly_reports (student_id, year, week_number, start_date, end_date, report_text, summary_json)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (student_id, year, week_number) DO UPDATE
+		SET report_text = EXCLUDED.report_text, summary_json = EXCLUDED.summary_json, updated_at = NOW()
 		RETURNING id, created_at, updated_at`,
 		studentID, year, weekNum, startStr, endStr, generation.Text, summaryJSONBytes).
 		Scan(&newID, &createdAt, &updatedAt)

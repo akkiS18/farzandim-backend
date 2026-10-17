@@ -108,7 +108,7 @@ func GenerateAIWeeklyReportResult(dbConn *sql.DB, data StudentWeeklyDataContext)
 	}
 
 	// Try models in priority order
-	modelsToTry := []string{"gemini-2.5-flash", "gemini-3.6-flash", "gemini-2.0-flash", "gemini-1.5-flash"}
+	modelsToTry := []string{"gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"}
 	lastStatusErr := "empty_response"
 
 	for _, modelName := range modelsToTry {

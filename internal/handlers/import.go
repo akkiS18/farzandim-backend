@@ -12,6 +12,7 @@ import (
 
 	"github.com/farzandim/backend/internal/audit"
 	"github.com/farzandim/backend/internal/models"
+	"github.com/farzandim/backend/internal/services"
 	"github.com/farzandim/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/xuri/excelize/v2"
@@ -1253,107 +1254,37 @@ func (h *ImportHandler) ImportParents(c *gin.Context) {
 			passportPtr = &passport
 		}
 
-		var normalizedPassport *string
-		if passportPtr != nil && *passportPtr != "" {
-			norm := NormalizeDocumentNo(*passportPtr)
-			normalizedPassport = &norm
+		var middleNamePtr *string
+		if parentSharif != "" {
+			middleNamePtr = &parentSharif
 		}
 
-		// 3. Check if parent user already exists (by passport first, or phone if passport not provided)
-		var parentID int
-		var existingRoleName string
-
-		if normalizedPassport != nil {
-			err = tx.QueryRow(`
-				SELECT u.id, r.name FROM users u
-				JOIN roles r ON u.role_id = r.id
-				WHERE r.name = 'PARENT' AND u.is_deleted = false
-				  AND (UPPER(TRIM(u.passport)) = UPPER($1) OR UPPER(TRIM(u.document_no)) = UPPER($1))
-				LIMIT 1
-			`, *normalizedPassport).Scan(&parentID, &existingRoleName)
-		} else if nomer != "" {
-			err = tx.QueryRow(`
-				SELECT u.id, r.name FROM users u
-				JOIN roles r ON u.role_id = r.id
-				WHERE u.phone = $1 AND u.is_deleted = false
-				LIMIT 1
-			`, nomer).Scan(&parentID, &existingRoleName)
-		} else {
-			err = sql.ErrNoRows
-		}
-
-		if err != nil && err != sql.ErrNoRows {
+		parentSvc := services.NewParentService()
+		res, err := parentSvc.CreateOrLinkParent(tx, services.ParentInput{
+			FirstName:    parentIsm,
+			LastName:     parentFamiliya,
+			MiddleName:   middleNamePtr,
+			Passport:     passportPtr,
+			Phone:        nomer,
+			Password:     parol,
+			RelationType: parentTuri,
+			StudentID:    &studentID,
+		})
+		if err != nil {
 			tx.Rollback()
-			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Ota-onani tekshirishda xatolik: %v", err)})
+			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: err.Error()})
 			failedCount++
 			continue
 		}
+		parentID := res.ParentID
 
-		if err == sql.ErrNoRows {
-			// Create new parent user
-			hashedPassword, err := bcrypt.GenerateFromPassword([]byte(parol), bcrypt.DefaultCost)
-			if err != nil {
-				tx.Rollback()
-				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: "Parolni shifrlashda xatolik"})
-				failedCount++
-				continue
-			}
-
-			var middleNamePtr *string
-			if parentSharif != "" {
-				middleNamePtr = &parentSharif
-			}
-
-			insertUserQuery := `
-				INSERT INTO users (first_name, last_name, middle_name, passport, document_no, phone, password_hash, role_id, password_reset_required)
-				VALUES ($1, $2, $3, $4, $4, $5, $6, $7, true)
-				RETURNING id`
-			err = tx.QueryRow(insertUserQuery, parentIsm, parentFamiliya, middleNamePtr, normalizedPassport, nomer, string(hashedPassword), parentRoleID).Scan(&parentID)
-			if err != nil {
-				tx.Rollback()
-				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Ota-ona profilini yaratib bo'lmadi: %v", err)})
-				failedCount++
-				continue
-			}
-
-			// Audit log user creation
+		if res.IsNewUser {
 			audit.LogChange(c, tx, audit.LogData{
 				Action:    "CREATE",
 				TableName: "users",
 				RecordID:  strconv.Itoa(parentID),
-				NewValues: models.User{
-					ID:         parentID,
-					FirstName:  parentIsm,
-					LastName:   parentFamiliya,
-					MiddleName: middleNamePtr,
-					Passport:   passportPtr,
-					Phone:      &nomer,
-					RoleID:     parentRoleID,
-					IsDeleted:  false,
-				},
+				NewValues: res.User,
 			})
-		} else {
-			// Existing user found. Verify that they have the PARENT role.
-			if existingRoleName != "PARENT" {
-				tx.Rollback()
-				rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Foydalanuvchi tizimda mavjud, lekin uning roli '%s' (faqat PARENT roldagi profillarni bog'lash mumkin)", existingRoleName)})
-				failedCount++
-				continue
-			}
-			// Password remains unchanged ("parol eskiligicha qolib ketishi kerak")
-		}
-
-		// 4. Create or update link in student_parents
-		upsertLinkQuery := `
-			INSERT INTO student_parents (student_id, parent_id, relation_type)
-			VALUES ($1, $2, $3)
-			ON CONFLICT (student_id, parent_id) DO UPDATE SET relation_type = EXCLUDED.relation_type`
-		_, err = tx.Exec(upsertLinkQuery, studentID, parentID, parentTuri)
-		if err != nil {
-			tx.Rollback()
-			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Ota-ona bog'liqligini saqlashda xatolik: %v", err)})
-			failedCount++
-			continue
 		}
 
 		// Audit Log link creation
@@ -2440,7 +2371,9 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 			}
 		}
 
-		// Helper to add or link parent (Passport-first identification)
+		parentSvc := services.NewParentService()
+
+		// Helper to add or link parent (Passport-first identification via ParentService)
 		createOrGetParent := func(fullName, passport, phone, relType string) error {
 			cleanName := strings.TrimSpace(fullName)
 			lowerName := strings.ToLower(cleanName)
@@ -2449,12 +2382,12 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 				return nil // Skip if parent not provided, deceased, or divorced
 			}
 
-			pLast, pFirst, pMiddle := splitFIO(cleanName)
+			pLast, pFirst, pMiddle := utils.SplitFIO(cleanName)
 			if pFirst == "" && pLast != "" {
 				pFirst = "Vasiy"
 			}
 
-			cleanDoc := NormalizeDocumentNo(passport)
+			cleanDoc := utils.NormalizeDocumentNo(passport)
 			cleanDocLower := strings.ToLower(cleanDoc)
 
 			// Qat'iy talab: Ota-onaning ismi bor bo'lsada, pasport seriyasi yo'q bo'lsa, bazaga qo'shmasin!
@@ -2464,87 +2397,24 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 				return nil
 			}
 
-			pDocPtr := &cleanDoc
-
-			cleanPhone := utils.NormalizePhone(phone)
-			var pPhonePtr *string
-			if cleanPhone != "" {
-				pPhonePtr = &cleanPhone
-			}
-
-			found := false
-			var parentUserID int
-
-			// 1. Primary lookup: by Passport Serial Number
-			if pDocPtr != nil {
-				var existingPassID int
-				err := tx.QueryRow(`
-					SELECT u.id FROM users u
-					JOIN roles r ON u.role_id = r.id
-					WHERE r.name = 'PARENT' 
-					  AND (UPPER(TRIM(u.passport)) = UPPER(TRIM($1)) OR REGEXP_REPLACE(UPPER(u.passport), '[^A-Z0-9]', '', 'g') = REGEXP_REPLACE(UPPER($1), '[^A-Z0-9]', '', 'g'))
-					  AND u.is_deleted = false
-					LIMIT 1
-				`, *pDocPtr).Scan(&existingPassID)
-				if err == nil {
-					parentUserID = existingPassID
-					found = true
-					// Update phone if parent had none
-					if pPhonePtr != nil {
-						_, _ = tx.Exec("UPDATE users SET phone = $1 WHERE id = $2 AND (phone IS NULL OR phone = '')", *pPhonePtr, parentUserID)
-					}
-				}
-			}
-
-			// 2. Secondary lookup: by Phone + Name if passport was not provided
-			if !found && pPhonePtr != nil {
-				var existingID int
-				err := tx.QueryRow(`
-					SELECT u.id FROM users u
-					JOIN roles r ON u.role_id = r.id
-					WHERE r.name = 'PARENT' 
-					  AND u.phone = $1 
-					  AND LOWER(u.first_name) = LOWER($2) 
-					  AND LOWER(u.last_name) = LOWER($3)
-					  AND u.is_deleted = false
-					LIMIT 1
-				`, *pPhonePtr, pFirst, pLast).Scan(&existingID)
-				if err == nil {
-					parentUserID = existingID
-					found = true
-					if pDocPtr != nil {
-						_, _ = tx.Exec("UPDATE users SET passport = $1, document_no = $1 WHERE id = $2 AND (passport IS NULL OR passport = '')", *pDocPtr, parentUserID)
-					}
-				}
-			}
-
 			var pMiddlePtr *string
 			if pMiddle != "" {
 				pMiddlePtr = &pMiddle
 			}
+			pDocPtr := &cleanDoc
 
-			// 3. Create parent if not found
-			if !found {
-				pPass := "123"
-				pHashed, _ := bcrypt.GenerateFromPassword([]byte(pPass), bcrypt.DefaultCost)
-
-				err := tx.QueryRow(`
-					INSERT INTO users (first_name, last_name, middle_name, phone, passport, document_no, password_hash, role_id, password_reset_required)
-					VALUES ($1, $2, $3, $4, $5, $5, $6, $7, true)
-					RETURNING id`, pFirst, pLast, pMiddlePtr, pPhonePtr, pDocPtr, string(pHashed), parentRoleID).Scan(&parentUserID)
-
-				if err != nil {
-					return fmt.Errorf("Vasiy accountida xatolik: %v", err)
-				}
-			}
-
-			// 4. Link parent to student (re-usable for siblings)
-			_, err = tx.Exec(`
-				INSERT INTO student_parents (student_id, parent_id, relation_type)
-				VALUES ($1, $2, $3)
-				ON CONFLICT (student_id, parent_id) DO UPDATE SET relation_type = EXCLUDED.relation_type`, studentID, parentUserID, relType)
+			_, err := parentSvc.CreateOrLinkParent(tx, services.ParentInput{
+				FirstName:    pFirst,
+				LastName:     pLast,
+				MiddleName:   pMiddlePtr,
+				Passport:     pDocPtr,
+				Phone:        phone,
+				Password:     "123",
+				RelationType: relType,
+				StudentID:    &studentID,
+			})
 			if err != nil {
-				return fmt.Errorf("Vasiyni o'quvchiga bog'lashda xatolik: %v", err)
+				return fmt.Errorf("Vasiy accountida xatolik: %v", err)
 			}
 			return nil
 		}

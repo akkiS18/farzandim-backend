@@ -381,6 +381,7 @@ func main() {
 		authTenantGroup.GET("/admin/ai-reports/by-week", middleware.RequireRole("ADMIN"), aiReportHandler.GetAIReportsByWeek)
 		authTenantGroup.DELETE("/admin/ai-reports/week", middleware.RequireRole("ADMIN"), aiReportHandler.DeleteWeekAIReports)
 		authTenantGroup.DELETE("/admin/ai-reports/:id", middleware.RequireRole("ADMIN"), aiReportHandler.DeleteSingleAIReport)
+		authTenantGroup.POST("/admin/ai-reports/:id/regenerate", middleware.RequireRole("ADMIN"), aiReportHandler.AdminRegenerateSingleAIReport)
 
 		// AI Instructions & Prompt History
 		authTenantGroup.GET("/admin/ai-instructions", middleware.RequireRole("ADMIN"), aiInstructionHandler.GetAIInstruction)

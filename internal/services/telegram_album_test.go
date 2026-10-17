@@ -6,8 +6,16 @@ import (
 )
 
 func TestResolveAnnouncementImagePath(t *testing.T) {
-	// Test existing file
+	// Ensure test file exists for test
 	relPath := "/uploads/announcements/079e9345-b4a7-4fee-bbcd-9c6680195849/e8b2c7b0-06c4-4407-86a8-048329b3eab4.jpg"
+	_ = os.MkdirAll("uploads/announcements/079e9345-b4a7-4fee-bbcd-9c6680195849", 0755)
+	if f, err := os.Create("uploads/announcements/079e9345-b4a7-4fee-bbcd-9c6680195849/e8b2c7b0-06c4-4407-86a8-048329b3eab4.jpg"); err == nil {
+		_ = f.Close()
+	}
+	defer func() {
+		_ = os.RemoveAll("uploads/announcements/079e9345-b4a7-4fee-bbcd-9c6680195849")
+	}()
+
 	resolved, err := resolveAnnouncementImagePath(relPath)
 	if err != nil {
 		t.Fatalf("expected to resolve %s, got error: %v", relPath, err)
