@@ -107,8 +107,8 @@ func GenerateAIWeeklyReportResult(dbConn *sql.DB, data StudentWeeklyDataContext)
 		return ReportGenerationResult{}, fmt.Errorf("failed to marshal gemini request: %v", err)
 	}
 
-	// Try models in priority order
-	modelsToTry := []string{"gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"}
+	// Try models in priority order (gemini-2.5-flash is primary and fastest ~7s)
+	modelsToTry := []string{"gemini-2.5-flash", "gemini-3.8-flash"}
 	lastStatusErr := "empty_response"
 
 	for _, modelName := range modelsToTry {
@@ -132,6 +132,31 @@ func GenerateAIWeeklyReportResult(dbConn *sql.DB, data StudentWeeklyDataContext)
 				}
 			}
 			resp.Body.Close()
+		} else if resp.StatusCode == http.StatusTooManyRequests {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			lastStatusErr = "http_429"
+			fmt.Printf("[Gemini Model %s Rate Limit 429] Waiting 4 seconds before retry...\n", modelName)
+			time.Sleep(4 * time.Second)
+
+			retryResp, retryErr := geminiHTTPClient.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
+			if retryErr == nil {
+				if retryResp.StatusCode == http.StatusOK {
+					var geminiResp GeminiResponse
+					if err := json.NewDecoder(retryResp.Body).Decode(&geminiResp); err == nil {
+						retryResp.Body.Close()
+						if len(geminiResp.Candidates) > 0 && len(geminiResp.Candidates[0].Content.Parts) > 0 {
+							text := strings.TrimSpace(geminiResp.Candidates[0].Content.Parts[0].Text)
+							if text != "" {
+								return ReportGenerationResult{Text: text, Source: "ai", Model: modelName}, nil
+							}
+						}
+					}
+				} else {
+					lastStatusErr = fmt.Sprintf("http_%d", retryResp.StatusCode)
+				}
+				retryResp.Body.Close()
+			}
 		} else {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()

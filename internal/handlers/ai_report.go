@@ -259,8 +259,8 @@ func runBatchGenerationJob(dbConn *sql.DB, jobID string, targetStudentIDs []int,
 			SET current_student_name = $1, processed_students = $2, generated_count = $3, error_count = $4, updated_at = NOW() 
 			WHERE id = $5`, studentName, idx, generatedCount, errorCount, jobID)
 
-		// Throttling / Rate Limit safety delay (350ms)
-		time.Sleep(350 * time.Millisecond)
+		// Throttling / Rate Limit safety delay (2000ms)
+		time.Sleep(2000 * time.Millisecond)
 
 		_, err = generateReportForStudent(dbConn, sID, targetTime)
 		if err != nil {
@@ -858,7 +858,11 @@ func generateReportForStudentWithOption(dbConn *sql.DB, studentID int, targetTim
 			if len(summaryBytes) > 0 {
 				json.Unmarshal(summaryBytes, &existing.SummaryJSON)
 			}
-			return &existing, nil
+			// Faqat haqiqiy AI orqali yaratilgan bo'lsagina o'tkazib yuboramiz.
+			// Agar eski "template" (xatolik sabab tushib qolgan shablon) bo'lsa, uni AI bilan qayta generatsiya qilib yangilaymiz.
+			if existing.SummaryJSON != nil && existing.SummaryJSON["generation_source"] == "ai" {
+				return &existing, nil
+			}
 		}
 	}
 
