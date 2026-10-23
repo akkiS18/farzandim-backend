@@ -12,6 +12,7 @@ type Claims struct {
 	UserID    string `json:"user_id"`
 	Role      string `json:"role"`
 	SchoolID  string `json:"school_id,omitempty"`
+	AuthVersion int `json:"auth_version,omitempty"`
 	TokenType string `json:"token_type,omitempty"` // "access" or "refresh"
 	jwt.RegisteredClaims
 }
@@ -45,7 +46,7 @@ func AuthMiddleware(jwtSecret string) gin.HandlerFunc {
 		claims := &Claims{}
 		token, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
 			return []byte(jwtSecret), nil
-		})
+		}, jwt.WithValidMethods([]string{"HS256"}))
 
 		if err != nil || !token.Valid {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
@@ -63,6 +64,7 @@ func AuthMiddleware(jwtSecret string) gin.HandlerFunc {
 		c.Set("userID", claims.UserID)
 		c.Set("role", claims.Role)
 		c.Set("schoolID", claims.SchoolID)
+		c.Set("authVersion", claims.AuthVersion)
 
 		c.Next()
 	}
@@ -101,3 +103,4 @@ func RequireRole(allowedRoles ...string) gin.HandlerFunc {
 		c.Next()
 	}
 }
+

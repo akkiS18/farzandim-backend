@@ -1,0 +1,1 @@
+ALTER TABLE super_admins ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 1;

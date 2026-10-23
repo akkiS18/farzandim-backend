@@ -9,7 +9,7 @@ import (
 type School struct {
 	ID                 uuid.UUID  `json:"id" db:"id"`
 	Name               string     `json:"name" db:"name"`
-	DBConnectionString string     `json:"db_connection_string" db:"db_connection_string"`
+	DBConnectionString string     `json:"-" db:"db_connection_string"`
 	IsDeleted          bool       `json:"is_deleted" db:"is_deleted"`
 	DeletedAt          *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
 	CreatedAt          time.Time  `json:"created_at" db:"created_at"`
@@ -28,3 +28,4 @@ type SuperAdmin struct {
 	CreatedAt          time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at" db:"updated_at"`
 }
+

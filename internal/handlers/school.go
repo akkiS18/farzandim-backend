@@ -2,16 +2,21 @@ package handlers
 
 import (
 	"database/sql"
-	"net/http"
+	"errors"
+		"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/farzandim/backend/internal/audit"
 	"github.com/farzandim/backend/internal/db"
 	"github.com/farzandim/backend/internal/models"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
+	"github.com/farzandim/backend/internal/utils"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -30,10 +35,35 @@ type CreateSchoolRequest struct {
 func (h *SchoolHandler) CreateSchool(c *gin.Context) {
 	var req CreateSchoolRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body", "details": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" || utf8.RuneCountInString(req.Name) > 255 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Maktab nomi 1–255 ta belgi bo‘lishi kerak"})
+		return
+	}
+	// Serialize provisioning requests across backend instances, before creating a DB.
+	metadataTx, err := db.CentralDB.BeginTx(c.Request.Context(), nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not start school provisioning"})
+		return
+	}
+	defer metadataTx.Rollback()
+	if _, err := metadataTx.ExecContext(c.Request.Context(), "SELECT pg_advisory_xact_lock(72410323)"); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not lock school provisioning"})
+		return
+	}
+	var duplicate bool
+	if err := metadataTx.QueryRowContext(c.Request.Context(), "SELECT EXISTS(SELECT 1 FROM schools WHERE LOWER(TRIM(name)) = LOWER($1))", req.Name).Scan(&duplicate); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not check school name"})
+		return
+	}
+	if duplicate {
+		c.JSON(http.StatusConflict, gin.H{"error": "Bu nomdagi maktab allaqachon mavjud"})
+		return
+	}
 	// 1. Generate new unique identifier for the school
 	schoolUUID := uuid.New()
 
@@ -42,21 +72,24 @@ func (h *SchoolHandler) CreateSchool(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Failed to provision school database and apply schemas",
-			"details": err.Error(),
 		})
 		return
 	}
 
 	// 3. Save school metadata to the central database
-	_, err = db.CentralDB.Exec(
+	_, err = metadataTx.ExecContext(c.Request.Context(),
 		"INSERT INTO schools (id, name, db_connection_string) VALUES ($1, $2, $3)",
 		schoolUUID, req.Name, connStr,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Failed to save school metadata to central repository",
-			"details": err.Error(),
 		})
+		return
+	}
+
+	if err := metadataTx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "School registration did not complete; contact the operator before retrying"})
 		return
 	}
 
@@ -76,7 +109,7 @@ func (h *SchoolHandler) CreateSchool(c *gin.Context) {
 func (h *SchoolHandler) ListSchools(c *gin.Context) {
 	rows, err := db.CentralDB.Query("SELECT id, name, db_connection_string FROM schools WHERE is_deleted = false ORDER BY created_at DESC")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query schools list", "details": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query schools list"})
 		return
 	}
 	defer rows.Close()
@@ -86,12 +119,16 @@ func (h *SchoolHandler) ListSchools(c *gin.Context) {
 		var s models.School
 		err := rows.Scan(&s.ID, &s.Name, &s.DBConnectionString)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse school data", "details": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse school data"})
 			return
 		}
 		schools = append(schools, s)
 	}
 
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not finish reading schools"})
+		return
+	}
 	c.JSON(http.StatusOK, schools)
 }
 
@@ -106,7 +143,7 @@ type PublicSchoolDto struct {
 func (h *SchoolHandler) ListPublicSchools(c *gin.Context) {
 	rows, err := db.CentralDB.Query("SELECT id, name, db_connection_string FROM schools WHERE is_deleted = false ORDER BY name ASC")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query schools list", "details": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query schools list"})
 		return
 	}
 	defer rows.Close()
@@ -134,12 +171,20 @@ func (h *SchoolHandler) ListPublicSchools(c *gin.Context) {
 		})
 	}
 
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not finish reading schools"})
+		return
+	}
 	c.JSON(http.StatusOK, schools)
 }
 
 // GetSchool gets details for a single school
 func (h *SchoolHandler) GetSchool(c *gin.Context) {
 	schoolID := c.Param("id")
+	if _, err := uuid.Parse(schoolID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid school ID"})
+		return
+	}
 
 	var s models.School
 	err := db.CentralDB.QueryRow("SELECT id, name, db_connection_string FROM schools WHERE id = $1 AND is_deleted = false", schoolID).
@@ -149,7 +194,7 @@ func (h *SchoolHandler) GetSchool(c *gin.Context) {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "School not found"})
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query school record", "details": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query school record"})
 		}
 		return
 	}
@@ -160,11 +205,15 @@ func (h *SchoolHandler) GetSchool(c *gin.Context) {
 // ListSchoolAdmins queries the tenant database to list all active admin users
 func (h *SchoolHandler) ListSchoolAdmins(c *gin.Context) {
 	schoolID := c.Param("id")
+	if _, err := uuid.Parse(schoolID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid school ID"})
+		return
+	}
 
 	// Resolve dynamic connection pool
 	tenantDB, err := db.TenantConnManager.GetTenantDB(schoolID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to connect to school database", "details": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to connect to school database"})
 		return
 	}
 
@@ -172,7 +221,7 @@ func (h *SchoolHandler) ListSchoolAdmins(c *gin.Context) {
 	var adminRoleID int
 	err = tenantDB.QueryRow("SELECT id FROM roles WHERE name = 'ADMIN'").Scan(&adminRoleID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Role 'ADMIN' is not initialized in the tenant DB", "details": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Role 'ADMIN' is not initialized in the tenant DB"})
 		return
 	}
 
@@ -184,7 +233,7 @@ func (h *SchoolHandler) ListSchoolAdmins(c *gin.Context) {
 		ORDER BY first_name, last_name`
 	rows, err := tenantDB.Query(query, adminRoleID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query school admin list", "details": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query school admin list"})
 		return
 	}
 	defer rows.Close()
@@ -194,12 +243,16 @@ func (h *SchoolHandler) ListSchoolAdmins(c *gin.Context) {
 		var u models.User
 		err := rows.Scan(&u.ID, &u.Email, &u.Phone, &u.FirstName, &u.LastName, &u.MiddleName, &u.RoleID, &u.IsDeleted, &u.CreatedAt, &u.UpdatedAt)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse admin user record", "details": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse admin user record"})
 			return
 		}
 		admins = append(admins, u)
 	}
 
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not finish reading admins"})
+		return
+	}
 	c.JSON(http.StatusOK, admins)
 }
 
@@ -215,17 +268,40 @@ type CreateSchoolAdminRequest struct {
 // CreateSchoolAdmin inserts a new school admin into the isolated tenant database
 func (h *SchoolHandler) CreateSchoolAdmin(c *gin.Context) {
 	schoolID := c.Param("id")
-
-	var req CreateSchoolAdminRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body", "details": err.Error()})
+	if _, err := uuid.Parse(schoolID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid school ID"})
 		return
 	}
 
+	var req CreateSchoolAdminRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	req.FirstName = strings.TrimSpace(req.FirstName)
+	req.LastName = strings.TrimSpace(req.LastName)
+	req.Phone = utils.NormalizePhone(req.Phone)
+	if req.FirstName == "" || req.LastName == "" || len(req.Phone) < 9 || len(req.Phone) > 15 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Ism, familiya va to‘g‘ri telefon majburiy"})
+		return
+	}
+	if err := utils.ValidateAdminPassword(req.Password); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.Email != nil {
+		value := strings.TrimSpace(*req.Email)
+		if value == "" {
+			req.Email = nil
+		} else {
+			req.Email = &value
+		}
+	}
 	// Resolve connection pool dynamically
 	tenantDB, err := db.TenantConnManager.GetTenantDB(schoolID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to connect to school database", "details": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to connect to school database"})
 		return
 	}
 
@@ -233,7 +309,7 @@ func (h *SchoolHandler) CreateSchoolAdmin(c *gin.Context) {
 	var adminRoleID int
 	err = tenantDB.QueryRow("SELECT id FROM roles WHERE name = 'ADMIN'").Scan(&adminRoleID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Role 'ADMIN' is not initialized in the tenant DB", "details": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Role 'ADMIN' is not initialized in the tenant DB"})
 		return
 	}
 
@@ -247,19 +323,25 @@ func (h *SchoolHandler) CreateSchoolAdmin(c *gin.Context) {
 	// Begin transaction to ensure atomic insert & audit logging
 	tx, err := tenantDB.Begin()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open database transaction", "details": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open database transaction"})
 		return
 	}
 	defer tx.Rollback()
 
 	var userID int
+	var createdAt, updatedAt time.Time
 	insertQuery := `
 		INSERT INTO users (first_name, last_name, middle_name, phone, email, password_hash, role_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		RETURNING id`
-	err = tx.QueryRow(insertQuery, req.FirstName, req.LastName, req.MiddleName, req.Phone, req.Email, string(hashedPassword), adminRoleID).Scan(&userID)
+		RETURNING id, created_at, updated_at`
+	err = tx.QueryRow(insertQuery, req.FirstName, req.LastName, req.MiddleName, req.Phone, req.Email, string(hashedPassword), adminRoleID).Scan(&userID, &createdAt, &updatedAt)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write admin record to school DB", "details": err.Error()})
+		var pgErr *pq.Error
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			c.JSON(http.StatusConflict, gin.H{"error": "Bu telefon yoki email allaqachon ro‘yxatdan o‘tgan"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write admin record to school DB"})
 		return
 	}
 
@@ -272,6 +354,8 @@ func (h *SchoolHandler) CreateSchoolAdmin(c *gin.Context) {
 		Email:      req.Email,
 		RoleID:     adminRoleID,
 		IsDeleted:  false,
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
 	}
 
 	// Log change in the tenant audit logs
@@ -283,9 +367,10 @@ func (h *SchoolHandler) CreateSchoolAdmin(c *gin.Context) {
 	})
 
 	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit database transaction", "details": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit database transaction"})
 		return
 	}
 
 	c.JSON(http.StatusCreated, newUser)
 }
+
