@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -99,6 +100,9 @@ func (tm *TenantManager) GetTenantDB(schoolID string) (*sql.DB, error) {
 func (tm *TenantManager) CreateAndMigrateTenantDB(pgRootURL string, schoolUUID string, schoolName string) (string, error) {
 	// Clean school name to make safe PostgreSQL database name starting with db_f_
 	dbName := sanitizeDBName(schoolName)
+	if dbName == "db_f_" || len(dbName) > 63 {
+		return "", fmt.Errorf("school name must produce a non-empty database identifier of at most 63 bytes")
+	}
 
 	// 1. Connect to root DB and execute CREATE DATABASE
 	rootDB, err := sql.Open("postgres", pgRootURL)
@@ -114,8 +118,11 @@ func (tm *TenantManager) CreateAndMigrateTenantDB(pgRootURL string, schoolUUID s
 		return "", fmt.Errorf("failed to check database existence: %w", err)
 	}
 
-	if !exists {
-		// CREATE DATABASE cannot be executed in a transaction, directExec is safe since dbName is formatted from UUID
+	if exists {
+		return "", fmt.Errorf("database identifier already exists; choose a different school name")
+	}
+	{
+		// CREATE DATABASE cannot be executed in a transaction, directExec is safe since dbName contains only lowercase ASCII letters, digits and underscores
 		_, err = rootDB.Exec(fmt.Sprintf("CREATE DATABASE %s", dbName))
 		if err != nil {
 			return "", fmt.Errorf("failed to execute CREATE DATABASE: %w", err)
@@ -129,70 +136,64 @@ func (tm *TenantManager) CreateAndMigrateTenantDB(pgRootURL string, schoolUUID s
 		return "", fmt.Errorf("failed to build connection string: %w", err)
 	}
 
-	// 3. Open connection to new tenant DB to run migrations
-	tenantDB, err := sql.Open("postgres", tenantConnStr)
-	if err != nil {
-		return "", fmt.Errorf("failed to connect to new tenant DB for migration: %w", err)
+	if err := migrateTenantConnection(tenantConnStr); err != nil {
+		// Do not drop a database automatically after a failed migration.
+		// An operator must inspect and recover the unregistered database.
+		return "", err
 	}
-	defer tenantDB.Close()
-
-	// 4. Run migrations
-	driver, err := postgres.WithInstance(tenantDB, &postgres.Config{})
-	if err != nil {
-		return "", fmt.Errorf("failed to create migration driver: %w", err)
-	}
-
-	// golang-migrate will load SQL from backend/migrations/tenant folder
-	m, err := migrate.NewWithDatabaseInstance(
-		"file://migrations/tenant",
-		dbName, driver,
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to load migration files: %w", err)
-	}
-
-	err = m.Up()
-	if err != nil && err != migrate.ErrNoChange {
-		if strings.Contains(err.Error(), "Dirty") || strings.Contains(err.Error(), "dirty") {
-			v, dirty, verr := m.Version()
-			if verr == nil && dirty {
-				log.Printf("Detected dirty database state for %s at version %d, force clearing dirty state...", dbName, v)
-				if errForce := m.Force(int(v)); errForce == nil {
-					err = m.Up() // retry up after clearing dirty flag
-				}
-			}
-		}
-	}
-	if err != nil && err != migrate.ErrNoChange {
-		return "", fmt.Errorf("failed to run migrations: %w", err)
-	}
-
-	log.Printf("Migrations applied successfully to %s", dbName)
 	return tenantConnStr, nil
 }
 
+// Migrate only the registered connection; never derive an existing tenant DB from its name.
+func migrateTenantConnection(connStr string) error {
+	tenantDB, err := sql.Open("postgres", connStr)
+	if err != nil {
+		return fmt.Errorf("failed to open tenant database")
+	}
+	defer tenantDB.Close()
+	driver, err := postgres.WithInstance(tenantDB, &postgres.Config{})
+	if err != nil {
+		return fmt.Errorf("failed to create tenant migration driver")
+	}
+	m, err := migrate.NewWithDatabaseInstance("file://migrations/tenant", "postgres", driver)
+	if err != nil {
+		return fmt.Errorf("failed to load tenant migrations")
+	}
+	defer m.Close()
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		// Dirty migrations require operator recovery; never silently Force the version.
+		return fmt.Errorf("tenant migration failed: %w", err)
+	}
+	return nil
+}
+
 // MigrateAllTenants runs migrations on all existing tenant databases listed in the central DB
-func (tm *TenantManager) MigrateAllTenants(pgRootURL string) error {
+func (tm *TenantManager) MigrateAllTenants(_ string) error {
 	rows, err := CentralDB.Query("SELECT id, name, db_connection_string FROM schools WHERE is_deleted = false")
 	if err != nil {
 		return fmt.Errorf("failed to query schools for migration: %w", err)
 	}
 	defer rows.Close()
 
+	var migrationErrors []error
 	for rows.Next() {
 		var id, name, connStr string
 		if err := rows.Scan(&id, &name, &connStr); err != nil {
-			log.Printf("Failed to scan school row: %v", err)
+			migrationErrors = append(migrationErrors, fmt.Errorf("failed to read tenant metadata"))
 			continue
 		}
 
 		log.Printf("Running migrations for school: %s (%s)", name, id)
-		_, err = tm.CreateAndMigrateTenantDB(pgRootURL, id, name)
+		err = migrateTenantConnection(connStr)
 		if err != nil {
 			log.Printf("Failed to migrate database for school %s: %v", name, err)
+			migrationErrors = append(migrationErrors, fmt.Errorf("school %s migration failed", id))
 		}
 	}
-	return nil
+	if err := rows.Err(); err != nil {
+		migrationErrors = append(migrationErrors, fmt.Errorf("failed to read tenant list"))
+	}
+	return errors.Join(migrationErrors...)
 }
 
 func sanitizeDBName(schoolName string) string {
@@ -347,3 +348,4 @@ func sanitizeSubdomain(subdomain string) string {
 	}
 	return strings.Trim(cleaned, "_")
 }
+

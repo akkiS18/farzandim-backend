@@ -27,7 +27,10 @@ func LoadConfig() *Config {
 	port := getEnv("PORT", "6560")
 	centralDBURL := getEnv("CENTRAL_DB_URL", "")
 	pgRootURL := getEnv("PG_ROOT_URL", "")
-	jwtSecret := getEnv("JWT_SECRET", "super-secret-key")
+	jwtSecret := getEnv("JWT_SECRET", "")
+	if len(strings.TrimSpace(jwtSecret)) < 32 || jwtSecret == "super-secret-key" {
+		log.Fatal("JWT_SECRET must be explicitly set to a strong secret of at least 32 bytes")
+	}
 	allowedOriginDomain := getEnv("ALLOWED_ORIGIN_DOMAIN", "")
 	telegramBotToken := getEnv("TELEGRAM_BOT_TOKEN", "")
 	feedbackBotToken := getEnv("FEEDBACK_BOT_TOKEN", "")
@@ -68,3 +71,4 @@ func getEnv(key, defaultVal string) string {
 	}
 	return defaultVal
 }
+

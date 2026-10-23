@@ -33,6 +33,12 @@ func main() {
 	cache.InitFastCache(5000)
 	middleware.InitQoS()
 
+	// Run migrations on all existing tenant DBs at startup
+	log.Println("Running startup migrations on all tenant DBs...")
+	if err := db.TenantConnManager.MigrateAllTenants(cfg.PGRootURL); err != nil {
+		log.Fatal("Tenant migrations failed; refusing to serve requests. Check database migration logs.")
+	}
+
 	// Load and start telegram bots for all configured schools from central database
 	log.Println("Starting Telegram Bots for schools...")
 	go func() {
@@ -56,12 +62,6 @@ func main() {
 	// Start lightning parent feedback bot
 	if cfg.FeedbackBotToken != "" {
 		services.StartFeedbackBot(cfg.FeedbackBotToken, cfg.FeedbackAdminChatIDs, db.CentralDB)
-	}
-
-	// Run migrations on all existing tenant DBs at startup
-	log.Println("Running startup migrations on all tenant DBs...")
-	if err := db.TenantConnManager.MigrateAllTenants(cfg.PGRootURL); err != nil {
-		log.Printf("Warning: Failed to run startup migrations: %v", err)
 	}
 
 	// 3. Initialize handlers
@@ -132,14 +132,17 @@ func main() {
 	// --- END CORS FIX ---
 
 	// Super Admin authentication endpoints
-	r.POST("/api/admin/super/register", authHandler.RegisterSuperAdmin)
-	r.POST("/api/admin/super/login", authHandler.LoginSuperAdmin)
+	// Super-admin creation is available only to an authenticated active super-admin.
+	r.POST("/api/admin/super/login", middleware.SuperAdminLoginLimit(), authHandler.LoginSuperAdmin)
 
 	// Super Admin schools database provisioning endpoint (Protected)
 	superAdminGroup := r.Group("/api/admin")
 	superAdminGroup.Use(middleware.AuthMiddleware(cfg.JWTSecret))
 	superAdminGroup.Use(middleware.RequireRole("SUPER_ADMIN"))
+	superAdminGroup.Use(middleware.RequireActiveSuperAdmin())
 	{
+		superAdminGroup.POST("/super/register", authHandler.RegisterSuperAdmin)
+		superAdminGroup.POST("/super/logout", authHandler.LogoutSuperAdmin)
 		superAdminGroup.POST("/schools", schoolHandler.CreateSchool)
 		superAdminGroup.GET("/schools", schoolHandler.ListSchools)
 		superAdminGroup.GET("/schools/:id", schoolHandler.GetSchool)
@@ -506,3 +509,4 @@ func runWeeklyAIReporterScheduler() {
 		log.Printf("[AI Cron Scheduler] School '%s': %d AI weekly reports processed", name, generatedCount)
 	}
 }
+

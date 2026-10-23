@@ -80,6 +80,10 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 	userIDStr := userIDVal.(string)
 
 	if role == "SUPER_ADMIN" {
+		if err := utils.ValidateAdminPassword(req.NewPassword); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		// Super Admin password change in Central DB
 		var passwordHash string
 		err := db.CentralDB.QueryRow(
@@ -102,15 +106,19 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 			return
 		}
 
-		_, err = db.CentralDB.Exec(
-			"UPDATE super_admins SET password_hash = $1, updated_at = NOW() WHERE id = $2",
-			string(newHash), userIDStr,
+		result, err := db.CentralDB.ExecContext(c.Request.Context(),
+			"UPDATE super_admins SET password_hash = $1, auth_version = auth_version + 1, updated_at = NOW() WHERE id = $2 AND password_hash = $3 AND auth_version = $4 AND is_deleted = false",
+			string(newHash), userIDStr, passwordHash, c.GetInt("authVersion"),
 		)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update password", "details": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update password"})
 			return
 		}
 
+		if changed, _ := result.RowsAffected(); changed != 1 {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Session changed; sign in again"})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"message": "Parol muvaffaqiyatli o'zgartirildi"})
 		return
 	}
@@ -184,12 +192,27 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 }
 
 func (h *AuthHandler) RegisterSuperAdmin(c *gin.Context) {
+	if c.GetString("role") != "SUPER_ADMIN" || c.GetInt("authVersion") < 1 {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Active super-admin access required"})
+		return
+	}
 	var req SuperAdminRegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
+	req.FirstName = strings.TrimSpace(req.FirstName)
+	req.LastName = strings.TrimSpace(req.LastName)
+	req.Phone = utils.NormalizePhone(req.Phone)
+	if req.FirstName == "" || req.LastName == "" || len(req.Phone) < 9 || len(req.Phone) > 15 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Valid name and phone are required"})
+		return
+	}
+	if err := utils.ValidateAdminPassword(req.Password); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encrypt credentials"})
@@ -203,7 +226,7 @@ func (h *AuthHandler) RegisterSuperAdmin(c *gin.Context) {
 		superAdminID, req.Email, req.Phone, string(hashedPassword), req.FirstName, req.LastName,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write super admin record", "details": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write super admin record"})
 		return
 	}
 
@@ -222,19 +245,20 @@ func (h *AuthHandler) LoginSuperAdmin(c *gin.Context) {
 
 	var id uuid.UUID
 	var passwordHash string
+	var authVersion int
 	var firstName, lastName string
 	err := db.CentralDB.QueryRow(
-		`SELECT id, password_hash, first_name, last_name FROM super_admins 
+		`SELECT id, password_hash, first_name, last_name, auth_version FROM super_admins 
 		 WHERE (phone = $1 OR REGEXP_REPLACE(phone, '\D', '', 'g') = REGEXP_REPLACE($1, '\D', '', 'g')) AND is_deleted = false`,
 		req.Phone,
-	).Scan(&id, &passwordHash, &firstName, &lastName)
+	).Scan(&id, &passwordHash, &firstName, &lastName, &authVersion)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Ushbu telefon raqamiga ega Super Admin topilmadi", "error_code": "USER_NOT_FOUND"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Telefon yoki parol noto‘g‘ri"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query Super Admin", "details": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query Super Admin"})
 		return
 	}
 
@@ -243,17 +267,17 @@ func (h *AuthHandler) LoginSuperAdmin(c *gin.Context) {
 	<-bcryptSemaphore
 
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Kiritilgan parol noto'g'ri", "error_code": "INVALID_PASSWORD"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Telefon yoki parol noto‘g‘ri"})
 		return
 	}
 
-	// Generate superadmin JWT tokens (Access: 24h, Refresh: 365d)
-	token, err := h.generateJWT(id.String(), "SUPER_ADMIN", "", "access", 24*time.Hour)
+	// Super-admin sessions: 30-minute access, 7-day refresh; DB version revokes both.
+	token, err := h.generateJWTWithVersion(id.String(), "SUPER_ADMIN", "", "access", 30*time.Minute, authVersion)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to issue auth token"})
 		return
 	}
-	refreshToken, err := h.generateJWT(id.String(), "SUPER_ADMIN", "", "refresh", 365*24*time.Hour)
+	refreshToken, err := h.generateJWTWithVersion(id.String(), "SUPER_ADMIN", "", "refresh", 7*24*time.Hour, authVersion)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to issue refresh token"})
 		return
@@ -428,7 +452,7 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	claims := &middleware.Claims{}
 	token, err := jwt.ParseWithClaims(req.RefreshToken, claims, func(token *jwt.Token) (interface{}, error) {
 		return []byte(h.jwtSecret), nil
-	})
+	}, jwt.WithValidMethods([]string{"HS256"}))
 
 	if err != nil || !token.Valid {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired refresh token"})
@@ -442,19 +466,24 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 
 	// Super Admin refresh
 	if claims.Role == "SUPER_ADMIN" {
-		var exists bool
-		err := db.CentralDB.QueryRow("SELECT EXISTS(SELECT 1 FROM super_admins WHERE id = $1 AND is_deleted = false)", claims.UserID).Scan(&exists)
-		if err != nil || !exists {
+		var authVersion int
+		err := db.CentralDB.QueryRowContext(c.Request.Context(), "SELECT auth_version FROM super_admins WHERE id = $1 AND is_deleted = false", claims.UserID).Scan(&authVersion)
+		c.Header("Cache-Control", "no-store")
+		if err != nil && err != sql.ErrNoRows {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Authentication service unavailable"})
+			return
+		}
+		if err != nil || authVersion < 1 || claims.AuthVersion != authVersion {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Super admin account inactive or deleted"})
 			return
 		}
 
-		newAccessToken, err := h.generateJWT(claims.UserID, claims.Role, claims.SchoolID, "access", 24*time.Hour)
+		newAccessToken, err := h.generateJWTWithVersion(claims.UserID, "SUPER_ADMIN", "", "access", 30*time.Minute, authVersion)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to issue access token"})
 			return
 		}
-		newRefreshToken, err := h.generateJWT(claims.UserID, claims.Role, claims.SchoolID, "refresh", 365*24*time.Hour)
+		newRefreshToken, err := h.generateJWTWithVersion(claims.UserID, "SUPER_ADMIN", "", "refresh", 7*24*time.Hour, authVersion)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to issue refresh token"})
 			return
@@ -510,8 +539,13 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 }
 
 func (h *AuthHandler) generateJWT(userID, role, schoolID, tokenType string, duration time.Duration) (string, error) {
+	return h.generateJWTWithVersion(userID, role, schoolID, tokenType, duration, 0)
+}
+
+func (h *AuthHandler) generateJWTWithVersion(userID, role, schoolID, tokenType string, duration time.Duration, authVersion int) (string, error) {
 	expirationTime := time.Now().Add(duration)
 	claims := &middleware.Claims{
+		AuthVersion: authVersion,
 		UserID:    userID,
 		Role:      role,
 		SchoolID:  schoolID,
@@ -523,4 +557,21 @@ func (h *AuthHandler) generateJWT(userID, role, schoolID, tokenType string, dura
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(h.jwtSecret))
+}
+
+
+// Logout revokes this super-admin's sessions on every device.
+func (h *AuthHandler) LogoutSuperAdmin(c *gin.Context) {
+	result, err := db.CentralDB.ExecContext(c.Request.Context(),
+		"UPDATE super_admins SET auth_version = auth_version + 1, updated_at = NOW() WHERE id = $1 AND auth_version = $2 AND is_deleted = false",
+		c.GetString("userID"), c.GetInt("authVersion"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not revoke sessions; try again"})
+		return
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Session already expired"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "All super-admin sessions revoked"})
 }
