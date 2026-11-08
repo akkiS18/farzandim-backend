@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/farzandim/backend/internal/middleware"
 	"github.com/joho/godotenv"
 )
 
@@ -14,7 +15,10 @@ type Config struct {
 	CentralDBURL        string
 	PGRootURL           string // Administrative connection to run CREATE DATABASE
 	JWTSecret           string
-	AllowedOriginDomain  string // Production domain e.g. farzandim.uz
+	// AllowedOriginDomains is parsed from ALLOWED_ORIGIN_DOMAIN, a comma-separated list of
+	// base domains, e.g. "akademx.uz,farzandim-edu.uz". Each domain and all its subdomains
+	// are allowed as https CORS origins.
+	AllowedOriginDomains []string
 	TelegramBotToken     string
 	FeedbackBotToken     string
 	FeedbackAdminChatIDs []int64
@@ -31,7 +35,9 @@ func LoadConfig() *Config {
 	if len(strings.TrimSpace(jwtSecret)) < 32 || jwtSecret == "super-secret-key" {
 		log.Fatal("JWT_SECRET must be explicitly set to a strong secret of at least 32 bytes")
 	}
-	allowedOriginDomain := getEnv("ALLOWED_ORIGIN_DOMAIN", "")
+	// The platform domains are always allowed (the old and the new one), so CORS keeps working
+	// even if ALLOWED_ORIGIN_DOMAIN is not updated; the env value only adds extra domains.
+	allowedOriginDomains := middleware.ParseAllowedDomains("akademx.uz,farzandim-edu.uz," + getEnv("ALLOWED_ORIGIN_DOMAIN", ""))
 	telegramBotToken := getEnv("TELEGRAM_BOT_TOKEN", "")
 	feedbackBotToken := getEnv("FEEDBACK_BOT_TOKEN", "")
 	adminIDsStr := getEnv("FEEDBACK_ADMIN_CHAT_IDS", "")
@@ -58,7 +64,7 @@ func LoadConfig() *Config {
 		CentralDBURL:         centralDBURL,
 		PGRootURL:            pgRootURL,
 		JWTSecret:            jwtSecret,
-		AllowedOriginDomain:  allowedOriginDomain,
+		AllowedOriginDomains: allowedOriginDomains,
 		TelegramBotToken:     telegramBotToken,
 		FeedbackBotToken:     feedbackBotToken,
 		FeedbackAdminChatIDs: feedbackAdminChatIDs,

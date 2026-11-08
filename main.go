@@ -4,7 +4,6 @@ package main
 
 import (
 	"log"
-	"strings"
 	"time"
 
 	"github.com/farzandim/backend/internal/cache"
@@ -95,52 +94,9 @@ func main() {
 	r := gin.Default()
 	r.Static("/uploads", "./uploads")
 
-	// --- FIXED CORS MIDDLEWARE ---
-	r.Use(func(c *gin.Context) {
-		origin := c.GetHeader("Origin")
-		allowed := false
-
-		// Allow localhost for development
-		if origin == "http://localhost:6500" || origin == "http://localhost:6501" || origin == "http://localhost:6502" ||
-			origin == "http://localhost:3000" || origin == "http://localhost:3001" ||
-			origin == "http://127.0.0.1:6500" || origin == "http://127.0.0.1:6501" || origin == "http://127.0.0.1:6502" {
-			allowed = true
-		}
-
-		// Allow production domains and all subdomains (e.g., akademx.uz, farzandim-edu.uz, and *.akademx.uz / *.farzandim-edu.uz)
-		if origin != "" {
-			allowedDomains := []string{"akademx.uz", "farzandim-edu.uz"}
-			if cfg.AllowedOriginDomain != "" {
-				for _, d := range strings.Split(cfg.AllowedOriginDomain, ",") {
-					trimmed := strings.TrimSpace(d)
-					if trimmed != "" {
-						allowedDomains = append(allowedDomains, trimmed)
-					}
-				}
-			}
-			for _, domain := range allowedDomains {
-				if strings.HasSuffix(origin, domain) {
-					allowed = true
-					break
-				}
-			}
-		}
-
-		if allowed {
-			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
-			c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-			c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-School-ID")
-			c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
-		}
-
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
-			return
-		}
-
-		c.Next()
-	})
-	// --- END CORS FIX ---
+	// CORS: localhost dev origins + https origins on any domain listed in
+	// ALLOWED_ORIGIN_DOMAIN (comma-separated, subdomains included).
+	r.Use(middleware.CORS(cfg.AllowedOriginDomains))
 
 	// Super Admin authentication endpoints
 	// Super-admin creation is available only to an authenticated active super-admin.
