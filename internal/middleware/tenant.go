@@ -25,9 +25,12 @@ func TenantMiddleware() gin.HandlerFunc {
 			}
 		}
 
-		// 2. Fall back to resolving school dynamically by request subdomain
-		if schoolID == "" {
-			subdomain := extractSubdomain(c)
+		// 2. Fall back to resolving school dynamically by request subdomain (skip generic non-school subdomains like games/localhost on login)
+		subdomain := extractSubdomain(c)
+		isLoginPath := strings.HasSuffix(c.Request.URL.Path, "/login")
+		isGenericSubdomain := subdomain == "localhost" || subdomain == "games" || subdomain == "api" || subdomain == "www"
+
+		if schoolID == "" && !(isLoginPath && isGenericSubdomain) {
 			resolvedID, err := db.FindSchoolIDBySubdomain(subdomain)
 			if err == nil && resolvedID != "" {
 				schoolID = resolvedID
@@ -37,7 +40,7 @@ func TenantMiddleware() gin.HandlerFunc {
 		}
 
 		// 3. If still empty and this is a login request, try auto-resolving school by user identifier (phone or passport)
-		if schoolID == "" && strings.HasSuffix(c.Request.URL.Path, "/login") {
+		if schoolID == "" && isLoginPath {
 			bodyBytes, err := io.ReadAll(c.Request.Body)
 			if err == nil && len(bodyBytes) > 0 {
 				c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // restore body for downstream handlers
@@ -46,9 +49,9 @@ func TenantMiddleware() gin.HandlerFunc {
 					DocumentNo string `json:"document_no"`
 				}
 				if json.Unmarshal(bodyBytes, &loginReq) == nil {
-					identifier := loginReq.Phone
+					identifier := loginReq.DocumentNo
 					if identifier == "" {
-						identifier = loginReq.DocumentNo
+						identifier = loginReq.Phone
 					}
 					if identifier != "" {
 						if autoSchoolID, err := db.FindSchoolIDByUserIdentifier(identifier); err == nil && autoSchoolID != "" {
@@ -56,6 +59,12 @@ func TenantMiddleware() gin.HandlerFunc {
 							log.Printf("[TENANT AUTO-RESOLVE] User '%s' auto-routed to school ID '%s'", identifier, autoSchoolID)
 						}
 					}
+				}
+			}
+			// If auto-resolve didn't match a unique school on localhost, fall back to subdomain resolution
+			if schoolID == "" && isGenericSubdomain {
+				if resolvedID, err := db.FindSchoolIDBySubdomain(subdomain); err == nil && resolvedID != "" {
+					schoolID = resolvedID
 				}
 			}
 		}

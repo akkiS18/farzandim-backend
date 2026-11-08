@@ -101,17 +101,28 @@ func main() {
 		allowed := false
 
 		// Allow localhost for development
-		if origin == "http://localhost:6500" || origin == "http://localhost:6501" ||
-			origin == "http://localhost:3000" || origin == "http://localhost:3001" {
+		if origin == "http://localhost:6500" || origin == "http://localhost:6501" || origin == "http://localhost:6502" ||
+			origin == "http://localhost:3000" || origin == "http://localhost:3001" ||
+			origin == "http://127.0.0.1:6500" || origin == "http://127.0.0.1:6501" || origin == "http://127.0.0.1:6502" {
 			allowed = true
 		}
 
-		// Allow production domain and all subdomains (e.g., akademx.uz and *.akademx.uz)
-		productionDomain := cfg.AllowedOriginDomain // This is "akademx.uz" from your .env
-		if productionDomain != "" && origin != "" {
-			// Check if origin ends with akademx.uz (e.g., https://akademx.uz or https://school1.akademx.uz)
-			if strings.HasSuffix(origin, productionDomain) {
-				allowed = true
+		// Allow production domains and all subdomains (e.g., akademx.uz, farzandim-edu.uz, and *.akademx.uz / *.farzandim-edu.uz)
+		if origin != "" {
+			allowedDomains := []string{"akademx.uz", "farzandim-edu.uz"}
+			if cfg.AllowedOriginDomain != "" {
+				for _, d := range strings.Split(cfg.AllowedOriginDomain, ",") {
+					trimmed := strings.TrimSpace(d)
+					if trimmed != "" {
+						allowedDomains = append(allowedDomains, trimmed)
+					}
+				}
+			}
+			for _, domain := range allowedDomains {
+				if strings.HasSuffix(origin, domain) {
+					allowed = true
+					break
+				}
 			}
 		}
 

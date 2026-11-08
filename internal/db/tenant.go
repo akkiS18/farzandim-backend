@@ -277,35 +277,65 @@ func FindSchoolIDBySubdomain(subdomain string) (string, error) {
 	return "", fmt.Errorf("no school database found matching subdomain: %s", subdomain)
 }
 
+// FindSchoolMetaByID returns the school's display name and derived subdomain for a given school UUID
+func FindSchoolMetaByID(schoolID string) (string, string) {
+	if CentralDB == nil || schoolID == "" {
+		return "", ""
+	}
+	var name, connStr string
+	err := CentralDB.QueryRow("SELECT name, db_connection_string FROM schools WHERE id = $1 AND is_deleted = false", schoolID).Scan(&name, &connStr)
+	if err != nil {
+		return "", ""
+	}
+	subdomain := ""
+	if u, err := url.Parse(connStr); err == nil {
+		dbName := strings.TrimPrefix(u.Path, "/")
+		subdomain = strings.TrimPrefix(dbName, "db_f_")
+	}
+	return name, subdomain
+}
+
 // FindSchoolIDByUserIdentifier searches all active school databases for a user matching the phone number or passport
 func FindSchoolIDByUserIdentifier(identifier string) (string, error) {
 	reg := regexp.MustCompile("[^0-9]+")
-	digits := reg.ReplaceAllString(identifier, "")
-	cleanDoc := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(identifier), " ", ""))
+	hasLetters := regexp.MustCompile("(?i)[A-Z]").MatchString(identifier)
+	digits := ""
+	cleanDoc := ""
+	if hasLetters {
+		cleanDoc = strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(identifier), " ", ""))
+	} else {
+		digits = reg.ReplaceAllString(identifier, "")
+		cleanDoc = strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(identifier), " ", ""))
+	}
 
 	if digits == "" && cleanDoc == "" {
 		return "", fmt.Errorf("empty identifier provided")
 	}
 
-	rows, err := CentralDB.Query("SELECT id FROM schools WHERE is_deleted = false ORDER BY created_at ASC")
+	rows, err := CentralDB.Query("SELECT id, db_connection_string FROM schools WHERE is_deleted = false ORDER BY created_at ASC")
 	if err != nil {
 		return "", err
 	}
 	defer rows.Close()
 
-	var schoolIDs []string
+	type schoolEntry struct {
+		id     string
+		isTest bool
+	}
+	var schools []schoolEntry
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err == nil {
-			schoolIDs = append(schoolIDs, id)
+		var id, connStr string
+		if err := rows.Scan(&id, &connStr); err == nil {
+			isTest := strings.Contains(strings.ToLower(connStr), "test_school")
+			schools = append(schools, schoolEntry{id: id, isTest: isTest})
 		}
 	}
 
-	var matchedSchoolID string
-	var matchCount int
+	var matchedIDs []string
+	var nonTestMatchedIDs []string
 
-	for _, sID := range schoolIDs {
-		tenantDB, err := TenantConnManager.GetTenantDB(sID)
+	for _, s := range schools {
+		tenantDB, err := TenantConnManager.GetTenantDB(s.id)
 		if err != nil {
 			continue
 		}
@@ -318,14 +348,19 @@ func FindSchoolIDByUserIdentifier(identifier string) (string, error) {
 			) AND is_deleted = false
 		)`
 		if err := tenantDB.QueryRow(query, digits, cleanDoc).Scan(&exists); err == nil && exists {
-			matchedSchoolID = sID
-			matchCount++
+			matchedIDs = append(matchedIDs, s.id)
+			if !s.isTest {
+				nonTestMatchedIDs = append(nonTestMatchedIDs, s.id)
+			}
 		}
 	}
 
-	if matchCount == 1 {
-		return matchedSchoolID, nil
-	} else if matchCount > 1 {
+	if len(matchedIDs) == 1 {
+		return matchedIDs[0], nil
+	} else if len(matchedIDs) > 1 {
+		if len(nonTestMatchedIDs) == 1 {
+			return nonTestMatchedIDs[0], nil
+		}
 		return "", fmt.Errorf("foydalanuvchi bir nechta maktabda mavjud, iltimos maktabni tanlang")
 	}
 

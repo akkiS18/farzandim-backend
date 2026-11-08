@@ -342,6 +342,15 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 				OR UPPER(TRIM(u.passport)) = $1 
 			) AND u.is_deleted = false`
 		err = tenantDB.QueryRow(query, docNoClean).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull, &docNoNull, &passwordResetRequired)
+		if err == sql.ErrNoRows {
+			if altSchoolID, findErr := db.FindSchoolIDByUserIdentifier(docNoClean); findErr == nil && altSchoolID != "" && altSchoolID != schoolID {
+				if altDB, dbErr := db.TenantConnManager.GetTenantDB(altSchoolID); dbErr == nil {
+					schoolID = altSchoolID
+					tenantDB = altDB
+					err = tenantDB.QueryRow(query, docNoClean).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull, &docNoNull, &passwordResetRequired)
+				}
+			}
+		}
 		if err != nil {
 			if err == sql.ErrNoRows {
 				c.JSON(http.StatusNotFound, gin.H{
@@ -361,6 +370,15 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 			JOIN roles r ON u.role_id = r.id 
 			WHERE (u.phone = $1 OR REGEXP_REPLACE(u.phone, '\D', '', 'g') = $1) AND u.is_deleted = false`
 		err = tenantDB.QueryRow(query, normPhone).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull, &docNoNull, &passwordResetRequired)
+		if err == sql.ErrNoRows {
+			if altSchoolID, findErr := db.FindSchoolIDByUserIdentifier(phoneClean); findErr == nil && altSchoolID != "" && altSchoolID != schoolID {
+				if altDB, dbErr := db.TenantConnManager.GetTenantDB(altSchoolID); dbErr == nil {
+					schoolID = altSchoolID
+					tenantDB = altDB
+					err = tenantDB.QueryRow(query, normPhone).Scan(&userID, &passwordHash, &firstName, &lastName, &roleName, &passportNull, &phoneNull, &docNoNull, &passwordResetRequired)
+				}
+			}
+		}
 		if err != nil {
 			if err == sql.ErrNoRows {
 				c.JSON(http.StatusNotFound, gin.H{
@@ -422,6 +440,8 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 		phone = &phoneNull.String
 	}
 
+	schoolName, schoolSubdomain := db.FindSchoolMetaByID(schoolID)
+
 	c.JSON(http.StatusOK, gin.H{
 		"token":         token,
 		"refresh_token": refreshToken,
@@ -431,6 +451,8 @@ func (h *AuthHandler) LoginTenantUser(c *gin.Context) {
 			"last_name":               lastName,
 			"role":                    roleName,
 			"school_id":               schoolID,
+			"school_name":             schoolName,
+			"school_subdomain":        schoolSubdomain,
 			"passport":                passport,
 			"phone":                   phone,
 			"password_reset_required": passwordResetRequired,
