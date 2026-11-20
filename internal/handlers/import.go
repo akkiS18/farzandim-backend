@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -23,6 +24,49 @@ type ImportHandler struct{}
 
 func NewImportHandler() *ImportHandler {
 	return &ImportHandler{}
+}
+
+// parseImportDate parses standard text date strings as well as numeric Excel serial dates (1900 epoch).
+func parseImportDate(raw string) *time.Time {
+	s := strings.TrimSpace(raw)
+	if s == "" || s == "-" {
+		return nil
+	}
+
+	formats := []string{
+		"2006-01-02",
+		"2006-1-2",
+		"02.01.2006",
+		"2.1.2006",
+		"01.02.2006",
+		"02/01/2006",
+		"2/1/2006",
+		"01/02/2006",
+		"2006/01/02",
+		"2006/1/2",
+		"2006.01.02",
+		"2006.1.2",
+		"02,01,2006",
+		"2,1,2006",
+		"02-01-2006",
+		"2-1-2006",
+		time.RFC3339,
+	}
+	for _, fmtStr := range formats {
+		if parsed, err := time.Parse(fmtStr, s); err == nil {
+			d := time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, time.UTC)
+			return &d
+		}
+	}
+
+	if f, err := strconv.ParseFloat(s, 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) && f >= 10000 && f <= 100000 {
+		if t, err := excelize.ExcelDateToTime(math.Floor(f+1e-7), false); err == nil {
+			d := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+			return &d
+		}
+	}
+
+	return nil
 }
 
 type RowError struct {
@@ -626,16 +670,7 @@ func (h *ImportHandler) ImportStudents(c *gin.Context) {
 		if manzil != "" {
 			addressPtr = &manzil
 		}
-		var birthdate *time.Time
-		if tugilganSanaStr != "" {
-			parsedDate, err := time.Parse("2006-01-02", tugilganSanaStr)
-			if err != nil {
-				parsedDate, err = time.Parse("02.01.2006", tugilganSanaStr)
-			}
-			if err == nil {
-				birthdate = &parsedDate
-			}
-		}
+		birthdate := parseImportDate(tugilganSanaStr)
 
 		var studentID int
 		insertStudentQuery := `
@@ -1739,12 +1774,12 @@ func (h *ImportHandler) ImportHolidays(c *gin.Context) {
 			continue
 		}
 
-		holidayDate, err := time.Parse("2006-01-02", dateStr)
-		if err != nil {
-			// also try Excel numeric date
+		holidayDatePtr := parseImportDate(dateStr)
+		if holidayDatePtr == nil {
 			rowErrors = append(rowErrors, RowError{Row: rowNum, Error: fmt.Sprintf("Sana formati noto'g'ri: '%s', YYYY-MM-DD bo'lishi kerak", dateStr)})
 			continue
 		}
+		holidayDate := *holidayDatePtr
 
 		// Upsert: insert or update if already exists
 		var holidayID int
@@ -1938,23 +1973,9 @@ func (h *ImportHandler) ImportStudentsSmart(c *gin.Context) {
 		}
 
 		// 3. Create Student record
-		var birthdate *time.Time
-		if sRow.BirthDate != "" {
-			if parsed, e := time.Parse("2006-01-02", sRow.BirthDate); e == nil {
-				birthdate = &parsed
-			} else if parsed, e := time.Parse("02.01.2006", sRow.BirthDate); e == nil {
-				birthdate = &parsed
-			}
-		}
+		birthdate := parseImportDate(sRow.BirthDate)
 
-		var enrollmentDate *time.Time
-		if sRow.EnrollmentDate != "" {
-			if parsed, e := time.Parse("2006-01-02", sRow.EnrollmentDate); e == nil {
-				enrollmentDate = &parsed
-			} else if parsed, e := time.Parse("02.01.2006", sRow.EnrollmentDate); e == nil {
-				enrollmentDate = &parsed
-			}
-		}
+		enrollmentDate := parseImportDate(sRow.EnrollmentDate)
 		if enrollmentDate == nil {
 			now := time.Now()
 			enrollmentDate = &now
@@ -2201,25 +2222,7 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 		}
 
 		// Helper to parse dates
-		var birthdatePtr *time.Time
-		if strings.TrimSpace(st.StudentBirthdate) != "" && st.StudentBirthdate != "-" {
-			bdStr := strings.TrimSpace(st.StudentBirthdate)
-			formats := []string{
-				"2006-01-02",
-				"02.01.2006",
-				"01.02.2006",
-				"02/01/2006",
-				"01/02/2006",
-				"2006/01/02",
-				"02,01,2006",
-			}
-			for _, fmtStr := range formats {
-				if parsed, err := time.Parse(fmtStr, bdStr); err == nil {
-					birthdatePtr = &parsed
-					break
-				}
-			}
-		}
+		birthdatePtr := parseImportDate(st.StudentBirthdate)
 
 		cleanDoc := strings.TrimSpace(st.StudentDocumentNo)
 		if cleanDoc == "" || cleanDoc == "-" || strings.EqualFold(cleanDoc, "yo'q") {
@@ -2241,25 +2244,7 @@ func (h *ImportHandler) BatchImportStudentsSmart(c *gin.Context) {
 			addressPtr = &a
 		}
 
-		var enrollmentDatePtr *time.Time
-		if strings.TrimSpace(st.EnrollmentDate) != "" && st.EnrollmentDate != "-" {
-			edStr := strings.TrimSpace(st.EnrollmentDate)
-			formats := []string{
-				"2006-01-02",
-				"02.01.2006",
-				"01.02.2006",
-				"02/01/2006",
-				"01/02/2006",
-				"2006/01/02",
-				"02,01,2006",
-			}
-			for _, fmtStr := range formats {
-				if parsed, err := time.Parse(fmtStr, edStr); err == nil {
-					enrollmentDatePtr = &parsed
-					break
-				}
-			}
-		}
+		enrollmentDatePtr := parseImportDate(st.EnrollmentDate)
 		if enrollmentDatePtr == nil {
 			now := time.Now()
 			enrollmentDatePtr = &now
