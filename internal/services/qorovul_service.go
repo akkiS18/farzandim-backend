@@ -462,3 +462,342 @@ func SuggestBestMatch(className, lastName, firstName string, candidates []Qorovu
 	}
 	return nil
 }
+
+
+// NormalizeClassName exported helper for matching Farzandim class names to Qorovul directions.
+func NormalizeClassName(s string) string {
+	return normalizeClassName(s)
+}
+
+type QorovulTerminalsSummary struct {
+	TotalCount  int `json:"totalCount"`
+	OnlineCount int `json:"onlineCount"`
+}
+
+type QorovulDirection struct {
+	ID        int    `json:"id"`
+	Name      string `json:"name"`
+	TypeID    int    `json:"typeId"`
+	TypeName  string `json:"typeName"`
+	GraphicID int    `json:"graphicId"`
+}
+
+type QorovulGraphic struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+type QorovulAction struct {
+	ID            int64   `json:"id"`
+	PersonID      int     `json:"personId"`
+	DirectionID   int     `json:"directionId"`
+	TypeID        int     `json:"typeId"`
+	IncomingTime  *string `json:"incomingTime"`
+	OutgoingTime  *string `json:"outgoingTime"`
+	LateMinutes   int     `json:"lateMinutes"`
+	EarlyMinutes  int     `json:"earlyMinutes"`
+	IsInside      bool    `json:"isInside"`
+	Date          string  `json:"date"`
+	FirstName     string  `json:"firstname"`
+	LastName      string  `json:"lastname"`
+	DirectionName string  `json:"directionName"`
+	PhotoURL      *string `json:"photoUrl"`
+}
+
+type QorovulAddPersonRequest struct {
+	FirstName   string `json:"firstname"`
+	LastName    string `json:"lastname"`
+	MiddleName  string `json:"middlename,omitempty"`
+	Gender      string `json:"gender"`
+	TypeID      int    `json:"typeId"`
+	DirectionID int    `json:"directionId"`
+	GraphicID   int    `json:"graphicId"`
+}
+
+func (s *QorovulService) doPost(token, path string, bodyObj interface{}) ([]byte, int, error) {
+	payload, err := json.Marshal(bodyObj)
+	if err != nil {
+		return nil, 0, err
+	}
+	req, err := http.NewRequest(http.MethodPost, QorovulBaseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("token", token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	return body, resp.StatusCode, err
+}
+
+// GetValidTokenAndTypes returns a valid Qorovul access token along with student_type_id and teacher_type_id.
+func (s *QorovulService) GetValidTokenAndTypes(db *sql.DB) (string, *int, *int, error) {
+	tok, stType, err := s.GetValidToken(db)
+	if err != nil {
+		return "", stType, nil, err
+	}
+	var teacherTypeID sql.NullInt64
+	_ = db.QueryRow("SELECT teacher_type_id FROM qorovul_settings ORDER BY id ASC LIMIT 1").Scan(&teacherTypeID)
+	var tTypePtr *int
+	if teacherTypeID.Valid {
+		v := int(teacherTypeID.Int64)
+		tTypePtr = &v
+	}
+	return tok, stType, tTypePtr, nil
+}
+
+func (s *QorovulService) GetTerminalsSummary(token string) (*QorovulTerminalsSummary, error) {
+	body, status, err := s.doGet(token, "/organizations/Terminals/GetTerminals", nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("GetTerminals status %d: %s", status, string(body))
+	}
+	var res QorovulTerminalsSummary
+	if err := json.Unmarshal(body, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (s *QorovulService) GetDirections(token string, typeID *int) ([]QorovulDirection, error) {
+	q := url.Values{}
+	q.Set("page", "1")
+	q.Set("pageSize", "200")
+	if typeID != nil && *typeID > 0 {
+		q.Set("typeId", strconv.Itoa(*typeID))
+	}
+	body, status, err := s.doGet(token, "/organizations/Directions/GetAll", q)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("Directions/GetAll status %d: %s", status, string(body))
+	}
+	var wrapped struct {
+		Data []QorovulDirection `json:"data"`
+	}
+	if err := json.Unmarshal(body, &wrapped); err == nil && wrapped.Data != nil {
+		return wrapped.Data, nil
+	}
+	var direct []QorovulDirection
+	if err := json.Unmarshal(body, &direct); err != nil {
+		return nil, err
+	}
+	return direct, nil
+}
+
+func (s *QorovulService) GetGraphics(token string) ([]QorovulGraphic, error) {
+	q := url.Values{}
+	q.Set("page", "1")
+	q.Set("pageSize", "100")
+	body, status, err := s.doGet(token, "/organizations/Graphics/GetAll", q)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("Graphics/GetAll status %d: %s", status, string(body))
+	}
+	var wrapped struct {
+		Data []QorovulGraphic `json:"data"`
+	}
+	if err := json.Unmarshal(body, &wrapped); err == nil && wrapped.Data != nil {
+		return wrapped.Data, nil
+	}
+	var direct []QorovulGraphic
+	if err := json.Unmarshal(body, &direct); err != nil {
+		return nil, err
+	}
+	return direct, nil
+}
+
+// AddPerson creates a new person in Qorovul and returns the created person ID.
+func (s *QorovulService) AddPerson(token string, req QorovulAddPersonRequest) (int, error) {
+	body, status, err := s.doPost(token, "/organizations/Person/Add", req)
+	if err != nil {
+		return 0, err
+	}
+	if status != http.StatusOK && status != http.StatusCreated {
+		return 0, fmt.Errorf("Qorovul Person/Add xatosi (%d): %s", status, strings.TrimSpace(string(body)))
+	}
+	var obj struct {
+		ID   int `json:"id"`
+		Data struct {
+			ID int `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &obj); err == nil {
+		if obj.ID > 0 {
+			return obj.ID, nil
+		}
+		if obj.Data.ID > 0 {
+			return obj.Data.ID, nil
+		}
+	}
+	// Some endpoints return bare integer ID
+	if id, err2 := strconv.Atoi(strings.TrimSpace(string(body))); err2 == nil && id > 0 {
+		return id, nil
+	}
+	return 0, nil
+}
+
+func (s *QorovulService) GetActionsByDate(token, dateStr string, typeID *int) ([]QorovulAction, error) {
+	var all []QorovulAction
+	page := 1
+	for page <= 50 {
+		q := url.Values{}
+		q.Set("date", dateStr)
+		q.Set("page", strconv.Itoa(page))
+		q.Set("pageSize", "100")
+		if typeID != nil && *typeID > 0 {
+			q.Set("typeId", strconv.Itoa(*typeID))
+		}
+		body, status, err := s.doGet(token, "/reports/ActionsByDate/Get", q)
+		if err != nil {
+			return nil, err
+		}
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("ActionsByDate status %d: %s", status, string(body))
+		}
+		var resp struct {
+			Data       []QorovulAction   `json:"data"`
+			Pagination QorovulPagination `json:"pagination"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, err
+		}
+		all = append(all, resp.Data...)
+		if !resp.Pagination.HasNext || len(resp.Data) == 0 {
+			break
+		}
+		page++
+	}
+	return all, nil
+}
+
+func parseActionTimestamp(raw *string) *time.Time {
+	if raw == nil {
+		return nil
+	}
+	s := strings.TrimSpace(*raw)
+	if s == "" || strings.HasPrefix(s, "0001-01-01") {
+		return nil
+	}
+	layouts := []string{
+		"2006-01-02T15:04:05.9999999",
+		"2006-01-02T15:04:05",
+		time.RFC3339,
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return &t
+		}
+	}
+	return nil
+}
+
+// SyncGateAttendanceForTenant pulls Qorovul gate actions for dateStr and upserts them into gate_attendance_logs.
+func (s *QorovulService) SyncGateAttendanceForTenant(db *sql.DB, dateStr string) (int, error) {
+	var isEnabled bool
+	err := db.QueryRow("SELECT is_enabled FROM qorovul_settings ORDER BY id ASC LIMIT 1").Scan(&isEnabled)
+	if err == sql.ErrNoRows || !isEnabled {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+
+	token, _, _, err := s.GetValidTokenAndTypes(db)
+	if err != nil {
+		return 0, err
+	}
+
+	// Build maps of mapped students & teachers
+	studentMap := make(map[int]int) // qorovul_person_id -> student_id
+	if rows, qErr := db.Query("SELECT id, qorovul_person_id FROM students WHERE is_deleted = false AND qorovul_person_id IS NOT NULL"); qErr == nil {
+		for rows.Next() {
+			var stID, qID int
+			if rows.Scan(&stID, &qID) == nil {
+				studentMap[qID] = stID
+			}
+		}
+		rows.Close()
+	}
+
+	teacherMap := make(map[int]int) // qorovul_person_id -> user_id
+	if rows, qErr := db.Query("SELECT id, qorovul_person_id FROM users WHERE is_deleted = false AND qorovul_person_id IS NOT NULL"); qErr == nil {
+		for rows.Next() {
+			var uID, qID int
+			if rows.Scan(&uID, &qID) == nil {
+				teacherMap[qID] = uID
+			}
+		}
+		rows.Close()
+	}
+
+	if len(studentMap) == 0 && len(teacherMap) == 0 {
+		_, _ = db.Exec("UPDATE qorovul_settings SET last_synced_at = NOW()")
+		return 0, nil
+	}
+
+	actions, err := s.GetActionsByDate(token, dateStr, nil)
+	if err != nil {
+		return 0, err
+	}
+
+	synced := 0
+	for _, act := range actions {
+		inTime := parseActionTimestamp(act.IncomingTime)
+		outTime := parseActionTimestamp(act.OutgoingTime)
+		if inTime == nil && outTime == nil && !act.IsInside {
+			continue
+		}
+
+		var stIDPtr *int
+		var uIDPtr *int
+		role := ""
+
+		if stID, ok := studentMap[act.PersonID]; ok {
+			v := stID
+			stIDPtr = &v
+			role = "STUDENT"
+		} else if uID, ok := teacherMap[act.PersonID]; ok {
+			v := uID
+			uIDPtr = &v
+			role = "TEACHER"
+		} else {
+			continue
+		}
+
+		_, uErr := db.Exec(`
+			INSERT INTO gate_attendance_logs (
+				student_id, user_id, qorovul_person_id, person_role, log_date,
+				incoming_time, outgoing_time, late_minutes, early_minutes, is_inside, qorovul_action_id, updated_at
+			)
+			VALUES ($1, $2, $3, $4, $5::date, $6, $7, $8, $9, $10, $11, NOW())
+			ON CONFLICT (qorovul_person_id, log_date) DO UPDATE SET
+				student_id = COALESCE(EXCLUDED.student_id, gate_attendance_logs.student_id),
+				user_id = COALESCE(EXCLUDED.user_id, gate_attendance_logs.user_id),
+				incoming_time = COALESCE(EXCLUDED.incoming_time, gate_attendance_logs.incoming_time),
+				outgoing_time = COALESCE(EXCLUDED.outgoing_time, gate_attendance_logs.outgoing_time),
+				late_minutes = EXCLUDED.late_minutes,
+				early_minutes = EXCLUDED.early_minutes,
+				is_inside = EXCLUDED.is_inside,
+				qorovul_action_id = EXCLUDED.qorovul_action_id,
+				updated_at = NOW()
+		`, stIDPtr, uIDPtr, act.PersonID, role, dateStr, inTime, outTime, act.LateMinutes, act.EarlyMinutes, act.IsInside, act.ID)
+		if uErr == nil {
+			synced++
+		}
+	}
+
+	_, _ = db.Exec("UPDATE qorovul_settings SET last_synced_at = NOW()")
+	return synced, nil
+}

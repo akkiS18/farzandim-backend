@@ -361,12 +361,22 @@ func main() {
 		authTenantGroup.GET("/admin/ai-instructions/history", middleware.RequireRole("ADMIN"), aiInstructionHandler.GetAIInstructionHistory)
 		authTenantGroup.POST("/admin/ai-instructions/revert/:log_id", middleware.RequireRole("ADMIN"), aiInstructionHandler.RevertAIInstruction)
 
-		// Qorovul (Face ID) Integration — School ADMIN only
+		// Qorovul (Face ID) Integration — School ADMIN only (config, mapping, push, live gate)
 		authTenantGroup.GET("/qorovul/settings", middleware.RequireRole("ADMIN"), qorovulHandler.GetSettings)
 		authTenantGroup.PUT("/qorovul/settings", middleware.RequireRole("ADMIN"), qorovulHandler.SaveSettings)
 		authTenantGroup.GET("/qorovul/mapping-data", middleware.RequireRole("ADMIN"), qorovulHandler.GetMappingData)
 		authTenantGroup.PUT("/qorovul/students/:student_id/map", middleware.RequireRole("ADMIN"), qorovulHandler.MapStudent)
 		authTenantGroup.POST("/qorovul/students/map-batch", middleware.RequireRole("ADMIN"), qorovulHandler.BatchMapStudents)
+		authTenantGroup.POST("/qorovul/students/:student_id/push", middleware.RequireRole("ADMIN"), qorovulHandler.PushStudentToQorovul)
+		authTenantGroup.GET("/qorovul/teacher-mapping-data", middleware.RequireRole("ADMIN"), qorovulHandler.GetTeacherMappingData)
+		authTenantGroup.PUT("/qorovul/teachers/:user_id/map", middleware.RequireRole("ADMIN"), qorovulHandler.MapTeacher)
+		authTenantGroup.POST("/qorovul/teachers/map-batch", middleware.RequireRole("ADMIN"), qorovulHandler.BatchMapTeachers)
+		authTenantGroup.GET("/qorovul/live-gate", middleware.RequireRole("ADMIN"), qorovulHandler.GetAdminLiveGate)
+		authTenantGroup.POST("/qorovul/sync-now", middleware.RequireRole("ADMIN"), qorovulHandler.SyncNow)
+
+		// Qorovul Gate Attendance (Teacher Journal & Parent Portal read-only views)
+		authTenantGroup.GET("/qorovul/gate-attendance", middleware.RequireRole("ADMIN", "MAIN_TEACHER", "SUBJECT_TEACHER"), qorovulHandler.GetClassGateAttendance)
+		authTenantGroup.GET("/parent/gate-attendance", middleware.RequireRole("PARENT", "ADMIN"), qorovulHandler.GetParentGateAttendance)
 	}
 
 	// 5. Initialize background scheduler for automated charge plans
@@ -381,6 +391,23 @@ func main() {
 		for range ticker.C {
 			runAllTenantsScheduler(balanceHandler)
 			runWeeklyAIReporterScheduler()
+		}
+	}()
+
+	// 5b. Background Qorovul Face ID gate attendance poller (every 3 minutes during school hours 06:30–19:30 UZ)
+	go func() {
+		qSvc := services.NewQorovulService()
+		loc := time.FixedZone("Asia/Tashkent", 5*3600)
+		ticker := time.NewTicker(3 * time.Minute)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			nowUZ := time.Now().In(loc)
+			mins := nowUZ.Hour()*60 + nowUZ.Minute()
+			if mins < 6*60+30 || mins > 19*60+30 {
+				continue
+			}
+			runQorovulGatePoller(qSvc, nowUZ.Format("2006-01-02"))
 		}
 	}()
 
@@ -485,3 +512,32 @@ func runWeeklyAIReporterScheduler() {
 	}
 }
 
+
+
+func runQorovulGatePoller(qSvc *services.QorovulService, dateStr string) {
+	if db.CentralDB == nil {
+		return
+	}
+	rows, err := db.CentralDB.Query("SELECT id, name FROM schools WHERE is_deleted = false")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			continue
+		}
+		dbConn, err := db.TenantConnManager.GetTenantDB(id)
+		if err != nil {
+			continue
+		}
+		synced, sErr := qSvc.SyncGateAttendanceForTenant(dbConn, dateStr)
+		if sErr != nil {
+			log.Printf("[QorovulPoller] %s sync error: %v", name, sErr)
+		} else if synced > 0 {
+			log.Printf("[QorovulPoller] %s synced %d gate records for %s", name, synced, dateStr)
+		}
+	}
+}
