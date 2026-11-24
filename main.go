@@ -89,6 +89,7 @@ func main() {
 	aiInstructionHandler := handlers.NewAIInstructionHandler()
 	lessonPlanHandler := handlers.NewLessonPlanHandler()
 	reportHandler := handlers.NewReportHandler()
+	qorovulHandler := handlers.NewQorovulHandler()
 
 	// 4. Initialize web server router
 	r := gin.Default()
@@ -359,6 +360,13 @@ func main() {
 		authTenantGroup.PUT("/admin/ai-instructions", middleware.RequireRole("ADMIN"), aiInstructionHandler.UpdateAIInstruction)
 		authTenantGroup.GET("/admin/ai-instructions/history", middleware.RequireRole("ADMIN"), aiInstructionHandler.GetAIInstructionHistory)
 		authTenantGroup.POST("/admin/ai-instructions/revert/:log_id", middleware.RequireRole("ADMIN"), aiInstructionHandler.RevertAIInstruction)
+
+		// Qorovul (Face ID) Integration — School ADMIN only
+		authTenantGroup.GET("/qorovul/settings", middleware.RequireRole("ADMIN"), qorovulHandler.GetSettings)
+		authTenantGroup.PUT("/qorovul/settings", middleware.RequireRole("ADMIN"), qorovulHandler.SaveSettings)
+		authTenantGroup.GET("/qorovul/mapping-data", middleware.RequireRole("ADMIN"), qorovulHandler.GetMappingData)
+		authTenantGroup.PUT("/qorovul/students/:student_id/map", middleware.RequireRole("ADMIN"), qorovulHandler.MapStudent)
+		authTenantGroup.POST("/qorovul/students/map-batch", middleware.RequireRole("ADMIN"), qorovulHandler.BatchMapStudents)
 	}
 
 	// 5. Initialize background scheduler for automated charge plans

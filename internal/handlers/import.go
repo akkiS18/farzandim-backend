@@ -101,6 +101,7 @@ type TenantUserResponse struct {
 	BirthDate          *time.Time `json:"birthdate,omitempty"`
 	EnrollmentDate     *time.Time `json:"enrollment_date,omitempty"`
 	INA                *string    `json:"ina,omitempty"`
+	PhotoURL           *string    `json:"photo_url,omitempty"`
 	Balance            *float64   `json:"balance,omitempty"`
 	IsDeleted          *bool      `json:"is_deleted,omitempty"`
 	DeletedAt          *time.Time `json:"deleted_at,omitempty"`
@@ -164,7 +165,7 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
 			       s.id as student_id, NULL::text as student_name,
-			       u.passport, s.address, s.birthdate, s.ina, s.balance, s.enrollment_date,
+			       u.passport, s.address, s.birthdate, s.ina, s.qorovul_photo_url, s.balance, s.enrollment_date,
 			       s.is_deleted as student_is_deleted, s.deleted_at as student_deleted_at
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
@@ -184,7 +185,7 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
 			       s.id as student_id, NULL::text as student_name,
-			       u.passport, s.address, s.birthdate, s.ina, s.balance, s.enrollment_date,
+			       u.passport, s.address, s.birthdate, s.ina, s.qorovul_photo_url, s.balance, s.enrollment_date,
 			       s.is_deleted as student_is_deleted, s.deleted_at as student_deleted_at
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
@@ -198,7 +199,7 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
 			       s.id as student_id, (su.last_name || ' ' || su.first_name || COALESCE(' ' || su.middle_name, '')) as student_name,
-			       u.passport, NULL::text as address, NULL::date as birthdate, NULL::text as ina, NULL::numeric as balance, NULL::date as enrollment_date,
+			       u.passport, NULL::text as address, NULL::date as birthdate, NULL::text as ina, NULL::text as qorovul_photo_url, NULL::numeric as balance, NULL::date as enrollment_date,
 			       u.is_deleted as student_is_deleted, u.deleted_at as student_deleted_at
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
@@ -221,7 +222,7 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 			SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name, u.role_id, r.name as role_name, u.created_at,
 			       s.class_id, cl.name as class_name,
 			       s.id as student_id, NULL::text as student_name,
-			       u.passport, s.address, s.birthdate, s.ina, s.balance, s.enrollment_date,
+			       u.passport, s.address, s.birthdate, s.ina, s.qorovul_photo_url, s.balance, s.enrollment_date,
 			       COALESCE(s.is_deleted, u.is_deleted) as student_is_deleted, COALESCE(s.deleted_at, u.deleted_at) as student_deleted_at
 			FROM users u
 			JOIN roles r ON u.role_id = r.id
@@ -306,6 +307,7 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		var birthdateNull sql.NullTime
 		var enrollmentDateNull sql.NullTime
 		var inaNull sql.NullString
+		var photoURLNull sql.NullString
 		var balanceNull sql.NullFloat64
 		var isDeletedNull sql.NullBool
 		var deletedAtNull sql.NullTime
@@ -313,7 +315,7 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		err := rows.Scan(
 			&u.ID, &emailNull, &phoneNull, &u.FirstName, &u.LastName, &middleNameNull, &u.RoleID, &u.RoleName, &u.CreatedAt,
 			&classIDNull, &classNameNull, &studentIDNull, &studentNameNull,
-			&passportNull, &addressNull, &birthdateNull, &inaNull, &balanceNull, &enrollmentDateNull,
+			&passportNull, &addressNull, &birthdateNull, &inaNull, &photoURLNull, &balanceNull, &enrollmentDateNull,
 			&isDeletedNull, &deletedAtNull,
 		)
 		if err != nil {
@@ -358,6 +360,9 @@ func (h *ImportHandler) ListUsers(c *gin.Context) {
 		}
 		if inaNull.Valid {
 			u.INA = &inaNull.String
+		}
+		if photoURLNull.Valid && photoURLNull.String != "" {
+			u.PhotoURL = &photoURLNull.String
 		}
 		if balanceNull.Valid {
 			u.Balance = &balanceNull.Float64
